@@ -6,3 +6,4 @@ dist/
 logos/resources/verify/test-results.jsonl
 logos/resources/verify/smoke-results.jsonl
 tmp/
+apps/center/public/
