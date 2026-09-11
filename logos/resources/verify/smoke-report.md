@@ -8,12 +8,12 @@
 |--------|-------|
 | Defined cases | 16 |
 | Executed cases | 16 |
-| Passed | 10 |
+| Passed | 11 |
 | Failed | 2 |
-| Skipped | 4 |
+| Skipped | 3 |
 | Uncovered | 0 |
 | Coverage | 100% |
-| Pass rate | 63% |
+| Pass rate | 69% |
 | **Gate 3.8** | **FAIL** |
 
 ## Failed Cases
@@ -28,5 +28,4 @@
 - SMOKE-core-10
 - SMOKE-core-11
 - SMOKE-core-15
-- SMOKE-core-13
 
