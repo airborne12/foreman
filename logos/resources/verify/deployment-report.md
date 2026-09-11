@@ -9,14 +9,14 @@
 | 项 | 结果 |
 |----|------|
 | 目标环境 | `prod`（中心机 172.17.2.13 + 开发机 10.26.20.3） |
-| 发布版本 | release `20260911140932`，git `8c5bd63` |
+| 发布版本 | release `20260911175917`（含面板），git `8c5bd63` + 面板与部署修正 |
 | 中心服务 | ✅ 已上线，`/healthz` status ok |
 | 中心机 runtime | ✅ `center` 在线（agent:claude / agent:codex / text） |
 | 开发机 runtime | ✅ `dev` 在线（agent:claude / agent:codex / vpn:jira），经反向隧道接入 |
 | 反向隧道 | ✅ `dev` up，reconnects 0 |
 | 数据库迁移 | ✅ `0001_init` 已应用，trust_counters 13 行、source_health 3 行 |
-| 面板 | ❌ 未交付（`GET /` 404），见「未解决风险」 |
-| 飞书通道 | ⏸️ 关闭（中心机未安装 lark-cli） |
+| 面板 | ✅ 已上线（批次 5 交付），`GET /` 200 |
+| 飞书通道 | ⏸️ 关闭（lark-cli 已装，未登录） |
 | Jira 轮询 | ⏸️ 关闭（首次发布不自动拉真实单，需人工打开） |
 | 冒烟测试 | 未运行，需你明确授权（见第六节） |
 
@@ -35,10 +35,10 @@
 | # | 检查 | 结果 |
 |---|------|------|
 | 1 | `/healthz` | ✅ status ok · database ok · scheduler ok · onlineRuntimes 2 |
-| 2 | launchd 单元 | ✅ ai.foreman.center（pid 95739）、ai.foreman.worker（pid 95816）在跑 |
-| 3 | 面板 | ❌ `GET /` 404，面板 SPA 未实现 |
+| 2 | launchd 单元 | ✅ ai.foreman.center（pid 15489）、ai.foreman.worker（pid 15493）在跑 |
+| 3 | 面板 | ✅ `GET /` 200，`<title>foreman</title>`，assets 正常，前端路由可深链 |
 | 4 | 中心 worker | ✅ `center` 在线，6 个并发名额空闲 |
-| 5 | 隧道与开发机 worker | ✅ 隧道 up；`dev` 在线，但标签缺 `build:doris` 与 `repo:*` |
+| 5 | 隧道与开发机 worker | ✅ 隧道 up；`dev` 在线，已登记 `repo:selectdb/selectdb-core`，仍缺 `build:doris` |
 | 6 | 迁移 | ✅ 无 pending，初始数据齐 |
 | 7 | 飞书 | ⏸️ `feishuSubscription: disabled` |
 | 8 | 来源健康 | ⏸️ jira / feishu / github 均为 disabled（未启用） |
@@ -65,12 +65,14 @@
 | 迁移工具 | Prisma Migrate | `Db.migrate()` 应用 `schema.sql` | 批次 1 已把 Prisma 换成 pg 直连（见实现清单） |
 | 发布来源 | 中心机 `git fetch` + `pnpm install` + `pnpm -r build` | 笔记本构建后 rsync 工作树 | foreman 仓库还没有远端；单文件 bundle 让中心机不需要 node_modules |
 | 隧道保活 | 独立 launchd 单元 | 中心启动时由 TunnelManager 拉起并退避重连 | 与 `/api/system/tunnels` 状态接口一致，冒烟才查得到 |
-| 中心机 lark-cli | 部署前置项 | 未安装，飞书关闭 | 需要交互式 `lark-cli auth login --as bot` |
+| 中心机 lark-cli | 部署前置项 | 二进制已装到 `~/bin/lark-cli`，尚未登录 | app secret 不在 keychain，登录是交互式的，须你本人完成 |
 
 ## 六、未解决风险与下一步
 
-1. **面板缺失**：`GET /` 返回 404。M1 的面板 SPA 未实现，目前只能用 CLI 与 REST 操作；冒烟 SMOKE-core-06 必定失败。
-2. **飞书通道关闭**：需在中心机交互式执行 `lark-cli config init` 与 `lark-cli auth login --as bot`，然后把 `~/.foreman/center.yaml` 的 `feishu.enabled` 改 true、填 `owner_open_id` 与 `bot_open_id` 并重启中心。S02 与审批的飞书通道在此之前不可用。
-3. **开发机没有 Doris 克隆**：`dev` 上没找到 selectdb-core 或 doris 工作副本，且家目录所在的 `/mnt/disk1` 只剩 42G。代码类任务会一直排队等 `build:doris`。需要你决定克隆位置（`/mnt/disk11` 3.0T 可用、`/mnt/disk13` 3.2T 可用），再在 `~/.foreman/worker.yaml` 里登记 `repos` 与 `labels`。
+1. **飞书通道关闭**：`~/bin/lark-cli` 已装好，`~/.lark-cli/config.json` 里已有应用 `cli_a94d111224385cb3`，但 app secret 不在 keychain（`keychain entry not found`）。需要你在中心机的交互式终端里补上 secret 并 `lark-cli auth login`，再把 `~/.foreman/center.yaml` 的 `feishu.enabled` 改 true、填 `owner_open_id` 与 `bot_open_id` 并重启中心。
+2. **代码类任务还不会路由到 dev**：selectdb-core 已克隆到 `/mnt/disk15/jiangkai/selectdb-core`（分支 selectdb-cloud-4.0，2.0G），worktree 根目录 `/mnt/disk15/jiangkai/foreman-wt` 已建，`repo:selectdb/selectdb-core` 标签已加。还差 `build:doris`：`/mnt/disk6/common/doris-thirdparties/` 下有 2.1、3.0、3.1、master、automation-20260825 等 6 套预编译 thirdparty，选错会导致编译失败，需要你指定用哪一套，然后
+   `ln -s /mnt/disk6/common/doris-thirdparties/<你选的>/installed /mnt/disk15/jiangkai/selectdb-core/thirdparty/installed`
+   并在 `~/.foreman/worker.yaml` 的 labels 里加 `build:doris`、重启 `foreman-worker`。
+3. **/mnt/disk15 已用 84%**：接近 worker 的 0.85 高水位，worktree 回收会比较频繁。
 4. **Jira 轮询关闭**：确认无误后把 `sources.jira.enabled` 改 true 再重启中心，它会开始按 JQL 拉真实单并建任务。
-5. **冒烟未跑**：`openlogos smoke` 需要你明确授权。现在跑的话，SMOKE-core-06（面板）会失败，SMOKE-core-12/13（飞书、Jira）会因为未启用而失败或跳过。建议先补上面板与 lark-cli 再跑完整冒烟。
+5. **冒烟未跑**：`openlogos smoke` 需要你明确授权。现在跑的话，01–09 这几条应当通过（面板已上线），SMOKE-core-12（飞书）会失败、13（Jira）会跳过，10/11/15（会真实拉起 agent 会话）默认跳过，要跑需 `SMOKE_CORE_LINK=1`。

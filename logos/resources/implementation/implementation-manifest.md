@@ -89,7 +89,7 @@ test/unit/S01.test.ts、S03.test.ts；test/orchestration/S01.test.ts、S03.test.
 
 ### 延后项
 
-- 面板 SPA、`scripts/smoke.sh`。S02/S04 已在批次 4 交付，S06 作废/撤回/信任视图与 S07 ask_user 在批次 3 交付。
+- 无。面板 SPA 在批次 5 交付，`scripts/smoke.sh` 与发布脚本随首次部署交付。
 - worker 的 claude/codex 适配器未在自动化里执行（真实 CLI 属人工用例 ST-S03-18）。
 
 ## 批次 3：S06（审批双通道与信任升级）+ S07（会话进展与线程介入）
@@ -155,3 +155,44 @@ test/orchestration/runner.ts            脚本引擎支持 onResume/sleepSeconds
 | 降级分流卡的 repo_source | S01 EX-12.1 只说卡片降级 | 降级卡不把入库时的 `llm`/`mapping` 下调为 `unresolved` | 代码定位还没跑，不能算「已判定无法确定仓库」 |
 | 调度员响应超时 | Step 30「30 秒内未出现草案」 | 按 EX-30.1 的 60 秒发一次提示，会话不停 | 两处数值不一致时以异常用例 EX-30.1 为准 |
 | 频道会话 cwd | 未规定 | 文本类会话（dispatcher / candidate_scan）用 `/tmp` | 这类会话不需要 worktree |
+
+## 批次 5：面板 SPA（core-02-panel-design.md）
+
+### 范围
+
+- `apps/panel`：Vite + React + TypeScript，构建产物进 `apps/center/public`，由中心在同一个端口 7801 提供
+- 路由（§2.1）：`/inbox`、`/c/:channel`、`/c/:channel/t/:taskKey`、`/runtimes`、`/trust`、`/settings`；history API + 中心侧 SPA 回退
+- 布局（§2.2）：三栏，1180px 以下收起右栏，820px 以下只留中栏
+- 配色与字体按 §1：背景 `#0F172A`、面板 `#1E293B`、行动色 `#22C55E`、待拍板 `#F59E0B`、失败 `#EF4444`；正文 Fira Sans，编号与日志 Fira Code
+- 实时：`/ws/panel` 推送到达即刷新当前视图，断线显示红条并自动重连
+- 鉴权：panelToken 存 localStorage，首屏是 token 门，401 自动回到门
+
+### 各视图
+
+| 视图 | 能做的事 |
+|------|---------|
+| 收件箱 | 分流卡（改档位/仓库/runtime/agent → 按建议执行或按修改执行、否决）、需要输入（回答即送入会话）、失败三选一（重试/换 agent/新会话/放弃）、候选（入库/忽略）；`j`/`k`/`Enter` 快捷键 |
+| 频道 | 消息流、草案卡（创建/取消）、线程列表、口语与斜杠命令输入框，调度员不可用时显示预填命令 |
+| 线程 | 消息流（系统事件、进展、审批卡、产物卡、失败卡、澄清）、右栏任务详情（上下文包、分流卡、任务树、会话与 worktree、产物、待处理审批）、展开会话日志、停止会话、暂停/恢复、按方案实现 |
+| 状态 | runtime 表（在线、标签、会话数、磁盘、版本、心跳）、来源健康度、反向隧道；点行看详情与告警 |
+| 信任 | 13 个动作类型的模式、连续确认、7 天自动执行数、近 4 周人工确认趋势、重置为人工（锁定类型禁用） |
+| 设置 | 只读展示中心配置 |
+
+### 代码结构（增量）
+
+```
+apps/panel/{index.html,vite.config.ts,tsconfig.json,package.json}
+apps/panel/src/{main.tsx,app.tsx,api.ts,styles.css}
+apps/panel/src/views/{Inbox,Channel,Thread,Message,Runtimes,Trust,Settings}.tsx
+apps/center/src/app.ts    mountPanel()：静态资源 + 前端路由回退，/api /ws /mcp /healthz /__test 不被遮蔽
+scripts/build.sh          先构建面板再打三个单文件 bundle
+```
+
+### 与设计的偏离（需要知晓）
+
+| 项 | 设计 | 实现 | 原因 |
+|----|------|------|------|
+| 登录 | 「登录后收件箱可见」 | 输入 panelToken 的门，token 存 localStorage | M1 没有账号体系，中心只认一个 panelToken |
+| 设置页 | 可改来源频道、路由默认值、并发、表情、Jira 映射 | 只读展示 | 中心尚无写配置的端点，改配置仍是编辑 center.yaml 后重启 |
+| 草案卡 | 已确认的草案不应再显示按钮 | 历史消息里的草案卡按钮仍在，点了会 409 | 消息 payload 没带草案状态；错误会以红条提示 |
+| 字体 | Fira Sans / Fira Code | 用同名字体，未安装时退回系统字体栈 | 内网环境不从公网加载字体 |

@@ -4,9 +4,11 @@
  */
 import { Hono } from 'hono';
 import { serve, type ServerType } from '@hono/node-server';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { resolve, extname } from 'node:path';
 import pino, { type Logger } from 'pino';
 import { ApiError, HEARTBEAT_SECONDS, type CenterConfig } from '@foreman/shared';
-import { Db } from './db.js';
+import { Db, findRepoRoot } from './db.js';
 import { SystemClock, FakeClock, type Clock } from './clock.js';
 import { EventBus } from './events.js';
 import { FakeFeishu, LarkCliFeishu, type FeishuAdapter } from './adapters/feishu.js';
@@ -157,7 +159,31 @@ export async function createApp(config: CenterConfig, opts?: { clock?: Clock; fe
   hono.route('/', mcpRoutes(ctx));
   hono.route('/', channelRoutes(ctx));
   if (config.test_mode) hono.route('/', testRoutes(ctx));
+  mountPanel(hono, log);
   return ctx;
+}
+
+/** 面板 SPA（apps/panel 构建到 apps/center/public）：静态资源 + 前端路由回退到 index.html */
+const MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2', '.map': 'application/json',
+};
+export function mountPanel(hono: Hono, log: Logger, dir?: string) {
+  const publicDir = dir ?? resolve(findRepoRoot(), 'apps/center/public');
+  if (!existsSync(resolve(publicDir, 'index.html'))) { log.warn({ publicDir }, '面板产物不存在，/ 不可用（先跑 pnpm --filter @foreman/panel build）'); return; }
+  hono.get('*', async (c, next) => {
+    const p = c.req.path;
+    if (p.startsWith('/api') || p.startsWith('/ws') || p.startsWith('/mcp') || p.startsWith('/__test') || p === '/healthz') return next();
+    let file = resolve(publicDir, p === '/' ? 'index.html' : p.replace(/^\/+/, ''));
+    if (!file.startsWith(publicDir) || !existsSync(file) || statSync(file).isDirectory()) file = resolve(publicDir, 'index.html');
+    const body = readFileSync(file);
+    const isAsset = file.includes('/assets/');
+    return c.body(body as any, 200, {
+      'content-type': MIME[extname(file)] ?? 'application/octet-stream',
+      'cache-control': isAsset ? 'public, max-age=31536000, immutable' : 'no-cache',
+    });
+  });
 }
 
 export async function startApp(config: CenterConfig, opts?: Parameters<typeof createApp>[1] & { port?: number; host?: string }): Promise<StartedApp> {

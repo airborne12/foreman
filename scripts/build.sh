@@ -20,8 +20,10 @@ build_one() {
   printf '  %-22s %s\n' "$out" "$(du -h "apps/$app/dist/$out" | cut -f1)"
 }
 
+echo "构建面板 SPA（apps/panel → apps/center/public）"
+( cd "$ROOT/apps/panel" && ./node_modules/.bin/vite build 2>&1 | tail -4 )
+
 echo "构建产物："
 build_one center center.mjs
 build_one worker foreman-worker.mjs
 build_one cli foreman.mjs
-echo "面板 SPA 尚未实现（批次 1–4 未交付），本次发布不含 apps/center/public"
