@@ -1,0 +1,227 @@
+{
+  "$schema": "./core-00-format.schema.json",
+  "scenario": "S01",
+  "name": "Jira 单自动入库并生成分流卡",
+  "source": "logos/resources/prd/3-technical-plan/2-scenario-implementation/core-S01-jira-intake.md",
+  "baseUrl": "{{env.CENTER_URL}}",
+  "auth": { "panelToken": "{{env.FOREMAN_PANEL_TOKEN}}", "workerToken": "{{env.FOREMAN_TOKEN}}" },
+  "dependencies": [
+    { "dependency": "Jira Server", "strategy": "mock-service", "config": "本地 fake Jira 实现 search / issue / comment，测试 worker 的 JIRA_URL 指向它", "handle": "jira" },
+    { "dependency": "Claude Code CLI", "strategy": "mock-service", "config": "假 claude 脚本模拟 --bg / agents --json / logs / --bg --resume，并按时间线调用 MCP 工具", "handle": "claude" },
+    { "dependency": "Codex CLI", "strategy": "mock-service", "config": "假 codex 脚本模拟 exec / exec resume", "handle": "codex" },
+    { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "FOREMAN_LARK_CLI 指向假 lark-cli：event +subscribe 回放 NDJSON，im 子命令写 JSON 文件", "handle": "lark" },
+    { "dependency": "ssh 反向隧道", "strategy": "env-disable", "config": "测试中所有 runtime 使用 transport: direct；隧道管理器单测用假 ssh", "handle": "ssh" }
+  ],
+  "presets": {
+    "dev-online": [
+      { "step": "setup", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core", "repo:apache/doris", "vpn:jira"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": ["jira-poll", "jira-lookup"] } }
+    ],
+    "jira-cir-20001": [
+      { "step": "setup", "action": "mock.set", "mock": { "dependency": "Jira Server", "strategy": "mock-service", "config": "fake Jira" }, "args": { "handle": "jira", "issues": [{ "key": "CIR-20001", "summary": "ngram 索引 LIKE 偶发超时", "project": "CIR", "component": "BE/index", "version": "cloud-4.1.3", "priority": "High", "assignee": "jiangkai", "updated": "{{now}}" }] } }
+    ],
+    "claude-triage": [
+      { "step": "setup", "action": "mock.set", "mock": { "dependency": "Claude Code CLI", "strategy": "mock-service", "config": "fake claude 脚本" }, "args": { "handle": "claude", "script": [{ "tool": "get_task" }, { "tool": "deliver", "arguments": { "artifacts": [{ "kind": "triage", "tier": "fix", "effort": "small", "repo": { "name": "selectdb/selectdb-core", "confidence": 0.9 }, "suggestedPath": "透传 timeout 并补 UT", "codeLocations": [{ "file": "be/src/olap/rowset/segment_v2/ngram_index_reader.cpp", "line": 88, "why": "timeout 未透传" }] }] } }, { "exit": 0 }] } }
+    ],
+    "clock": [
+      { "step": "setup", "action": "clock.freeze" }
+    ]
+  },
+  "cases": [
+    {
+      "id": "ST-S01-01",
+      "title": "新分配的 Jira 单从轮询到分流卡与飞书推送",
+      "covers": "Step 1→31",
+      "kind": "main",
+      "use": ["clock", "dev-online", "jira-cir-20001", "claude-triage"],
+      "steps": [
+        { "step": "Step 1", "action": "scheduler.tick", "args": { "job": "jira-poll" } },
+        { "step": "Step 4-5", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "job.run", "match": { "payload.kind": "jira-poll" } }, "assert": [{ "path": "payload.args.jql", "contains": "assignee = currentUser()" }], "extract": { "jobId": "id" } },
+        { "step": "Step 6-8", "action": "runtime.reply", "mock": { "dependency": "Jira Server", "strategy": "mock-service", "config": "fake Jira search" }, "args": { "name": "dev", "type": "job.result", "ref": "{{jobId}}", "payload": { "ok": true, "result": { "issues": "{{mock.jira.issues}}", "fetchedAt": "{{now}}" } } } },
+        { "step": "Step 10-11", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks?rootOnly=true" }, "assert": [{ "path": "body.items[0].source.ref", "equals": "CIR-20001" }, { "path": "body.items[0].repo.source", "equals": "mapping" }] }, "extract": { "taskKey": "body.items[0].key" } },
+        { "step": "Step 12-14", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create", "match": { "payload.taskKey": "{{taskKey}}" } }, "extract": { "wtCmd": "id" } },
+        { "step": "Step 14", "action": "runtime.reply", "args": { "name": "dev", "type": "worktree.ready", "ref": "{{wtCmd}}", "payload": { "taskKey": "{{taskKey}}", "path": "/tmp/fx/wt/{{taskKey}}", "branchName": "foreman/{{taskKey}}", "reused": false } } },
+        { "step": "Step 15-17", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start", "match": { "payload.kind": "code_locate" } }, "assert": [{ "path": "payload.mcp.url", "contains": "/mcp" }, { "path": "payload.env.ANTHROPIC_API_KEY", "exists": false }], "extract": { "sessionId": "payload.sessionId", "startCmd": "id" } },
+        { "step": "Step 18-19", "action": "runtime.reply", "args": { "name": "dev", "type": "session.started", "ref": "{{startCmd}}", "payload": { "sessionId": "{{sessionId}}", "agentSessionId": "fake-1", "startedAt": "{{now}}" } } },
+        { "step": "Step 20-23", "action": "mcp.expectCall", "args": { "taskKey": "{{taskKey}}", "tool": "deliver" } },
+        { "step": "Step 24-26", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{ "path": "body.approvals[0].actionType", "equals": "triage_confirm" }, { "path": "body.approvals[0].taskKey", "equals": "{{taskKey}}" }, { "path": "body.approvals[0].payload.degraded", "equals": false }, { "path": "body.approvals[0].payload.codeLocations", "minLength": 1 }], "extract": { "approvalKey": "body.approvals[0].key" } },
+        { "step": "Step 24", "method": "GET", "url": "/api/tasks/{{taskKey}}", "expected_status": 200, "assert": [{ "path": "body.state", "equals": "pending_decision" }, { "path": "body.contextPack.jira.key", "equals": "CIR-20001" }] },
+        { "step": "Step 27-31", "action": "mock.expect", "mock": { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "fake lark-cli im +messages-send 写 JSON" }, "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "待拍板" } }, "extract": { "feishuMsgId": "message_id" } },
+        { "step": "Step 31", "method": "GET", "url": "/api/approvals/{{approvalKey}}", "expected_status": 200, "assert": [{ "path": "body.feishuMessageId", "equals": "{{feishuMsgId}}" }] }
+      ]
+    },
+    {
+      "id": "ST-S01-02",
+      "title": "重复分配不重复建任务",
+      "covers": "Step 10, EX-10.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "jira-cir-20001", "claude-triage"],
+      "setup": [
+        { "step": "setup", "action": "note", "args": { "text": "先跑通一次 ST-S01-01 的入库（运行器以 include 复用），得到 taskKey" } },
+        { "step": "setup", "action": "db.seed", "args": { "table": "source_items", "rows": [{ "source_type": "jira", "external_id": "CIR-20001", "task_id": "{{db:tasks.id where key='{{taskKey}}'}}" }] } }
+      ],
+      "steps": [
+        { "step": "Step 1-9", "action": "mock.set", "args": { "handle": "jira", "issues[0].assignee": "zhangsan" } },
+        { "step": "Step 1", "action": "scheduler.tick", "args": { "job": "jira-poll" } },
+        { "step": "Step 1-9", "action": "mock.set", "args": { "handle": "jira", "issues[0].assignee": "jiangkai", "issues[0].updated": "{{now+60s}}" } },
+        { "step": "Step 1", "action": "scheduler.tick", "args": { "job": "jira-poll" } },
+        { "step": "Step 10", "method": "GET", "url": "/api/tasks?rootOnly=true", "expected_status": 200, "assert": [{ "path": "body.total", "equals": 1 }] },
+        { "step": "Step 10", "action": "db.assert", "args": { "sql": "select count(*) as n from events where type='source.reassigned'" }, "assert": [{ "path": "rows[0].n", "gte": 1 }] },
+        { "step": "Step 24", "method": "GET", "url": "/api/approvals?taskKey={{taskKey}}&actionType=triage_confirm", "expected_status": 200, "assert": [{ "path": "body.total", "equals": 1 }] }
+      ]
+    },
+    {
+      "id": "ST-S01-03",
+      "title": "无 vpn:jira runtime 时作业排队并在上线后补跑",
+      "covers": "EX-2.1",
+      "kind": "exception",
+      "use": ["clock", "jira-cir-20001", "claude-triage"],
+      "steps": [
+        { "step": "Step 1-2", "action": "scheduler.tick", "args": { "job": "jira-poll" } },
+        { "step": "Step 1-2", "action": "scheduler.tick", "args": { "job": "jira-poll" } },
+        { "step": "EX-2.1", "action": "db.assert", "args": { "sql": "select count(*) as n from jobs where kind='jira-poll' and status='queued'" }, "assert": [{ "path": "rows[0].n", "equals": 1 }] },
+        { "step": "EX-2.1", "method": "GET", "url": "/api/system/sources", "expected_status": 200, "assert": [{ "path": "body.items[?(@.source=='jira')].status", "equals": "no_runtime" }] },
+        { "step": "EX-2.1", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["vpn:jira", "build:doris", "agent:claude"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 } }, "repos": {}, "capabilities": ["jira-poll"] } },
+        { "step": "Step 4-5", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "job.run", "match": { "payload.kind": "jira-poll" } }, "timeoutMs": 5000 },
+        { "step": "EX-2.1", "action": "db.assert", "args": { "sql": "select watermark from source_health where source='jira'" }, "assert": [{ "path": "rows[0].watermark", "equals": null }] }
+      ]
+    },
+    {
+      "id": "ST-S01-04",
+      "title": "Jira 不可达三次后告警一次",
+      "covers": "EX-6.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online"],
+      "steps": [
+        { "step": "Step 6", "action": "mock.set", "mock": { "dependency": "Jira Server", "strategy": "mock-service", "config": "fake Jira 返回 503" }, "args": { "handle": "jira", "failWith": 503 } },
+        { "step": "Step 1", "action": "scheduler.tick", "args": { "job": "jira-poll" } },
+        { "step": "Step 4-8", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "job.run" }, "extract": { "j1": "id" } },
+        { "step": "Step 8", "action": "runtime.reply", "args": { "name": "dev", "type": "job.result", "ref": "{{j1}}", "payload": { "ok": false, "error": { "code": "SOURCE_UNREACHABLE", "message": "503" } } } },
+        { "step": "Step 1", "action": "clock.advance", "args": { "minutes": 5 } },
+        { "step": "Step 4-8", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "job.run" }, "extract": { "j2": "id" } },
+        { "step": "Step 8", "action": "runtime.reply", "args": { "name": "dev", "type": "job.result", "ref": "{{j2}}", "payload": { "ok": false, "error": { "code": "SOURCE_UNREACHABLE", "message": "503" } } } },
+        { "step": "Step 1", "action": "clock.advance", "args": { "minutes": 5 } },
+        { "step": "Step 4-8", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "job.run" }, "extract": { "j3": "id" } },
+        { "step": "Step 8", "action": "runtime.reply", "args": { "name": "dev", "type": "job.result", "ref": "{{j3}}", "payload": { "ok": false, "error": { "code": "SOURCE_UNREACHABLE", "message": "503" } } } },
+        { "step": "EX-6.1", "method": "GET", "url": "/api/system/sources", "expected_status": 200, "assert": [{ "path": "body.items[?(@.source=='jira')].consecutiveFailures", "equals": 3 }, { "path": "body.items[?(@.source=='jira')].status", "equals": "unreachable" }] },
+        { "step": "EX-6.1", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "[告警]" } } },
+        { "step": "EX-6.1", "action": "clock.advance", "args": { "minutes": 5 } },
+        { "step": "Step 4-8", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "job.run" }, "extract": { "j4": "id" } },
+        { "step": "Step 8", "action": "runtime.reply", "args": { "name": "dev", "type": "job.result", "ref": "{{j4}}", "payload": { "ok": false, "error": { "code": "SOURCE_UNREACHABLE", "message": "503" } } } },
+        { "step": "EX-6.1", "action": "db.assert", "args": { "sql": "select count(*) as n from notifications where kind='alert' and ref_type='source'" }, "assert": [{ "path": "rows[0].n", "equals": 1 }] }
+      ]
+    },
+    {
+      "id": "ST-S01-05",
+      "title": "无法推断目标仓库的单以待确认卡进入收件箱",
+      "covers": "EX-11.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online"],
+      "setup": [
+        { "step": "setup", "action": "mock.set", "args": { "handle": "jira", "issues": [{ "key": "DORIS-300", "summary": "unknown repo", "project": "DORIS", "assignee": "jiangkai", "updated": "{{now}}" }] } },
+        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "get_task" }, { "tool": "deliver", "arguments": { "artifacts": [{ "kind": "triage", "tier": "plan", "effort": "medium", "repo": { "name": null, "confidence": 0.5, "candidates": ["apache/doris", "selectdb/selectdb-core"] }, "suggestedPath": "先确认仓库" }] } }, { "exit": 0 }] } }
+      ],
+      "steps": [
+        { "step": "Step 1-23", "action": "note", "args": { "text": "复用 ST-S01-01 的 Step 1–23 驱动序列（运行器 include），仓库映射对 DORIS 缺失" } },
+        { "step": "Step 11", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks?rootOnly=true" }, "assert": [{ "path": "body.items[0].repo.source", "equals": "unresolved" }] }, "extract": { "taskKey": "body.items[0].key" } },
+        { "step": "Step 24-26", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/inbox" }, "assert": [{ "path": "body.approvals[0].payload.repo.source", "equals": "unresolved" }, { "path": "body.approvals[0].payload.repo.candidates", "minLength": 1 }] }, "extract": { "approvalKey": "body.approvals[0].key", "bodyHash": "body.approvals[0].bodyHash" } },
+        { "step": "EX-11.1 → S03 EX-6.1", "method": "POST", "url": "/api/approvals/{{approvalKey}}/decide", "body": { "decision": "approve", "bodyHash": "{{bodyHash}}" }, "expected_status": 422, "assert": [{ "path": "body.code", "equals": "REPO_REQUIRED" }] }
+      ]
+    },
+    {
+      "id": "ST-S01-06",
+      "title": "开发机离线时出降级卡，上线后补齐",
+      "covers": "EX-12.1",
+      "kind": "exception",
+      "use": ["clock", "jira-cir-20001", "claude-triage"],
+      "setup": [
+        { "step": "setup", "action": "runtime.register", "args": { "name": "poller", "transport": "direct", "labels": ["vpn:jira"], "agents": {}, "repos": {}, "capabilities": ["jira-poll"] } }
+      ],
+      "steps": [
+        { "step": "Step 1-9", "action": "scheduler.tick", "args": { "job": "jira-poll" } },
+        { "step": "Step 4-5", "action": "runtime.expectCommand", "args": { "name": "poller", "type": "job.run" }, "extract": { "jobId": "id" } },
+        { "step": "Step 8", "action": "runtime.reply", "args": { "name": "poller", "type": "job.result", "ref": "{{jobId}}", "payload": { "ok": true, "result": { "issues": "{{mock.jira.issues}}", "fetchedAt": "{{now}}" } } } },
+        { "step": "EX-12.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/inbox" }, "assert": [{ "path": "body.approvals[0].payload.degraded", "equals": true }, { "path": "body.approvals[0].payload.degradedReason", "contains": "离线" }] }, "extract": { "approvalKey": "body.approvals[0].key", "taskKey": "body.approvals[0].taskKey" } },
+        { "step": "EX-12.1", "action": "db.assert", "args": { "sql": "select count(*) as n from jobs where kind='code-locate' and status='queued'" }, "assert": [{ "path": "rows[0].n", "equals": 1 }] },
+        { "step": "EX-12.1", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": [] } },
+        { "step": "Step 12-23", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create" }, "extract": { "wtCmd": "id" } },
+        { "step": "Step 14", "action": "runtime.reply", "args": { "name": "dev", "type": "worktree.ready", "ref": "{{wtCmd}}", "payload": { "taskKey": "{{taskKey}}", "path": "/tmp/fx/wt/{{taskKey}}", "branchName": "foreman/{{taskKey}}", "reused": false } } },
+        { "step": "Step 15-19", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "extract": { "sessionId": "payload.sessionId", "startCmd": "id" } },
+        { "step": "Step 18-19", "action": "runtime.reply", "args": { "name": "dev", "type": "session.started", "ref": "{{startCmd}}", "payload": { "sessionId": "{{sessionId}}", "agentSessionId": "fake-2", "startedAt": "{{now}}" } } },
+        { "step": "Step 22-24", "action": "mcp.expectCall", "args": { "taskKey": "{{taskKey}}", "tool": "deliver" } },
+        { "step": "EX-12.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/approvals/{{approvalKey}}" }, "assert": [{ "path": "body.payload.degraded", "equals": false }, { "path": "body.payload.codeLocations", "minLength": 1 }, { "path": "body.status", "equals": "pending" }] } },
+        { "step": "EX-12.1", "method": "GET", "url": "/api/approvals?taskKey={{taskKey}}&actionType=triage_confirm", "expected_status": 200, "assert": [{ "path": "body.total", "equals": 1 }] },
+        { "step": "EX-12.1", "action": "db.assert", "args": { "sql": "select count(*) as n from events where type='thread.event' and payload->>'text' like '%代码定位已补齐%'" }, "assert": [{ "path": "rows[0].n", "equals": 1 }] }
+      ]
+    },
+    {
+      "id": "ST-S01-07",
+      "title": "agent 启动失败后换家重试，再失败走降级卡",
+      "covers": "EX-17.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "jira-cir-20001"],
+      "steps": [
+        { "step": "Step 1-14", "action": "note", "args": { "text": "复用 ST-S01-01 Step 1–14（include），到 worktree.ready 为止" } },
+        { "step": "Step 15-17", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "extract": { "c1": "id", "s1": "payload.sessionId", "a1": "payload.agent" } },
+        { "step": "EX-17.1", "action": "runtime.reply", "args": { "name": "dev", "type": "error", "ref": "{{c1}}", "payload": { "code": "AGENT_START_FAILED", "message": "exit 1", "retryable": true } } },
+        { "step": "EX-17.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "assert": [{ "path": "payload.agent", "notEquals": "{{a1}}" }], "extract": { "c2": "id" } },
+        { "step": "EX-17.1", "action": "runtime.reply", "args": { "name": "dev", "type": "error", "ref": "{{c2}}", "payload": { "code": "AGENT_START_FAILED", "message": "exit 1", "retryable": true } } },
+        { "step": "EX-17.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/inbox" }, "assert": [{ "path": "body.approvals[0].payload.degraded", "equals": true }] }, "extract": { "taskKey": "body.approvals[0].taskKey" } },
+        { "step": "EX-17.1", "action": "db.assert", "args": { "sql": "select count(*) as n, max(attempt) as att from sessions where state='failed' and task_id=(select id from tasks where key='{{taskKey}}')" }, "assert": [{ "path": "rows[0].n", "equals": 2 }, { "path": "rows[0].att", "equals": 2 }] },
+        { "step": "EX-17.1", "action": "db.assert", "args": { "sql": "select state from worktrees where task_id=(select id from tasks where key='{{taskKey}}')" }, "assert": [{ "path": "rows[0].state", "equals": "ready" }] }
+      ]
+    },
+    {
+      "id": "ST-S01-08",
+      "title": "代码定位会话 15 分钟未 deliver 视为超时",
+      "covers": "EX-22.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "jira-cir-20001"],
+      "setup": [
+        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "get_task" }, { "sleepForever": true }] } }
+      ],
+      "steps": [
+        { "step": "Step 1-19", "action": "note", "args": { "text": "复用 ST-S01-01 Step 1–19（include），会话已 started" } },
+        { "step": "EX-22.1", "action": "clock.advance", "args": { "minutes": 15 } },
+        { "step": "EX-22.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.stop" }, "assert": [{ "path": "payload.reason", "equals": "timeout" }] },
+        { "step": "EX-22.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/inbox" }, "assert": [{ "path": "body.approvals[0].payload.degraded", "equals": true }, { "path": "body.approvals[0].payload.degradedReason", "matches": "失败|超时" }] }, "extract": { "taskKey": "body.approvals[0].taskKey" } },
+        { "step": "EX-22.1", "method": "GET", "url": "/api/tasks/{{taskKey}}", "expected_status": 200, "assert": [{ "path": "body.sessions[0].state", "in": ["stopped", "failed"] }] }
+      ]
+    },
+    {
+      "id": "ST-S01-09",
+      "title": "飞书发送失败不影响审批存在",
+      "covers": "EX-28.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "jira-cir-20001", "claude-triage"],
+      "setup": [
+        { "step": "setup", "action": "mock.set", "mock": { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "fake lark-cli 发送失败" }, "args": { "handle": "lark", "failSend": true } }
+      ],
+      "steps": [
+        { "step": "Step 1-26", "action": "note", "args": { "text": "复用 ST-S01-01 Step 1–26（include）" } },
+        { "step": "Step 28 / EX-28.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/inbox" }, "assert": [{ "path": "body.approvals[0].feishuMessageId", "equals": null }, { "path": "body.approvals[0].status", "equals": "pending" }] } },
+        { "step": "EX-28.1", "action": "clock.advance", "args": { "minutes": 5 } },
+        { "step": "EX-28.1", "action": "clock.advance", "args": { "minutes": 5 } },
+        { "step": "EX-28.1", "action": "clock.advance", "args": { "minutes": 5 } },
+        { "step": "EX-28.1", "action": "db.assert", "args": { "sql": "select status, attempts from notifications where kind='approval' order by created_at desc limit 1" }, "assert": [{ "path": "rows[0].status", "equals": "failed" }, { "path": "rows[0].attempts", "equals": 3 }] }
+      ]
+    },
+    {
+      "id": "ST-S01-10",
+      "title": "当日推送超限改为整点合并",
+      "covers": "EX-28.2",
+      "kind": "boundary",
+      "use": ["clock", "dev-online", "jira-cir-20001", "claude-triage"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "notifications", "rows": "{{fixture:notifications.sent_today(kind='approval', count=30)}}" } }
+      ],
+      "steps": [
+        { "step": "Step 1-26", "action": "note", "args": { "text": "复用 ST-S01-01 Step 1–26（include）" } },
+        { "step": "EX-28.2", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/inbox" }, "assert": [{ "path": "body.approvals[0].feishuDeferred", "equals": true }] } },
+        { "step": "EX-28.2", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "待拍板" }, "expectNone": true, "timeoutMs": 1000 } },
+        { "step": "EX-28.2", "action": "clock.advance", "args": { "toNextHour": true } },
+        { "step": "EX-28.2", "action": "scheduler.tick", "args": { "job": "feishu-digest" } },
+        { "step": "EX-28.2", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "你有 1 项待拍板" } } }
+      ]
+    }
+  ]
+}

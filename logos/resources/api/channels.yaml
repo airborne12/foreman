@@ -1,0 +1,233 @@
+openapi: 3.1.0
+info:
+  title: "foreman API — channels（频道、频道消息、线程列表）"
+  version: 0.1.0
+  description: "来源：S04（口语派活）、S02 Step 16（frontend 线程列表）。频道由用户自建；来源默认频道 jira、feishu 在首次入库时自动创建。"
+servers:
+  - url: http://127.0.0.1:7801
+security:
+  - panelToken: []
+tags:
+  - name: channels
+  - name: channel-messages
+
+paths:
+  /api/channels:
+    get:
+      operationId: listChannels
+      tags: [channels]
+      summary: "频道列表（含未读与待拍板计数）"
+      description: "来源：面板左栏（Phase 2 2.2）、S04 Step 5。"
+      responses:
+        '200':
+          description: "频道列表"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Channel' }
+    post:
+      operationId: createChannel
+      tags: [channels]
+      summary: "新建频道"
+      description: "来源：S04 Step 2 → Step 5。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug]
+              properties:
+                slug:
+                  type: string
+                  pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+                  maxLength: 40
+                  description: "小写字母数字加连字符"
+                title: { type: string, maxLength: 80 }
+      responses:
+        '201':
+          description: "已创建"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+        '409':
+          description: "CHANNEL_EXISTS（S04 EX-4.1）"
+          content:
+            application/json:
+              schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
+        '422': { $ref: 'tasks.yaml#/components/responses/ValidationError' }
+
+  /api/channels/{slug}:
+    parameters:
+      - $ref: '#/components/parameters/slug'
+    get:
+      operationId: getChannel
+      tags: [channels]
+      summary: "频道概况（进行中任务数、待拍板数、调度员会话状态）"
+      description: "来源：面板右栏频道概况（Phase 2 2.2）。"
+      responses:
+        '200':
+          description: "频道"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+        '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
+    patch:
+      operationId: updateChannel
+      tags: [channels]
+      summary: "改名"
+      description: "来源：来源默认频道可改名（Phase 2 2.2）。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, maxLength: 80 }
+      responses:
+        '200':
+          description: "已更新"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+        '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
+
+  /api/channels/{slug}/threads:
+    parameters:
+      - $ref: '#/components/parameters/slug'
+    get:
+      operationId: listChannelThreads
+      tags: [channels]
+      summary: "频道内线程（根任务）列表"
+      description: "来源：S02 Step 16、S04 Step 35。按最近活动倒序。"
+      parameters:
+        - $ref: 'tasks.yaml#/components/parameters/state'
+        - $ref: 'tasks.yaml#/components/parameters/page'
+        - $ref: 'tasks.yaml#/components/parameters/perPage'
+      responses:
+        '200':
+          description: "线程列表"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: 'tasks.yaml#/components/schemas/TaskSummary' }
+                  total: { type: integer }
+        '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
+
+  /api/channels/{slug}/messages:
+    parameters:
+      - $ref: '#/components/parameters/slug'
+    get:
+      operationId: listChannelMessages
+      tags: [channel-messages]
+      summary: "频道消息流（用户消息、草案卡、澄清、系统提示）"
+      description: "来源：S04 Step 17、Step 30。线程内消息用 tasks.yaml 的 listTaskMessages。"
+      parameters:
+        - name: after
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+      responses:
+        '200':
+          description: "消息"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: 'tasks.yaml#/components/schemas/Message' }
+                  nextCursor: { type: string, nullable: true }
+        '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
+    post:
+      operationId: postChannelMessage
+      tags: [channel-messages]
+      summary: "在频道发消息：口语交给调度员，斜杠命令直接执行"
+      description: "来源：S04 Step 7 → Step 17（口语），S04 EX-10.1（斜杠命令）。消息先落库再处理；调度员不可用时返回 202 且 handling=unavailable（EX-13.1）。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string, minLength: 1, maxLength: 20000 }
+                replyToCandidate:
+                  type: string
+                  nullable: true
+                  description: "点澄清候选按钮时带上候选值，作为对澄清的回答"
+      responses:
+        '202':
+          description: "已接收"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message, handling]
+                properties:
+                  message: { $ref: 'tasks.yaml#/components/schemas/Message' }
+                  handling:
+                    type: string
+                    enum: [dispatcher, command, unavailable]
+                    description: "dispatcher=已交给调度员；command=斜杠命令已执行或已直出草案；unavailable=调度员不可用，见 hint"
+                  hint: { type: string, nullable: true, description: "unavailable 时的预填命令" }
+                  draft: { $ref: 'tasks.yaml#/components/schemas/TaskDraft' }
+        '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
+        '422':
+          description: "校验失败，或未知斜杠命令（details.command）"
+          content:
+            application/json:
+              schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
+
+components:
+  securitySchemes:
+    panelToken:
+      type: http
+      scheme: bearer
+  parameters:
+    slug:
+      name: slug
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[a-z0-9]+(-[a-z0-9]+)*$' }
+  schemas:
+    Channel:
+      type: object
+      required: [slug, title, kind, createdAt]
+      properties:
+        slug: { type: string, example: doris-index }
+        title: { type: string }
+        kind:
+          type: string
+          enum: [user, source_default]
+          description: "source_default 为 jira / feishu 自动创建的默认频道"
+        sourceType: { type: string, nullable: true, enum: [jira, feishu] }
+        activeTasks: { type: integer }
+        pendingApprovals: { type: integer }
+        unreadThreads: { type: integer }
+        dispatcher:
+          type: object
+          nullable: true
+          description: "当前调度员会话（S04 Step 11）"
+          properties:
+            sessionId: { type: string, format: uuid }
+            agent: { $ref: 'tasks.yaml#/components/schemas/AgentName' }
+            state: { type: string, enum: [running, idle, stopped] }
+            idleSince: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }

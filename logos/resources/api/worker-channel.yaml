@@ -1,0 +1,282 @@
+openapi: 3.1.0
+info:
+  title: "foreman API — worker channel（中心 ↔ worker 的 WebSocket 协议）"
+  version: 0.1.0
+  description: "来源：S05（注册、心跳、离线）、S01 Step 4–8 / 12–19（作业与会话）、S03 Step 9–17 / 31–32、S07 Step 8–11 / 38–41 / 44–45。这不是 REST：唯一的 HTTP 路径是 GET /ws/worker 的 Upgrade；所有消息为 JSON envelope，schema 在 components 中定义，以 x-websocket-messages 列出方向与用途。幂等：每条指令带 commandId，worker 对已执行过的 commandId 直接回放上次结果。"
+servers:
+  - url: ws://127.0.0.1:7801
+security:
+  - workerToken: []
+
+x-websocket-messages:
+  center-to-worker:
+    - { type: register.ack, schema: RegisterAck, source: "S05 Step 13" }
+    - { type: job.run, schema: JobRun, source: "S01 Step 4、S04 Step 20" }
+    - { type: worktree.create, schema: WorktreeCreate, source: "S01 Step 12、S03 Step 9" }
+    - { type: worktree.gc, schema: WorktreeGc, source: "S05 EX-19.1、runtimes.yaml runtimeGc" }
+    - { type: session.start, schema: SessionStart, source: "S01 Step 15、S03 Step 13、S04 Step 13、S02 Step 23" }
+    - { type: session.resume, schema: SessionResume, source: "S07 Step 38、S03 EX-22.1" }
+    - { type: session.stop, schema: SessionStop, source: "S04 Step 38、S07 Step 44" }
+    - { type: session.logs, schema: SessionLogs, source: "S07 Step 8" }
+    - { type: error, schema: ErrorMessage, source: "S05 EX-10.1、EX-12.1" }
+  worker-to-center:
+    - { type: register, schema: Register, source: "S05 Step 11" }
+    - { type: heartbeat, schema: Heartbeat, source: "S05 Step 18" }
+    - { type: job.result, schema: JobResult, source: "S01 Step 8、S04 Step 24" }
+    - { type: worktree.ready, schema: WorktreeReady, source: "S01 Step 14、S03 Step 12" }
+    - { type: worktree.gc.result, schema: WorktreeGcResult, source: "S05 EX-19.1" }
+    - { type: session.started, schema: SessionStarted, source: "S01 Step 19、S03 Step 17" }
+    - { type: session.state, schema: SessionState, source: "S03 Step 32、S05 Step 19（钩子）、S07 Step 19/32/41" }
+    - { type: session.list, schema: SessionList, source: "S05 Step 16" }
+    - { type: session.logs.result, schema: SessionLogsResult, source: "S07 Step 11" }
+    - { type: error, schema: ErrorMessage, source: "S03 EX-11.1、EX-15.1、S07 EX-40.1" }
+
+paths:
+  /ws/worker:
+    get:
+      operationId: workerConnect
+      summary: "worker 通道 WebSocket 升级"
+      description: "来源：S05 Step 10。Header: Authorization Bearer <FOREMAN_TOKEN>；连接后 worker 必须在 5 秒内发送 register。开发机经 ssh -R 隧道连接 127.0.0.1:7801。"
+      responses:
+        '101':
+          description: "已升级为 WebSocket"
+        '401':
+          description: "AUTH_INVALID（S05 EX-10.1），连接关闭码 4001"
+          content:
+            application/json:
+              schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
+
+components:
+  securitySchemes:
+    workerToken:
+      type: http
+      scheme: bearer
+
+  schemas:
+    Envelope:
+      type: object
+      required: [type, id, ts]
+      properties:
+        type: { type: string, description: "消息类型，见 x-websocket-messages" }
+        id: { type: string, format: uuid, description: "本消息 id；指令类消息即 commandId" }
+        ref: { type: string, format: uuid, nullable: true, description: "回应哪条消息（result/ack/error 必填）" }
+        ts: { type: string, format: date-time }
+        payload: { type: object, additionalProperties: true }
+
+    Register:
+      type: object
+      required: [name, instanceId, version, transport, labels, agents, repos]
+      properties:
+        name: { type: string, example: dev }
+        instanceId: { type: string, format: uuid, description: "worker 进程实例，用于区分重连与同名冲突（S05 EX-12.1）" }
+        version: { type: string }
+        transport: { type: string, enum: [direct, reverse-tunnel, local] }
+        labels: { type: array, items: { type: string } }
+        agents:
+          type: object
+          additionalProperties:
+            type: object
+            required: [bin, maxConcurrent]
+            properties:
+              bin: { type: string }
+              version: { type: string, nullable: true }
+              maxConcurrent: { type: integer, minimum: 1 }
+        repos:
+          type: object
+          additionalProperties:
+            type: object
+            required: [main, worktreeRoot]
+            properties:
+              main: { type: string }
+              worktreeRoot: { type: string }
+              pushRemote: { type: string }
+        disk: { $ref: '#/components/schemas/DiskInfo' }
+        capabilities:
+          type: array
+          items: { type: string, enum: [jira-poll, jira-lookup, gh, merge-tree, rg] }
+          description: "可执行的系统作业种类"
+    RegisterAck:
+      type: object
+      required: [runtimeId, heartbeatSeconds, pendingCommands]
+      properties:
+        runtimeId: { type: string, format: uuid }
+        heartbeatSeconds: { type: integer, example: 30 }
+        pendingCommands:
+          type: array
+          description: "离线期间排队的指令（S05 Step 13、EX-23.1），按顺序执行"
+          items: { $ref: '#/components/schemas/Envelope' }
+    Heartbeat:
+      type: object
+      required: [sessions]
+      properties:
+        load: { type: number, nullable: true }
+        disk: { $ref: '#/components/schemas/DiskInfo' }
+        sessions:
+          type: object
+          description: "每家 agent 运行中会话数"
+          additionalProperties: { type: integer }
+    DiskInfo:
+      type: object
+      properties:
+        path: { type: string }
+        usedRatio: { type: number }
+        freeBytes: { type: integer }
+
+    JobRun:
+      type: object
+      required: [kind, args, timeoutSeconds]
+      properties:
+        kind: { type: string, enum: [jira-poll, jira-lookup, gh-pr-view, merge-tree-check] }
+        args:
+          type: object
+          additionalProperties: true
+          description: "jira-poll: {jql, since}; jira-lookup: {key}; gh-pr-view: {repo, number}"
+        timeoutSeconds: { type: integer, default: 60 }
+    JobResult:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean }
+        result: { type: object, additionalProperties: true, description: "jira-poll: {issues[], fetchedAt}; jira-lookup: {found, issue}" }
+        error:
+          type: object
+          nullable: true
+          properties:
+            code: { type: string, enum: [SOURCE_UNREACHABLE, NOT_FOUND, TIMEOUT, INTERNAL] }
+            message: { type: string }
+
+    WorktreeCreate:
+      type: object
+      required: [taskKey, repo, baseBranch]
+      properties:
+        taskKey: { type: string }
+        repo: { type: string, description: "owner/name，需在 worker repos 中登记" }
+        baseBranch: { type: string }
+        branchName: { type: string, description: "缺省 foreman/<taskKey>" }
+        buildEnv:
+          type: object
+          additionalProperties: { type: string }
+          description: "按分支族的构建环境（thirdparty、jdk 等），worker 据此建软链与 env 文件"
+        contextMarkdown: { type: string, description: "写入 .foreman/context.md 的上下文包" }
+        taskJson: { type: object, additionalProperties: true, description: "写入 .foreman/task.json" }
+        hooks:
+          type: object
+          description: "写入 worktree 内 .claude/settings.json 的钩子配置（Notification 回调 worker 本地端口）"
+          additionalProperties: true
+        reuseIfExists: { type: boolean, default: true }
+    WorktreeReady:
+      type: object
+      required: [taskKey, path, branchName, reused]
+      properties:
+        taskKey: { type: string }
+        path: { type: string }
+        branchName: { type: string }
+        reused: { type: boolean }
+    WorktreeGc:
+      type: object
+      required: [policy, dryRun]
+      properties:
+        policy: { type: string, enum: [retain_days, high_watermark] }
+        dryRun: { type: boolean }
+        retainDays: { type: integer, default: 3 }
+        highWatermark: { type: number, default: 0.85 }
+        protectedTaskKeys:
+          type: array
+          items: { type: string }
+          description: "运行中任务，永不删除"
+    WorktreeGcResult:
+      $ref: 'runtimes.yaml#/components/schemas/GcResult'
+
+    SessionStart:
+      type: object
+      required: [sessionId, taskKey, kind, agent, prompt, cwd, mcp]
+      properties:
+        sessionId: { type: string, format: uuid, description: "中心分配的会话 id" }
+        taskKey: { type: string }
+        kind: { type: string, enum: [implement, review, code_locate, plan, proto, dispatcher, candidate_scan] }
+        agent: { type: string, enum: [claude, codex, opencode] }
+        model: { type: string, nullable: true }
+        prompt: { type: string }
+        cwd: { type: string, description: "worktree 路径；调度员与候选扫描为临时目录" }
+        name: { type: string, description: "claude --bg --name" }
+        mcp:
+          type: object
+          required: [url, token]
+          properties:
+            url: { type: string, example: http://127.0.0.1:7801/mcp }
+            token: { type: string, description: "任务级一次性 token，写入 --mcp-config 的 header" }
+        env:
+          type: object
+          additionalProperties: { type: string }
+          description: "附加环境变量；禁止包含 ANTHROPIC_API_KEY"
+        timeoutMinutes: { type: integer, nullable: true, description: "超时由中心判定，worker 只透传用于日志" }
+    SessionStarted:
+      type: object
+      required: [sessionId, agentSessionId, startedAt]
+      properties:
+        sessionId: { type: string, format: uuid }
+        agentSessionId: { type: string, description: "claude --bg 输出的 id / codex session id" }
+        startedAt: { type: string, format: date-time }
+        pid: { type: integer, nullable: true }
+    SessionResume:
+      type: object
+      required: [sessionId, text]
+      properties:
+        sessionId: { type: string, format: uuid }
+        text: { type: string }
+    SessionStop:
+      type: object
+      required: [sessionId]
+      properties:
+        sessionId: { type: string, format: uuid }
+        reason: { type: string, enum: [user, idle, timeout, pause] }
+    SessionState:
+      type: object
+      required: [sessionId, state, observedAt]
+      properties:
+        sessionId: { type: string, format: uuid }
+        state: { type: string, enum: [running, waiting_input, done, failed, stopped, lost] }
+        waitingFor: { type: string, nullable: true, description: "claude agents --json 的 waitingFor" }
+        source: { type: string, enum: [poll, hook, exit], description: "状态来源：轮询 agents --json / Notification 钩子 / 进程退出" }
+        exitCode: { type: integer, nullable: true }
+        failureReason: { type: string, nullable: true }
+        observedAt: { type: string, format: date-time }
+    SessionList:
+      type: object
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          items:
+            type: object
+            required: [sessionId, state]
+            properties:
+              sessionId: { type: string, format: uuid }
+              agentSessionId: { type: string, nullable: true }
+              state: { type: string, enum: [running, waiting_input, done, failed, stopped, lost] }
+    SessionLogs:
+      type: object
+      required: [sessionId, limit]
+      properties:
+        sessionId: { type: string, format: uuid }
+        from: { type: string, format: date-time, nullable: true }
+        to: { type: string, format: date-time, nullable: true }
+        limit: { type: integer, default: 400 }
+    SessionLogsResult:
+      type: object
+      required: [sessionId, lines, truncated]
+      properties:
+        sessionId: { type: string, format: uuid }
+        lines: { type: array, items: { type: string } }
+        truncated: { type: boolean }
+
+    ErrorMessage:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [AUTH_INVALID, VERSION_UNSUPPORTED, RUNTIME_NAME_CONFLICT, WORKTREE_FAILED, AGENT_START_FAILED, RESUME_FAILED, UNKNOWN_COMMAND, INTERNAL]
+        message: { type: string }
+        detail: { type: object, additionalProperties: true }
+        retryable: { type: boolean }

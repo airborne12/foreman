@@ -1,0 +1,381 @@
+# 测试结果格式规范
+
+> 版本：0.1.0
+>
+> 本文档定义 OpenLogos 的标准化测试结果输出格式。AI 在生成测试代码时必须内嵌 reporter，按此格式输出每个用例的运行结果，供 `openlogos verify` 读取和验收。
+
+## 概述
+
+OpenLogos 不绑定任何测试框架。取而代之的做法是：**AI 在生成测试代码时内嵌一个小型 reporter**，测试运行后自动将每个用例的结果追加写入统一格式的文件。`openlogos verify` 命令只需读取该文件即可完成验收判定。
+
+这套机制的核心优势：
+
+- **零框架依赖**：vitest、jest、pytest、go test、cargo test 均可产出同一格式
+- **零适配成本**：`openlogos verify` 只解析一种格式
+- **AI 天然能做**：reporter 代码不超过 20 行，AI 在生成测试代码时顺手写入
+- **用例 ID 是原生的**：不需要从测试名称里正则提取，ID 直接是数据字段
+
+## 文件路径
+
+测试结果文件的默认路径为：
+
+```
+logos/resources/verify/test-results.jsonl
+```
+
+可通过 `logos.config.json` 的 `verify.result_path` 字段自定义路径。
+
+## 格式：JSONL
+
+文件格式为 **JSONL**（JSON Lines）——每行一个独立的 JSON 对象，以换行符分隔。
+
+选择 JSONL 而非完整 JSON 数组的理由：
+
+| 特性 | JSONL | JSON 数组 |
+|------|-------|----------|
+| 追加写入 | 直接 append 一行 | 需维护数组闭合括号 |
+| 流式读取 | 逐行解析 | 需读完整个文件 |
+| 部分损坏 | 一行损坏不影响其他行 | 括号不匹配则整个文件不可解析 |
+| 跨语言写入 | `JSON.stringify(obj) + "\n"` | 需手动管理逗号和括号 |
+
+## 字段定义
+
+每行是一个 JSON 对象，包含以下字段：
+
+| 字段 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| `id` | string | 是 | 用例 ID，与 `test-cases.md` 中的 `UT-xx` / `ST-xx` 完全一致 |
+| `status` | `"pass"` \| `"fail"` \| `"skip"` | 是 | 运行结果 |
+| `duration_ms` | number | 否 | 执行耗时（毫秒） |
+| `timestamp` | string (ISO 8601) | 否 | 执行时间，如 `2026-04-03T15:30:01Z` |
+| `error` | string | `status=fail` 时必需 | 失败原因（断言错误信息） |
+| `scenario` | string | 否 | 场景编号（如 `S01`），用于验证 ID 前缀一致性 |
+
+### 示例
+
+```jsonl
+{"id":"UT-S01-01","status":"pass","duration_ms":12,"timestamp":"2026-04-03T15:30:01Z"}
+{"id":"UT-S01-02","status":"fail","duration_ms":45,"timestamp":"2026-04-03T15:30:01Z","error":"Expected exit code 0, got 1"}
+{"id":"UT-S01-03","status":"skip","timestamp":"2026-04-03T15:30:01Z"}
+{"id":"ST-S01-01","status":"pass","duration_ms":230,"timestamp":"2026-04-03T15:30:02Z","scenario":"S01"}
+```
+
+### 字段约束
+
+- `id` 必须匹配正则 `^(UT|ST)-S\d{2}-\d{2,3}$`
+- `status` 仅允许三个值：`pass`、`fail`、`skip`
+- `error` 在 `status=fail` 时必须提供，其他状态可省略
+- 同一个 `id` 如果出现多次（如重试），`openlogos verify` 取**最后一次**的结果
+
+### `[manual]` 标记用例
+
+在 `test-cases.md` 中，无法自动化执行的用例（如需要真实 TTY/PTY 渲染、跨窗口操作、人工视觉验证的 ST 用例）应在 ID 后追加 `[manual]` 标记：
+
+```markdown
+| ST-S01-05 [manual] | 需要真实 PTY 渲染的交互测试 | ... |
+```
+
+`[manual]` 用例的行为规则：
+
+- **不写入 JSONL**：`[manual]` 用例不由自动化测试执行，不产出 JSONL 记录
+- **不计入 `defined_count`**：`openlogos verify` 扫描 test-cases.md 时跳过这类用例，不计入覆盖率分母
+- **不出现在 `uncovered_cases`**：不会因为缺少运行结果而报告为未覆盖
+- **单独计入 `manual_count`**：在 summary 中以独立字段展示，方便感知人工用例数量
+- **AC trace 中标记为 `MANUAL_PENDING`**：若某个验收条件（AC）关联的用例全部为 `[manual]`，该 AC 标记为 `🔵 MANUAL`（人工待验），不触发 Gate 3.5 失败
+
+## 运行约定
+
+### `verify.pre_run_command`（兼容配置）
+
+`verify.pre_run_command` 保持兼容，用于单阶段全量测试。配置后，`openlogos verify` 在读取 `verify.result_path` 前执行该命令：
+
+```json
+{
+  "verify": {
+    "result_path": "logos/resources/verify/test-results.jsonl",
+    "pre_run_command": "npx vitest run"
+  }
+}
+```
+
+此字段适用于只需要一条命令生成完整 `test-results.jsonl` 的项目。若同时配置两阶段字段，`openlogos verify` 优先执行两阶段模型，并在输出中标记 `pre_run_command` 作为兼容配置保留。
+
+**为什么需要预跑配置**：reporter 每次运行测试时会清空 `test-results.jsonl`，若只跑部分场景的测试（如变更提案只涉及 S03），JSONL 将缺少其他场景（S01、S02）的结果，导致 `openlogos verify` 覆盖率不足而失败。配置预跑命令后，verify 会先跑完整测试再读取结果，覆盖率始终完整。
+
+常见框架对应命令：
+
+| 测试框架 | pre_run_command |
+|---------|----------------|
+| vitest | `npx vitest run` |
+| jest | `npx jest` |
+| pytest | `pytest` |
+| go test | `go test ./...` |
+| cargo test | `cargo test` |
+
+> `code-implementor` Skill 在生成测试代码后会自动检查并写入此字段，无需手动配置。
+
+### `verify.regression_command` 与 `verify.incremental_command`
+
+两阶段模型用于先运行回归测试，再运行增量测试：
+
+```json
+{
+  "verify": {
+    "result_path": "logos/resources/verify/test-results.jsonl",
+    "regression_command": "npm test",
+    "incremental_command": "npm run test:changed",
+    "regression_result_path": "logos/resources/verify/test-results.regression.jsonl",
+    "incremental_result_path": "logos/resources/verify/test-results.incremental.jsonl",
+    "merge_results": "last-write-wins"
+  }
+}
+```
+
+执行语义：
+1. 若配置 `regression_command`，先执行回归测试。
+2. 若配置 `incremental_command`，再执行增量测试。
+3. CLI 合并阶段结果，写入 `result_path`。
+4. 同一个用例 ID 多次出现时，最后一次结果生效。
+5. 若未配置阶段结果路径，CLI 必须用临时快照或等价机制避免第二阶段 reporter 清空第一阶段结果。
+
+### `verify.sandbox_mode` / `smoke.sandbox_mode`
+
+OpenLogos 的 JSONL reporter 仍然负责写入测试结果，但当 `verify` 或 `smoke` 开启沙箱模式时，reporter 和命令执行器的职责必须分离：
+
+- reporter 只写配置声明的结果文件；
+- CLI 负责在沙箱中执行测试命令；
+- CLI 负责回收结果文件并阻断仓库工作区的额外写入。
+
+### 新增约束
+- `verify.sandbox_mode="always"` 时，测试命令不得直接写入仓库根目录中的非白名单路径。
+- `smoke.sandbox_mode="always"` 时，`smoke.command` 不得直接写入仓库根目录中的非白名单路径。
+- 若测试脚本在沙箱内失败，CLI 必须保留失败输出，并在 JSON / 文本结果中暴露 `sandbox` 诊断。
+- 阶段化结果路径（`regression_result_path` / `incremental_result_path`）与沙箱隔离可以同时存在，二者不冲突。
+
+### 覆盖不足诊断
+
+当项目没有配置 `pre_run_command`、`regression_command` 或 `incremental_command`，且 verify 发现覆盖不足时，CLI 必须诊断这可能是只运行了局部测试导致，并建议配置 verify 预跑命令。
+
+该诊断不改变 Gate 判定：覆盖不足仍为 FAIL。
+
+### 清空策略
+
+每次完整测试运行前，reporter 应**清空**（truncate）对应阶段的结果文件，确保文件只包含最近一次运行的结果。推荐方式：
+
+- 在测试套件的 `globalSetup` 或等效钩子中清空文件
+- 或者 reporter 的初始化阶段写入空文件
+
+两阶段模型下，回归阶段和增量阶段可以写入不同结果文件；如果两个阶段都写入默认 `result_path`，CLI 必须在阶段之间保留快照，确保最终合并结果不会丢失第一阶段覆盖。
+
+### reporter 输出建议
+```json
+{"id":"UT-S13-01","status":"pass","duration_ms":12,"timestamp":"2026-04-10T10:00:00Z"}
+```
+
+当启用沙箱时，reporter 不需要知道沙箱实现细节，但可在错误消息中保留命令上下文，便于 CLI 汇总诊断。
+
+### 兼容性
+- 现有 reporter 仍然按原格式工作，不需要新增字段。
+- CLI 新增的沙箱执行器不得改变 `test-results.jsonl` 的基本 schema。
+
+### 目录创建
+
+reporter 在写入前应确保 `logos/resources/verify/` 目录存在（`mkdir -p` 等效操作）。
+
+### 分批闭环执行约定（大任务）
+
+当 Phase 3 Step 5 采用“分批生成”时，reporter 仍按一次完整测试运行的口径输出结果，并遵循以下约束：
+
+1. **用例 ID 对齐**：每一批开始前先声明本批覆盖的 `UT-xx` / `ST-xx`，测试代码中写入的 `id` 必须与 `logos/resources/test/*.md` 完全一致
+2. **清空策略一致**：无论是否分批，执行“本批完整测试”前都必须先清空结果文件，避免混入旧批次数据
+3. **重复 ID 判定**：同一 `id` 在同次运行中出现多条记录（如重试）时，`openlogos verify` 仍以最后一条为准
+4. **批次可独立验收**：建议每一批产出后立即运行测试并校验 JSONL，可在批次内尽早发现“只写业务未写测试”或 ID 不匹配问题
+
+## AI 生成 reporter 代码模板
+
+以下是各语言的 reporter 参考实现。AI 在 Phase 3 Step 5（代码生成，由 `code-implementor` Skill 驱动）时，应根据项目的 `tech_stack` 选择对应语言的模板，嵌入到测试代码中。
+
+### 推荐：共享 reporter 文件模式
+
+**不要在每个测试文件里内联 reporter 代码**。多文件项目应创建一个共享工具文件，统一 import：
+
+```
+<test-root>/
+└── helpers/
+    └── reporter.ts    ← 所有测试文件从这里 import
+```
+
+这样做的好处：
+- 路径配置只有一处，不会因为文件位置不同导致写入路径错误
+- 新增测试文件时只需 import，不会遗漏 reporter
+- 清空策略（truncate）只在一处维护
+
+### TypeScript (vitest / jest)
+
+````typescript
+import { appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+
+const RESULT_PATH = 'logos/resources/verify/test-results.jsonl';
+let initialized = false;
+
+function reportResult(
+  id: string,
+  status: 'pass' | 'fail' | 'skip',
+  error?: string,
+  durationMs?: number,
+) {
+  if (!initialized) {
+    mkdirSync(dirname(RESULT_PATH), { recursive: true });
+    writeFileSync(RESULT_PATH, '');
+    initialized = true;
+  }
+  const record: Record<string, unknown> = {
+    id,
+    status,
+    timestamp: new Date().toISOString(),
+  };
+  if (durationMs !== undefined) record.duration_ms = durationMs;
+  if (error) record.error = error;
+  appendFileSync(RESULT_PATH, JSON.stringify(record) + '\n');
+}
+````
+
+在测试用例中使用：
+
+````typescript
+import { describe, it, expect } from 'vitest';
+
+describe('S01: CLI Init', () => {
+  it('UT-S01-01: should detect project name from package.json', () => {
+    const start = Date.now();
+    try {
+      const result = detectProjectName('/path/to/project');
+      expect(result.name).toBe('my-project');
+      reportResult('UT-S01-01', 'pass', undefined, Date.now() - start);
+    } catch (e) {
+      reportResult('UT-S01-01', 'fail', String(e), Date.now() - start);
+      throw e;
+    }
+  });
+});
+````
+
+### Python (pytest)
+
+````python
+# conftest.py
+import json
+import os
+import time
+import re
+import pytest
+
+RESULT_PATH = "logos/resources/verify/test-results.jsonl"
+_initialized = False
+
+
+def _ensure_file():
+    global _initialized
+    if not _initialized:
+        os.makedirs(os.path.dirname(RESULT_PATH), exist_ok=True)
+        open(RESULT_PATH, "w").close()
+        _initialized = True
+
+
+def _extract_test_id(nodeid: str) -> str | None:
+    """Extract UT-S01-01 or ST-S01-01 from test function name."""
+    match = re.search(r"(UT|ST)_S\d{2}_\d{2,3}", nodeid)
+    if match:
+        return match.group().replace("_", "-")
+    return None
+
+
+@pytest.hookimpl(tryfirst=True, hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if report.when == "call":
+        _ensure_file()
+        test_id = _extract_test_id(item.nodeid)
+        if not test_id:
+            return
+        record = {
+            "id": test_id,
+            "status": "pass" if report.passed else "fail",
+            "duration_ms": round(report.duration * 1000),
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        if report.failed:
+            record["error"] = str(report.longrepr)[:500]
+        with open(RESULT_PATH, "a") as f:
+            f.write(json.dumps(record) + "\n")
+````
+
+Python 测试函数命名约定——用下划线替代连字符：
+
+````python
+def test_UT_S01_01_detect_project_name():
+    result = detect_project_name("/path/to/project")
+    assert result["name"] == "my-project"
+````
+
+### Go
+
+````go
+package testutil
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+)
+
+const ResultPath = "logos/resources/verify/test-results.jsonl"
+
+var (
+	once sync.Once
+	mu   sync.Mutex
+)
+
+type TestResult struct {
+	ID         string `json:"id"`
+	Status     string `json:"status"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+	Timestamp  string `json:"timestamp"`
+	Error      string `json:"error,omitempty"`
+}
+
+func ReportResult(id, status string, durationMs int64, err string) {
+	once.Do(func() {
+		os.MkdirAll(filepath.Dir(ResultPath), 0o755)
+		os.WriteFile(ResultPath, nil, 0o644)
+	})
+	r := TestResult{
+		ID:         id,
+		Status:     status,
+		DurationMs: durationMs,
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		Error:      err,
+	}
+	b, _ := json.Marshal(r)
+	mu.Lock()
+	defer mu.Unlock()
+	f, _ := os.OpenFile(ResultPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
+	defer f.Close()
+	fmt.Fprintf(f, "%s\n", b)
+}
+````
+
+## 与其他规范的关系
+
+| 规范 | 关系 |
+|------|------|
+| `test-writer` Skill | 定义用例 ID（`UT-xx` / `ST-xx`），是 JSONL 中 `id` 字段的来源 |
+| `test-orchestrator` Skill | API 编排测试也可产出同格式 JSONL |
+| `directory-convention.md` | 定义 `logos/resources/verify/` 目录位置 |
+| `logos.config.json` | `verify.result_path` 可覆盖默认路径 |
+| `openlogos verify` 命令 | 读取此格式文件，生成验收报告 |

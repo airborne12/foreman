@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@foreman/shared": ["packages/shared/src/index.ts"],
+      "@foreman/center": ["apps/center/src/app.ts"],
+      "@foreman/worker": ["apps/worker/src/worker.ts"]
+    }
+  },
+  "include": ["packages/**/src/**/*.ts", "apps/**/src/**/*.ts", "test/**/*.ts", "vitest.config.ts"]
+}

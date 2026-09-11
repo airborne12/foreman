@@ -1,0 +1,38 @@
+{
+  "name": "foreman-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.5.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter './packages/*' --filter './apps/*' run build",
+    "typecheck": "tsc -b tsconfig.json",
+    "test": "vitest run",
+    "test:unit": "vitest run test/unit",
+    "test:st": "vitest run test/orchestration",
+    "center": "tsx apps/center/src/index.ts",
+    "worker": "tsx apps/worker/src/index.ts",
+    "foreman": "tsx apps/cli/src/index.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/pg": "^8.15.5",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.2",
+    "commander": "^14.0.0",
+    "hono": "^4.9.6",
+    "pg": "^8.16.3",
+    "pino": "^9.9.0",
+    "ws": "^8.18.3",
+    "yaml": "^2.8.1",
+    "zod": "^3.25.76"
+  }
+}

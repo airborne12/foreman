@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "baseUrl": "../..", "paths": { "@foreman/shared": ["packages/shared/src/index.ts"], "@foreman/worker": ["apps/worker/src/worker.ts"] } },
+  "include": ["src/**/*.ts"]
+}

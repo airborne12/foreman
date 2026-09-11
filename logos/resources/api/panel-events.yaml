@@ -1,0 +1,133 @@
+openapi: 3.1.0
+info:
+  title: "foreman API — panel events（面板 WebSocket 推送）"
+  version: 0.1.0
+  description: "来源：S01 Step 25–26、S03 Step 19/30、S04 Step 17/30/35、S05 Step 15/24、S06 Step 5/22、S07 Step 4/16/29/34/49。面板通过 GET /ws/panel 升级后被动接收事件；事件与 events 表一一对应，先落库再广播。断线重连时客户端带 lastEventId，服务端补发之后的事件（最多 500 条，超过则要求全量刷新）。"
+servers:
+  - url: ws://127.0.0.1:7801
+security:
+  - panelToken: []
+
+x-websocket-events:
+  - { type: inbox.new, schema: InboxNewEvent, source: "S01 Step 25、S06 Step 5、S07 Step 16" }
+  - { type: inbox.removed, schema: InboxRemovedEvent, source: "S03 Step 3 后、S06 Step 22、S07 Step 29" }
+  - { type: thread.created, schema: ThreadCreatedEvent, source: "S02 Step 15、S04 Step 35" }
+  - { type: message.new, schema: MessageNewEvent, source: "S07 Step 4、S04 Step 30" }
+  - { type: task.updated, schema: TaskUpdatedEvent, source: "S03 Step 19/30、S05 Step 24" }
+  - { type: approval.decided, schema: ApprovalDecidedEvent, source: "S06 Step 22" }
+  - { type: trust.updated, schema: TrustUpdatedEvent, source: "S06 Step 22/31" }
+  - { type: runtime.updated, schema: RuntimeUpdatedEvent, source: "S05 Step 15/24" }
+  - { type: session.stale, schema: SessionStaleEvent, source: "S07 Step 49" }
+  - { type: candidates.updated, schema: CandidatesUpdatedEvent, source: "S02 Step 29" }
+  - { type: channel.system, schema: ChannelSystemEvent, source: "S04 Step 17、EX-13.1" }
+  - { type: source.health, schema: SourceHealthEvent, source: "S01 EX-2.1、EX-6.1" }
+
+paths:
+  /ws/panel:
+    get:
+      operationId: panelConnect
+      summary: "面板事件订阅 WebSocket 升级"
+      description: "来源：Phase 2 全局约定（WebSocket 推送）。Query: lastEventId 可选。服务端每 25 秒发 ping，客户端 60 秒无消息视为断线并显示顶部红条。"
+      parameters:
+        - name: lastEventId
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        '101':
+          description: "已升级"
+        '401':
+          description: "UNAUTHORIZED"
+          content:
+            application/json:
+              schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
+
+components:
+  securitySchemes:
+    panelToken:
+      type: http
+      scheme: bearer
+  schemas:
+    EventEnvelope:
+      type: object
+      required: [id, type, ts, payload]
+      properties:
+        id: { type: string, format: uuid, description: "events 表主键，用于断线补发" }
+        type: { type: string }
+        ts: { type: string, format: date-time }
+        taskKey: { type: string, nullable: true }
+        channel: { type: string, nullable: true }
+        payload: { type: object, additionalProperties: true }
+    InboxNewEvent:
+      type: object
+      required: [itemType, item]
+      properties:
+        itemType: { type: string, enum: [approval, question, failure, candidate] }
+        item: { type: object, additionalProperties: true, description: "对应 Approval / Question / TaskSummary / Candidate" }
+        counts: { type: object, properties: { actionable: { type: integer }, candidates: { type: integer } } }
+    InboxRemovedEvent:
+      type: object
+      required: [itemType, key, reason]
+      properties:
+        itemType: { type: string, enum: [approval, question, failure, candidate] }
+        key: { type: string }
+        reason: { type: string, enum: [decided_panel, decided_feishu, auto, answered, retried, superseded, dismissed] }
+        counts: { type: object, properties: { actionable: { type: integer }, candidates: { type: integer } } }
+    ThreadCreatedEvent:
+      type: object
+      required: [task]
+      properties:
+        task: { $ref: 'tasks.yaml#/components/schemas/TaskSummary' }
+    MessageNewEvent:
+      type: object
+      required: [message]
+      properties:
+        message: { $ref: 'tasks.yaml#/components/schemas/Message' }
+    TaskUpdatedEvent:
+      type: object
+      required: [task, changed]
+      properties:
+        task: { $ref: 'tasks.yaml#/components/schemas/Task' }
+        changed: { type: array, items: { type: string }, description: "变更字段名" }
+        session: { $ref: 'tasks.yaml#/components/schemas/Session' }
+    ApprovalDecidedEvent:
+      type: object
+      required: [approval]
+      properties:
+        approval: { $ref: 'approvals.yaml#/components/schemas/Approval' }
+    TrustUpdatedEvent:
+      type: object
+      required: [counter, change]
+      properties:
+        counter: { $ref: 'approvals.yaml#/components/schemas/TrustCounter' }
+        change: { type: string, enum: [increment, promoted, reset, downgraded] }
+    RuntimeUpdatedEvent:
+      type: object
+      required: [runtime]
+      properties:
+        runtime: { $ref: 'runtimes.yaml#/components/schemas/Runtime' }
+    SessionStaleEvent:
+      type: object
+      required: [sessionId, taskKey, minutes]
+      properties:
+        sessionId: { type: string, format: uuid }
+        taskKey: { type: string }
+        minutes: { type: integer }
+    CandidatesUpdatedEvent:
+      type: object
+      required: [added, total]
+      properties:
+        added: { type: array, items: { $ref: 'approvals.yaml#/components/schemas/Candidate' } }
+        total: { type: integer }
+    ChannelSystemEvent:
+      type: object
+      required: [channel, text]
+      properties:
+        channel: { type: string }
+        text: { type: string }
+        level: { type: string, enum: [info, warn], default: info }
+        hint: { type: string, nullable: true }
+    SourceHealthEvent:
+      type: object
+      required: [item]
+      properties:
+        item: { $ref: 'runtimes.yaml#/components/schemas/SourceHealth' }

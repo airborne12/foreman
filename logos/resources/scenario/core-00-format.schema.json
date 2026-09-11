@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "foreman/orchestration-format",
+  "title": "foreman API 编排测试文件格式",
+  "description": "logos/resources/scenario/core-Sxx-*.json 的结构。由 apps/center/test/orchestration/runner.ts 执行；每个 case 的 id 必须是 logos/resources/test/core-Sxx-test-cases.md 中已定义的 ST-* 编号，运行器按该 id 写入 logos/resources/verify/test-results.jsonl。变量语法 {{name}}；env 变量 {{env.NAME}}；路径表达式以 body./headers./status 开头。",
+  "type": "object",
+  "required": ["scenario", "name", "baseUrl", "auth", "dependencies", "presets", "cases"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "scenario": { "type": "string", "pattern": "^S\\d{2}$" },
+    "name": { "type": "string" },
+    "source": { "type": "string", "description": "对应时序图文件" },
+    "baseUrl": { "type": "string", "default": "{{env.CENTER_URL}}" },
+    "auth": {
+      "type": "object",
+      "properties": {
+        "panelToken": { "type": "string" },
+        "workerToken": { "type": "string" }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "description": "本场景涉及的外部依赖及策略，必须与 logos-project.yaml external_dependencies 一致",
+      "items": {
+        "type": "object",
+        "required": ["dependency", "strategy", "config"],
+        "properties": {
+          "dependency": { "type": "string" },
+          "strategy": { "type": "string", "enum": ["test-api", "fixed-value", "env-disable", "mock-callback", "mock-service"] },
+          "config": { "type": "string" },
+          "handle": { "type": "string", "description": "在 control 动作中引用该 mock 的短名，如 jira / lark / claude / codex" }
+        }
+      }
+    },
+    "presets": {
+      "type": "object",
+      "description": "可复用的 setup 片段，case.use 按名引用",
+      "additionalProperties": { "type": "array", "items": { "$ref": "#/$defs/controlStep" } }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/case" }
+    }
+  },
+  "$defs": {
+    "case": {
+      "type": "object",
+      "required": ["id", "title", "covers", "steps"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^ST-S\\d{2}-\\d{2,3}$" },
+        "title": { "type": "string" },
+        "covers": { "type": "string", "description": "Step 范围或 EX 编号" },
+        "kind": { "type": "string", "enum": ["main", "exception", "boundary", "concurrency"], "default": "main" },
+        "use": { "type": "array", "items": { "type": "string" }, "description": "引用 presets" },
+        "include": {
+          "type": "object",
+          "description": "复用另一个 case 的前若干步作为本 case 的前置（运行器先执行被引用 case 到 throughStep 为止，变量作用域合并）。文档中以 note 步骤写作「include ST-Sxx-nn Step a–b」的，等价于此字段",
+          "required": ["case"],
+          "properties": {
+            "case": { "type": "string", "pattern": "^ST-S\\d{2}-\\d{2,3}$" },
+            "throughStep": { "type": "string", "description": "执行到该 step 标签（含）为止；缺省为全部" }
+          }
+        },
+        "setup": { "type": "array", "items": { "$ref": "#/$defs/controlStep" } },
+        "steps": { "type": "array", "minItems": 1, "items": { "oneOf": [{ "$ref": "#/$defs/httpStep" }, { "$ref": "#/$defs/controlStep" }] } },
+        "teardown": { "type": "array", "items": { "$ref": "#/$defs/controlStep" } },
+        "timeoutMs": { "type": "integer", "default": 60000 }
+      }
+    },
+    "httpStep": {
+      "type": "object",
+      "required": ["step", "method", "url", "expected_status"],
+      "properties": {
+        "step": { "type": "string", "description": "对应时序图 Step 编号" },
+        "method": { "type": "string", "enum": ["GET", "POST", "PATCH", "PUT", "DELETE"] },
+        "url": { "type": "string" },
+        "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+        "auth": { "type": "string", "enum": ["panel", "worker", "mcp", "none"], "default": "panel" },
+        "body": {},
+        "expected_status": { "type": "integer" },
+        "assert": { "type": "array", "items": { "$ref": "#/$defs/assertion" } },
+        "extract": { "type": "object", "additionalProperties": { "type": "string" }, "description": "变量名 → 路径表达式" },
+        "mock": { "$ref": "#/$defs/mockRef" }
+      }
+    },
+    "controlStep": {
+      "type": "object",
+      "required": ["step", "action"],
+      "description": "非 HTTP 的测试控制动作，由运行器在进程内执行",
+      "properties": {
+        "step": { "type": "string" },
+        "action": {
+          "type": "string",
+          "enum": [
+            "clock.freeze", "clock.advance",
+            "scheduler.tick",
+            "runtime.register", "runtime.heartbeat", "runtime.disconnect", "runtime.expectCommand", "runtime.reply",
+            "mock.set", "mock.emit", "mock.expect",
+            "mcp.call", "mcp.expectCall",
+            "ws.connect", "ws.expect",
+            "db.assert", "db.seed",
+            "wait.until", "note"
+          ]
+        },
+        "args": { "type": "object", "additionalProperties": true },
+        "assert": { "type": "array", "items": { "$ref": "#/$defs/assertion" } },
+        "extract": { "type": "object", "additionalProperties": { "type": "string" } },
+        "mock": { "$ref": "#/$defs/mockRef" },
+        "timeoutMs": { "type": "integer" }
+      }
+    },
+    "mockRef": {
+      "type": "object",
+      "required": ["dependency", "strategy", "config"],
+      "properties": {
+        "dependency": { "type": "string" },
+        "strategy": { "type": "string" },
+        "config": { "type": "string" },
+        "extract": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "assertion": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string" },
+        "equals": {},
+        "notEquals": {},
+        "contains": { "type": "string" },
+        "matches": { "type": "string" },
+        "exists": { "type": "boolean" },
+        "gte": { "type": "number" },
+        "lte": { "type": "number" },
+        "length": { "type": "integer" },
+        "minLength": { "type": "integer" },
+        "in": { "type": "array" }
+      }
+    }
+  },
+  "x-test-endpoints": {
+    "description": "仅在 center 以 FOREMAN_TEST_MODE=1 启动时注册，供编排测试直接触达领域核心；生产构建不包含",
+    "POST /__test/approvals/request": "body {taskKey, actionType, title, body, executor: center|agent} → 201 Approval（含 actionId 当自动执行时）",
+    "POST /__test/approvals/{key}/supersede": "body {body} → 200 {old, new}",
+    "POST /__test/actions/retry": "body {approvalKey} → 200 Action",
+    "POST /__test/reset": "清空业务表并重置序列与假时钟"
+  },
+  "x-fixtures": {
+    "description": "{{fixture:name(args)}} 由运行器的 fixtures 模块生成测试数据；名称与参数在实现阶段固定，见 apps/center/test/orchestration/fixtures.ts",
+    "task.pendingDecision": "写入根任务（state pending_decision）、context_packs、triage_cards 与一条 pending 的 triage_confirm 审批",
+    "task.running / task.runningOn / task.done": "写入任务与对应会话记录",
+    "sessions.running": "写入 N 条 running 会话占用并发名额",
+    "worktrees": "按 done_days 与 running 数写入 worktrees",
+    "notifications.sent_today": "写入当日已发送通知",
+    "lark.messages / lark.messageText": "生成飞书消息序列",
+    "workerYaml": "生成临时 worker.yaml 并返回路径",
+    "logs / text": "生成指定行数或长度的文本",
+    "gc.removed": "根据 seed 的 worktrees 计算应被删除的列表",
+    "tasks.recent": "写入最近 N 个任务供 list_tasks 候选"
+  },
+  "x-control-actions": {
+    "clock.freeze": "args {at?} 冻结可注入时钟",
+    "clock.advance": "args {minutes|seconds} 推进时钟并触发到期的调度",
+    "scheduler.tick": "args {job} 立即触发某类调度器作业",
+    "runtime.register": "args {name, labels[], agents{}, repos{}, transport, capabilities[]} 以进程内假 worker 注册",
+    "runtime.heartbeat": "args {name, disk?, load?, sessions?}",
+    "runtime.disconnect": "args {name}",
+    "runtime.expectCommand": "args {name, type, match?} 等待中心向该 worker 下发某类指令；extract 可取 payload 字段",
+    "runtime.reply": "args {name, type, ref?, payload} 以假 worker 身份回复（job.result / worktree.ready / session.started / session.state / session.logs.result / error）",
+    "mock.set": "args {handle, ...} 设置某个 mock-service 的行为（如 jira.issues、claude.script、lark.failSend）",
+    "mock.emit": "args {handle, event} 让 mock 推送事件（如 lark 的 reaction / message 事件）",
+    "mock.expect": "args {handle, kind, match?} 等待 mock 记录到某个调用（如 lark 发送了一条消息、gh 被调用）",
+    "mcp.call": "args {tool, taskKey, arguments} 以某会话的 mcp token 调用工具；extract 可取返回值",
+    "mcp.expectCall": "args {taskKey, tool} 等待假 agent 脚本调用了某工具",
+    "ws.connect": "args {channel: panel, lastEventId?}",
+    "ws.expect": "args {type, match?, timeoutMs?} 等待面板事件",
+    "db.assert": "args {sql} 执行只读 SQL，assert 对结果行断言（path 形如 rows[0].state）",
+    "db.seed": "args {table, rows[]} 直接写入测试数据",
+    "wait.until": "args {http: {method,url}, assert[]} 轮询直到断言通过或超时",
+    "note": "args {text} 仅记录"
+  }
+}

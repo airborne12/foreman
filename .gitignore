@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.log
+.env
+.foreman/
+logos/resources/verify/test-results.jsonl
+logos/resources/verify/smoke-results.jsonl
+tmp/

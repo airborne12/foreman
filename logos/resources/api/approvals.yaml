@@ -1,0 +1,388 @@
+openapi: 3.1.0
+info:
+  title: "foreman API — approvals（收件箱、审批、信任、动作回滚、候选）"
+  version: 0.1.0
+  description: "来源：S06（审批双通道与信任升级）、S03 Step 2（分流卡拍板）、S02 Step 30（候选入库/忽略）。本文件同时是全局错误码目录（见 x-error-codes）。"
+servers:
+  - url: http://127.0.0.1:7801
+security:
+  - panelToken: []
+tags:
+  - name: inbox
+  - name: approvals
+  - name: trust
+  - name: actions
+  - name: candidates
+
+x-error-codes:
+  UNAUTHORIZED: "token 缺失或无效"
+  NOT_FOUND: "资源不存在"
+  VALIDATION_FAILED: "请求体校验失败，details 含字段错误"
+  CHANNEL_NOT_FOUND: "频道不存在"
+  CHANNEL_EXISTS: "频道重名（S04 EX-4.1）"
+  APPROVAL_ALREADY_DECIDED: "审批已被另一通道处理（S03 EX-4.1 / S06 EX-18.1）"
+  APPROVAL_BODY_CHANGED: "正文已变更，原审批作废（S06 EX-18.2）"
+  APPROVAL_NOT_PENDING: "审批不在 pending 状态"
+  REPO_REQUIRED: "目标仓库待确认，需先选择（S03 EX-6.1）"
+  DRAFT_NOT_OPEN: "草案已取消或过期（S04 EX-34.1）"
+  TASK_NOT_FAILED: "任务不在 failed 状态"
+  NO_PLAN_ARTIFACT: "任务没有方案类产物"
+  QUESTION_ALREADY_ANSWERED: "问题已被另一通道回答（S07 EX-25.1）"
+  RUNTIME_OFFLINE: "runtime 离线（S07 EX-8.1）"
+  RUNTIME_NAME_CONFLICT: "runtime 名冲突（S05 EX-12.1）"
+  AUTH_INVALID: "worker token 无效（S05 EX-10.1）"
+  VERSION_UNSUPPORTED: "worker 版本不兼容"
+  TRUST_LOCKED: "动作类型锁定人工，不可改（S06 EX-19.1）"
+  ACTION_NOT_REVOCABLE: "动作已超过 7 天回滚期或不可撤回"
+  SOURCE_UNAVAILABLE: "来源系统不可达（S04 EX-20.1）"
+  CANDIDATE_NOT_OPEN: "候选已处理"
+
+paths:
+  /api/inbox:
+    get:
+      operationId: getInbox
+      tags: [inbox]
+      summary: "收件箱：所有需要我处理的项"
+      description: "来源：S03 Step 1、S01 Step 26、S06 Step 6、S07 Step 16、S02 Step 30。聚合四类条目：待拍板/审批（approvals pending）、需要输入（questions open）、失败三选一（tasks failed）、候选（candidates open）。"
+      responses:
+        '200':
+          description: "收件箱"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [approvals, questions, failures, candidates, counts]
+                properties:
+                  approvals:
+                    type: array
+                    items: { $ref: '#/components/schemas/Approval' }
+                  questions:
+                    type: array
+                    items: { $ref: 'tasks.yaml#/components/schemas/Question' }
+                  failures:
+                    type: array
+                    items: { $ref: 'tasks.yaml#/components/schemas/TaskSummary' }
+                  candidates:
+                    type: array
+                    items: { $ref: '#/components/schemas/Candidate' }
+                  counts:
+                    type: object
+                    properties:
+                      actionable: { type: integer, description: "不含候选的待处理数，用于左栏计数" }
+                      candidates: { type: integer }
+        '401': { $ref: 'tasks.yaml#/components/responses/Unauthorized' }
+
+  /api/approvals:
+    get:
+      operationId: listApprovals
+      tags: [approvals]
+      summary: "审批列表"
+      description: "来源：S06 审批历史；信任视图的自动执行记录。"
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/ApprovalStatus' }
+        - name: taskKey
+          in: query
+          schema: { type: string }
+        - name: actionType
+          in: query
+          schema: { $ref: '#/components/schemas/ActionType' }
+        - $ref: 'tasks.yaml#/components/parameters/page'
+        - $ref: 'tasks.yaml#/components/parameters/perPage'
+      responses:
+        '200':
+          description: "列表"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Approval' }
+                  total: { type: integer }
+
+  /api/approvals/{approvalKey}:
+    parameters:
+      - $ref: '#/components/parameters/approvalKey'
+    get:
+      operationId: getApproval
+      tags: [approvals]
+      summary: "审批详情"
+      description: "来源：S06 Step 6 卡片、飞书链接落地页。"
+      responses:
+        '200':
+          description: "审批"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Approval' }
+        '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
+
+  /api/approvals/{approvalKey}/decide:
+    parameters:
+      - $ref: '#/components/parameters/approvalKey'
+    post:
+      operationId: decideApproval
+      tags: [approvals]
+      summary: "面板通道决定审批（确认 / 修改后确认 / 否决）"
+      description: "来源：S03 Step 2 → Step 6（分流卡）、S06 Step 15 → Step 22。条件更新保证与飞书通道先到先得；传 editedBody 或 overrides 视为修改，不计入信任；必须携带 bodyHash 防止批到旧正文。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision, bodyHash]
+              properties:
+                decision: { type: string, enum: [approve, reject] }
+                bodyHash: { type: string, description: "客户端看到的正文哈希（sha256 hex）" }
+                editedBody:
+                  type: string
+                  nullable: true
+                  description: "修改后确认时的新正文（非分流卡类审批）"
+                overrides:
+                  type: object
+                  nullable: true
+                  description: "分流卡类审批的覆盖项（S03 Step 2）"
+                  properties:
+                    path: { $ref: 'tasks.yaml#/components/schemas/TaskPath' }
+                    repo: { type: string }
+                    runtime: { type: string }
+                    agent: { $ref: 'tasks.yaml#/components/schemas/AgentName' }
+                comment: { type: string, nullable: true, description: "否决原因" }
+      responses:
+        '200':
+          description: "已决定，返回审批与信任变化"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [approval, trust]
+                properties:
+                  approval: { $ref: '#/components/schemas/Approval' }
+                  trust: { $ref: '#/components/schemas/TrustCounter' }
+        '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
+        '409':
+          description: "APPROVAL_ALREADY_DECIDED（另一通道先到，body 含 decidedVia/decidedAt）或 APPROVAL_BODY_CHANGED（正文已变更）"
+          content:
+            application/json:
+              schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
+        '422':
+          description: "REPO_REQUIRED（分流卡仓库待确认）或校验失败"
+          content:
+            application/json:
+              schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
+
+  /api/actions/{actionId}/revoke:
+    parameters:
+      - name: actionId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: revokeAction
+      tags: [actions]
+      summary: "事后否决自动执行的动作并回滚，降级该动作类型为人工"
+      description: "来源：S06 Step 29 → Step 32。7 天内有效。可补偿的动作撤回，不可补偿的只记录（EX-32.1）。"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        '200':
+          description: "已降级；compensation 说明回滚结果"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [trust, compensation]
+                properties:
+                  trust: { $ref: '#/components/schemas/TrustCounter' }
+                  compensation:
+                    type: object
+                    properties:
+                      status: { type: string, enum: [reverted, not_revocable, failed] }
+                      detail: { type: string }
+        '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
+        '409':
+          description: "ACTION_NOT_REVOCABLE（超过 7 天）"
+          content:
+            application/json:
+              schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
+
+  /api/trust:
+    get:
+      operationId: listTrust
+      tags: [trust]
+      summary: "信任视图：动作类型 × 状态 × 计数，以及每周确认数趋势"
+      description: "来源：S06.2 信任视图（Phase 2）、S06 Step 22。"
+      responses:
+        '200':
+          description: "信任状态"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [counters, weeklyConfirmations, threshold]
+                properties:
+                  threshold: { type: integer, example: 5 }
+                  counters:
+                    type: array
+                    items: { $ref: '#/components/schemas/TrustCounter' }
+                  weeklyConfirmations:
+                    type: array
+                    description: "近 4 周每周需要人工确认的动作数"
+                    items:
+                      type: object
+                      properties:
+                        weekStart: { type: string, format: date }
+                        count: { type: integer }
+
+  /api/trust/{actionType}/reset:
+    parameters:
+      - name: actionType
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/ActionType' }
+    post:
+      operationId: resetTrust
+      tags: [trust]
+      summary: "手动把动作类型重置为人工并清零"
+      description: "来源：信任视图操作列（Phase 2 S06.2）。锁定类型返回 409。"
+      responses:
+        '200':
+          description: "已重置"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrustCounter' }
+        '409':
+          description: "TRUST_LOCKED"
+          content:
+            application/json:
+              schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
+
+  /api/candidates/{candidateId}/intake:
+    parameters:
+      - $ref: '#/components/parameters/candidateId'
+    post:
+      operationId: intakeCandidate
+      tags: [candidates]
+      summary: "把 LLM 扫描出的候选入库为任务"
+      description: "来源：S02 Step 30 的「入库」，走 S02 Step 5 起的主路径。"
+      responses:
+        '201':
+          description: "任务已创建"
+          content:
+            application/json:
+              schema: { $ref: 'tasks.yaml#/components/schemas/Task' }
+        '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
+        '409':
+          description: "CANDIDATE_NOT_OPEN"
+          content:
+            application/json:
+              schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
+
+  /api/candidates/{candidateId}/dismiss:
+    parameters:
+      - $ref: '#/components/parameters/candidateId'
+    post:
+      operationId: dismissCandidate
+      tags: [candidates]
+      summary: "忽略候选，以后不再列出"
+      description: "来源：S02 Step 30 的「忽略」。幂等。"
+      responses:
+        '200':
+          description: "已忽略"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Candidate' }
+        '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    panelToken:
+      type: http
+      scheme: bearer
+
+  parameters:
+    approvalKey:
+      name: approvalKey
+      in: path
+      required: true
+      schema: { type: string, pattern: '^A-\d+$' }
+    candidateId:
+      name: candidateId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  schemas:
+    ActionType:
+      type: string
+      enum: [triage_confirm, start_implement, create_pr, start_pick, resolve_conflict_push, reply_review, rerun_ci, merge_master, merge_release, jira_transition_in_progress, jira_done, feishu_reply, jira_comment]
+      description: "信任升级按此计数。merge_release 与 jira_done 锁定人工。M1 出现的：triage_confirm、start_implement、create_pr、feishu_reply、jira_comment。"
+    ApprovalStatus:
+      type: string
+      enum: [pending, approved, rejected, auto_approved, superseded, failed, expired]
+    Approval:
+      type: object
+      required: [key, taskKey, actionType, status, body, bodyHash, trustMode, trustStreak, createdAt]
+      properties:
+        key: { type: string, example: A-88 }
+        taskKey: { type: string, example: T-231.1 }
+        actionType: { $ref: '#/components/schemas/ActionType' }
+        status: { $ref: '#/components/schemas/ApprovalStatus' }
+        title: { type: string, description: "一行标题，如「回复 review 意见 · apache/doris#67657」" }
+        body: { type: string, description: "动作完整正文（markdown）" }
+        bodyHash: { type: string }
+        payload:
+          type: object
+          additionalProperties: true
+          description: "结构化内容：分流卡字段、PR 参数等"
+        trustMode: { type: string, enum: [manual, auto, locked] }
+        trustStreak: { type: integer, description: "创建时的连续原样确认数快照" }
+        feishuMessageId: { type: string, nullable: true }
+        feishuDeferred: { type: boolean, description: "当日超限延后合并推送（S01 EX-28.2）" }
+        decidedVia: { type: string, nullable: true, enum: [panel, feishu, auto] }
+        decidedAt: { type: string, format: date-time, nullable: true }
+        modified: { type: boolean, description: "修改后确认，不计数" }
+        finalBody: { type: string, nullable: true }
+        comment: { type: string, nullable: true }
+        supersededBy: { type: string, nullable: true, description: "被哪条新审批取代" }
+        actionId: { type: string, format: uuid, nullable: true, description: "执行后对应的动作记录，用于回滚" }
+        createdAt: { type: string, format: date-time }
+    TrustCounter:
+      type: object
+      required: [actionType, mode, streak, threshold]
+      properties:
+        actionType: { $ref: '#/components/schemas/ActionType' }
+        mode: { type: string, enum: [manual, auto, locked] }
+        streak: { type: integer }
+        threshold: { type: integer }
+        lastRejectedAt: { type: string, format: date-time, nullable: true }
+        autoExecutions7d: { type: integer }
+        updatedAt: { type: string, format: date-time }
+    Candidate:
+      type: object
+      required: [id, status, source, text, reason, confidence, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [open, intaken, dismissed] }
+        source:
+          type: object
+          properties:
+            type: { type: string, enum: [feishu] }
+            messageId: { type: string }
+            chatName: { type: string }
+            sender: { type: string }
+        text: { type: string }
+        reason: { type: string }
+        confidence: { type: number }
+        taskKey: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }

@@ -1,0 +1,222 @@
+{
+  "$schema": "./core-00-format.schema.json",
+  "scenario": "S02",
+  "name": "飞书消息显式入库",
+  "source": "logos/resources/prd/3-technical-plan/2-scenario-implementation/core-S02-feishu-intake.md",
+  "baseUrl": "{{env.CENTER_URL}}",
+  "auth": { "panelToken": "{{env.FOREMAN_PANEL_TOKEN}}", "workerToken": "{{env.FOREMAN_TOKEN}}" },
+  "dependencies": [
+    { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "FOREMAN_LARK_CLI 指向假 lark-cli：event +subscribe 回放 NDJSON，im 子命令写 JSON 文件", "handle": "lark" },
+    { "dependency": "Claude Code CLI", "strategy": "mock-service", "config": "假 claude 脚本模拟 --bg / agents --json / logs / --bg --resume，并按时间线调用 MCP 工具", "handle": "claude" },
+    { "dependency": "Codex CLI", "strategy": "mock-service", "config": "假 codex 脚本模拟 exec / exec resume", "handle": "codex" }
+  ],
+  "presets": {
+    "clock": [{ "step": "setup", "action": "clock.freeze" }],
+    "dev-online": [
+      { "step": "setup", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": [] } }
+    ],
+    "center-online": [
+      { "step": "setup", "action": "runtime.register", "args": { "name": "center", "transport": "local", "labels": ["agent:claude", "agent:codex", "text"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] } }
+    ],
+    "lark-context": [
+      { "step": "setup", "action": "mock.set", "mock": { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "fake lark-cli messages-get/list" }, "args": { "handle": "lark", "owner": "ou_owner", "botOpenId": "ou_bot", "chats": { "oc_index": { "name": "Doris 内核-索引", "messages": "{{fixture:lark.messages(chat='oc_index', count=45, target='om_target')}}" } } } }
+    ],
+    "claude-triage-guess": [
+      { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "get_task" }, { "tool": "deliver", "arguments": { "artifacts": [{ "kind": "triage", "tier": "fix", "effort": "small", "repo": { "name": "selectdb/selectdb-core", "confidence": 0.82 }, "suggestedPath": "透传 timeout", "codeLocations": [{ "file": "be/src/olap/rowset/segment_v2/ngram_index_reader.cpp", "line": 88 }] }] } }, { "exit": 0 }] } }
+    ]
+  },
+  "cases": [
+    {
+      "id": "ST-S02-01",
+      "title": "群消息打 📌 入库并走到分流卡",
+      "covers": "Step 1→17（含 S01 Step 12→31）",
+      "kind": "main",
+      "use": ["clock", "dev-online", "lark-context", "claude-triage-guess"],
+      "steps": [
+        { "step": "Step 1-2", "action": "mock.emit", "mock": { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "回放 reaction 事件" }, "args": { "handle": "lark", "event": { "type": "im.message.reaction.created_v1", "event_id": "evt-1", "message_id": "om_target", "chat_id": "oc_index", "operator_type": "user", "operator_open_id": "ou_owner", "emoji": "PUSHPIN" } } },
+        { "step": "Step 12-14", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "match": { "message_id": "om_target", "text": "已收录为 T-" }, "timeoutMs": 5000 } },
+        { "step": "Step 11", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/channels/feishu/threads" }, "assert": [{ "path": "body.items[0].source.type", "equals": "feishu" }, { "path": "body.items[0].source.ref", "equals": "om_target" }] }, "extract": { "taskKey": "body.items[0].key" } },
+        { "step": "Step 11", "method": "GET", "url": "/api/tasks/{{taskKey}}", "expected_status": 200, "assert": [{ "path": "body.contextPack.conversation", "length": 41 }, { "path": "body.repo.source", "equals": "llm" }] },
+        { "step": "Step 15-16", "action": "db.assert", "args": { "sql": "select count(*) as n from events where type='thread.created'" }, "assert": [{ "path": "rows[0].n", "gte": 1 }] },
+        { "step": "Step 17 → S01 Step 12-31", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create" }, "extract": { "wtCmd": "id" } },
+        { "step": "S01 Step 14", "action": "runtime.reply", "args": { "name": "dev", "type": "worktree.ready", "ref": "{{wtCmd}}", "payload": { "taskKey": "{{taskKey}}", "path": "/tmp/fx/wt/{{taskKey}}", "branchName": "foreman/{{taskKey}}", "reused": false } } },
+        { "step": "S01 Step 15-19", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "extract": { "sessionId": "payload.sessionId", "c": "id" } },
+        { "step": "S01 Step 18-19", "action": "runtime.reply", "args": { "name": "dev", "type": "session.started", "ref": "{{c}}", "payload": { "sessionId": "{{sessionId}}", "agentSessionId": "fake-1", "startedAt": "{{now}}" } } },
+        { "step": "S01 Step 22-26", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/inbox" }, "assert": [{ "path": "body.approvals[0].taskKey", "equals": "{{taskKey}}" }, { "path": "body.approvals[0].payload.repo.name", "equals": "selectdb/selectdb-core" }] } }
+      ]
+    },
+    {
+      "id": "ST-S02-02",
+      "title": "@机器人引用消息派活",
+      "covers": "Step 1→17",
+      "kind": "main",
+      "use": ["clock", "dev-online", "lark-context", "claude-triage-guess"],
+      "steps": [
+        { "step": "Step 1-2", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.receive_v1", "event_id": "evt-2", "message_id": "om_mention", "chat_id": "oc_index", "operator_type": "user", "sender_open_id": "ou_owner", "mentions": ["ou_bot"], "text": "@foreman 看一下这个超时", "parent_id": "om_target" } } },
+        { "step": "Step 12-14", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "match": { "text": "已收录为 T-" }, "timeoutMs": 5000 } },
+        { "step": "Step 11", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/channels/feishu/threads" }, "assert": [{ "path": "body.items[0].source.ref", "equals": "om_target" }] }, "extract": { "taskKey": "body.items[0].key" } },
+        { "step": "Step 11", "method": "GET", "url": "/api/tasks/{{taskKey}}", "expected_status": 200, "assert": [{ "path": "body.contextPack.sourceText", "equals": "{{fixture:lark.messageText('om_target')}}" }, { "path": "body.contextPack.summary", "contains": "看一下这个超时" }] }
+      ]
+    },
+    {
+      "id": "ST-S02-03",
+      "title": "候选扫描只进面板不推飞书",
+      "covers": "Step 18→30",
+      "kind": "main",
+      "use": ["clock", "center-online", "lark-context"],
+      "setup": [
+        { "step": "setup", "action": "mock.set", "args": { "handle": "lark", "recentSince": "{{now-1h}}", "recent": "{{fixture:lark.messages(chat='oc_dm', count=5)}}" } },
+        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "deliver", "arguments": { "artifacts": [{ "kind": "candidates", "candidates": [{ "messageId": "om_c1", "reason": "疑似需求", "confidence": 0.7 }, { "messageId": "om_c2", "reason": "疑似需求", "confidence": 0.65 }] }] } }, { "exit": 0 }] } }
+      ],
+      "steps": [
+        { "step": "Step 18", "action": "scheduler.tick", "args": { "job": "candidate-scan" } },
+        { "step": "Step 23-25", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.start", "match": { "payload.kind": "candidate_scan" } }, "extract": { "sessionId": "payload.sessionId", "c": "id" } },
+        { "step": "Step 25", "action": "runtime.reply", "args": { "name": "center", "type": "session.started", "ref": "{{c}}", "payload": { "sessionId": "{{sessionId}}", "agentSessionId": "fake-scan", "startedAt": "{{now}}" } } },
+        { "step": "Step 26-28", "action": "mcp.expectCall", "args": { "taskKey": null, "sessionId": "{{sessionId}}", "tool": "deliver" } },
+        { "step": "Step 29-30", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{ "path": "body.candidates", "length": 2 }, { "path": "body.counts.candidates", "equals": 2 }], "extract": { "candidateId": "body.candidates[0].id" } },
+        { "step": "Step 29", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "expectNone": true, "timeoutMs": 1000 } },
+        { "step": "Step 29", "action": "db.assert", "args": { "sql": "select count(*) as n from events where type='candidates.updated'" }, "assert": [{ "path": "rows[0].n", "gte": 1 }] }
+      ]
+    },
+    {
+      "id": "ST-S02-04",
+      "title": "候选一键入库走主路径",
+      "covers": "Step 30 → Step 5",
+      "kind": "main",
+      "use": ["clock", "center-online", "dev-online", "lark-context", "claude-triage-guess"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "candidates", "rows": [{ "source_type": "feishu", "message_id": "om_target", "chat_id": "oc_index", "text": "客户那边 ngram 索引 LIKE 查询偶发超时", "reason": "疑似需求", "confidence": 0.7, "status": "open" }] } }
+      ],
+      "steps": [
+        { "step": "Step 30", "method": "GET", "url": "/api/inbox", "expected_status": 200, "extract": { "candidateId": "body.candidates[0].id" } },
+        { "step": "Step 30", "method": "POST", "url": "/api/candidates/{{candidateId}}/intake", "expected_status": 201, "assert": [{ "path": "body.source.ref", "equals": "om_target" }, { "path": "body.state", "equals": "triaging" }], "extract": { "taskKey": "body.key" } },
+        { "step": "Step 30", "action": "db.assert", "args": { "sql": "select status, task_id from candidates where message_id='om_target'" }, "assert": [{ "path": "rows[0].status", "equals": "intaken" }, { "path": "rows[0].task_id", "exists": true }] },
+        { "step": "Step 30", "method": "POST", "url": "/api/candidates/{{candidateId}}/intake", "expected_status": 409, "assert": [{ "path": "body.code", "equals": "CANDIDATE_NOT_OPEN" }] }
+      ]
+    },
+    {
+      "id": "ST-S02-05",
+      "title": "他人打表情无反应",
+      "covers": "EX-4.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "lark-context"],
+      "steps": [
+        { "step": "Step 1-4", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.reaction.created_v1", "event_id": "evt-5", "message_id": "om_target", "chat_id": "oc_index", "operator_type": "user", "operator_open_id": "ou_colleague", "emoji": "PUSHPIN" } } },
+        { "step": "EX-4.1", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "expectNone": true, "timeoutMs": 1500 } },
+        { "step": "EX-4.1", "method": "GET", "url": "/api/tasks?rootOnly=true", "expected_status": 200, "assert": [{ "path": "body.total", "equals": 0 }] },
+        { "step": "EX-4.1", "action": "db.assert", "args": { "sql": "select handled, ignore_reason from feishu_events where event_id='evt-5'" }, "assert": [{ "path": "rows[0].handled", "equals": "ignored" }, { "path": "rows[0].ignore_reason", "equals": "not_owner" }] }
+      ]
+    },
+    {
+      "id": "ST-S02-06",
+      "title": "同一消息重复打表情回已存在",
+      "covers": "EX-5.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "lark-context", "claude-triage-guess"],
+      "steps": [
+        { "step": "Step 1-17", "action": "note", "args": { "text": "include ST-S02-01 Step 1–4（入库完成）" } },
+        { "step": "Step 11", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/channels/feishu/threads" }, "assert": [{ "path": "body.total", "equals": 1 }] }, "extract": { "taskKey": "body.items[0].key" } },
+        { "step": "EX-5.1", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.reaction.created_v1", "event_id": "evt-6", "message_id": "om_target", "chat_id": "oc_index", "operator_type": "user", "operator_open_id": "ou_owner", "emoji": "PUSHPIN" } } },
+        { "step": "EX-5.1", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "match": { "text": "已存在 {{taskKey}}" } } },
+        { "step": "EX-5.1", "method": "GET", "url": "/api/channels/feishu/threads", "expected_status": 200, "assert": [{ "path": "body.total", "equals": 1 }] }
+      ]
+    },
+    {
+      "id": "ST-S02-07",
+      "title": "重复标记且原任务 paused 时出现恢复条目",
+      "covers": "EX-5.1 副作用",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "lark-context", "claude-triage-guess"],
+      "steps": [
+        { "step": "Step 1-17", "action": "note", "args": { "text": "include ST-S02-01 Step 1–4" } },
+        { "step": "Step 11", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/channels/feishu/threads" }, "assert": [{ "path": "body.total", "equals": 1 }] }, "extract": { "taskKey": "body.items[0].key" } },
+        { "step": "EX-5.1", "method": "POST", "url": "/api/tasks/{{taskKey}}/pause", "expected_status": 200, "assert": [{ "path": "body.state", "equals": "paused" }] },
+        { "step": "EX-5.1", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.reaction.created_v1", "event_id": "evt-7", "message_id": "om_target", "chat_id": "oc_index", "operator_type": "user", "operator_open_id": "ou_owner", "emoji": "PUSHPIN" } } },
+        { "step": "EX-5.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/{{taskKey}}/messages" }, "assert": [{ "path": "body.items[-1].text", "contains": "再次标记" }] } },
+        { "step": "EX-5.1", "action": "ws.expect", "args": { "type": "inbox.new", "match": { "payload.itemType": "failure" } } }
+      ]
+    },
+    {
+      "id": "ST-S02-08",
+      "title": "上下文读取失败仍建任务并稍后补齐",
+      "covers": "EX-8.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "lark-context", "claude-triage-guess"],
+      "setup": [
+        { "step": "setup", "action": "mock.set", "mock": { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "messages-get 首次失败" }, "args": { "handle": "lark", "failGetOnce": true } }
+      ],
+      "steps": [
+        { "step": "Step 1-2", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.reaction.created_v1", "event_id": "evt-8", "message_id": "om_target", "chat_id": "oc_index", "operator_type": "user", "operator_open_id": "ou_owner", "emoji": "PUSHPIN" } } },
+        { "step": "EX-8.1", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "match": { "text": "上下文读取失败" } } },
+        { "step": "EX-8.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/channels/feishu/threads" }, "assert": [{ "path": "body.total", "equals": 1 }] }, "extract": { "taskKey": "body.items[0].key" } },
+        { "step": "EX-8.1", "method": "GET", "url": "/api/tasks/{{taskKey}}", "expected_status": 200, "assert": [{ "path": "body.contextPack.partial", "equals": true }] },
+        { "step": "EX-8.1", "action": "clock.advance", "args": { "minutes": 5 } },
+        { "step": "EX-8.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/{{taskKey}}" }, "assert": [{ "path": "body.contextPack.partial", "equals": false }, { "path": "body.contextPack.conversation", "minLength": 1 }] } },
+        { "step": "EX-8.1", "action": "db.assert", "args": { "sql": "select attempts from jobs where kind='context-retry' order by created_at desc limit 1" }, "assert": [{ "path": "rows[0].attempts", "lte": 3 }] }
+      ]
+    },
+    {
+      "id": "ST-S02-09",
+      "title": "回帖失败不影响任务且标注未送达",
+      "covers": "EX-13.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "lark-context", "claude-triage-guess"],
+      "setup": [
+        { "step": "setup", "action": "mock.set", "args": { "handle": "lark", "failReply": true } }
+      ],
+      "steps": [
+        { "step": "Step 1-2", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.reaction.created_v1", "event_id": "evt-9", "message_id": "om_target", "chat_id": "oc_index", "operator_type": "user", "operator_open_id": "ou_owner", "emoji": "PUSHPIN" } } },
+        { "step": "Step 11", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/channels/feishu/threads" }, "assert": [{ "path": "body.total", "equals": 1 }] }, "extract": { "taskKey": "body.items[0].key" } },
+        { "step": "EX-13.1", "action": "clock.advance", "args": { "minutes": 15 } },
+        { "step": "EX-13.1", "action": "db.assert", "args": { "sql": "select status, attempts from notifications where kind='intake_ack' order by created_at desc limit 1" }, "assert": [{ "path": "rows[0].status", "equals": "failed" }, { "path": "rows[0].attempts", "equals": 3 }] },
+        { "step": "EX-13.1", "method": "GET", "url": "/api/tasks/{{taskKey}}/messages", "expected_status": 200, "assert": [{ "path": "body.items[0].payload.feishu_ack_failed", "equals": true }] }
+      ]
+    },
+    {
+      "id": "ST-S02-10",
+      "title": "候选扫描额度不足本轮跳过",
+      "covers": "EX-23.1",
+      "kind": "exception",
+      "use": ["clock", "center-online", "lark-context"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "sessions", "rows": "{{fixture:sessions.running(runtime='center', agent='claude', count=3)}}" } },
+        { "step": "setup", "action": "db.seed", "args": { "table": "sessions", "rows": "{{fixture:sessions.running(runtime='center', agent='codex', count=3)}}" } }
+      ],
+      "steps": [
+        { "step": "Step 18", "action": "scheduler.tick", "args": { "job": "candidate-scan" } },
+        { "step": "EX-23.1", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.start" }, "timeoutMs": 1500, "assert": [{ "path": "$none", "equals": true }] },
+        { "step": "EX-23.1", "action": "db.assert", "args": { "sql": "select status, error_code from jobs where kind='candidate-scan' order by created_at desc limit 1" }, "assert": [{ "path": "rows[0].status", "equals": "skipped" }, { "path": "rows[0].error_code", "equals": "QUOTA" }] },
+        { "step": "EX-23.1", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "expectNone": true, "timeoutMs": 1000 } }
+      ]
+    },
+    {
+      "id": "ST-S02-11",
+      "title": "候选扫描会话超时无候选，三轮后标黄",
+      "covers": "EX-26.1",
+      "kind": "exception",
+      "use": ["clock", "center-online", "lark-context"],
+      "setup": [
+        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "sleepForever": true }] } }
+      ],
+      "steps": [
+        { "step": "Step 18-25 ×3", "action": "scheduler.tick", "args": { "job": "candidate-scan" } },
+        { "step": "Step 23-25", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.start" }, "extract": { "c1": "id", "s1": "payload.sessionId" } },
+        { "step": "Step 25", "action": "runtime.reply", "args": { "name": "center", "type": "session.started", "ref": "{{c1}}", "payload": { "sessionId": "{{s1}}", "agentSessionId": "fake-scan-1", "startedAt": "{{now}}" } } },
+        { "step": "EX-26.1", "action": "clock.advance", "args": { "minutes": 10 } },
+        { "step": "EX-26.1", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.stop", "match": { "payload.sessionId": "{{s1}}" } } },
+        { "step": "EX-26.1", "action": "clock.advance", "args": { "minutes": 50 } },
+        { "step": "Step 18", "action": "scheduler.tick", "args": { "job": "candidate-scan" } },
+        { "step": "Step 23-25", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.start" }, "extract": { "c2": "id", "s2": "payload.sessionId" } },
+        { "step": "Step 25", "action": "runtime.reply", "args": { "name": "center", "type": "session.started", "ref": "{{c2}}", "payload": { "sessionId": "{{s2}}", "agentSessionId": "fake-scan-2", "startedAt": "{{now}}" } } },
+        { "step": "EX-26.1", "action": "clock.advance", "args": { "minutes": 60 } },
+        { "step": "Step 18", "action": "scheduler.tick", "args": { "job": "candidate-scan" } },
+        { "step": "Step 23-25", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.start" }, "extract": { "c3": "id", "s3": "payload.sessionId" } },
+        { "step": "Step 25", "action": "runtime.reply", "args": { "name": "center", "type": "session.started", "ref": "{{c3}}", "payload": { "sessionId": "{{s3}}", "agentSessionId": "fake-scan-3", "startedAt": "{{now}}" } } },
+        { "step": "EX-26.1", "action": "clock.advance", "args": { "minutes": 10 } },
+        { "step": "EX-26.1", "action": "db.assert", "args": { "sql": "select count(*) as n from sessions where kind='candidate_scan' and state='stopped'" }, "assert": [{ "path": "rows[0].n", "equals": 3 }] },
+        { "step": "EX-26.1", "method": "GET", "url": "/api/runtimes/center", "expected_status": 200, "assert": [{ "path": "body.warnings[?(@.code=='candidate_scan_failing')].count", "equals": 3 }] },
+        { "step": "EX-26.1", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{ "path": "body.candidates", "length": 0 }] }
+      ]
+    }
+  ]
+}

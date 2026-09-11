@@ -1,0 +1,738 @@
+openapi: 3.1.0
+info:
+  title: "foreman API — tasks（任务、线程消息、草案、会话）"
+  version: 0.1.0
+  description: "来源：S03（拍板与启动）、S04（草案确认）、S07（线程消息、日志、续接、停止）、S05 Step 20（CLI task new）。所有端点走 panelToken。ID 约定：任务 key 形如 T-231，子任务 T-231.1，审批 A-88，会话为 UUID。字段 camelCase，对应 DB 列 snake_case。"
+servers:
+  - url: http://127.0.0.1:7801
+    description: "center，单端口 7801；开发机经 ssh -R 隧道同样访问 127.0.0.1:7801"
+security:
+  - panelToken: []
+tags:
+  - name: tasks
+  - name: messages
+  - name: drafts
+  - name: sessions
+
+paths:
+  /api/tasks:
+    get:
+      operationId: listTasks
+      tags: [tasks]
+      summary: "任务列表"
+      description: "来源：S05 Step 23 后的 task list（CLI）、面板频道线程列表。支持按状态、频道、runtime 过滤。"
+      parameters:
+        - $ref: '#/components/parameters/state'
+        - name: channel
+          in: query
+          schema: { type: string }
+          description: "频道 slug，如 doris-index"
+        - name: runtime
+          in: query
+          schema: { type: string }
+        - name: rootOnly
+          in: query
+          schema: { type: boolean, default: true }
+          description: "只返回根任务"
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/perPage'
+      responses:
+        '200':
+          description: "任务列表"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/TaskSummary' }
+                  total: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      operationId: createTask
+      tags: [tasks]
+      summary: "直接创建任务（CLI task new / 斜杠命令直出）"
+      description: "来源：S04 EX-10.1（斜杠命令）与 CLI foreman task new。不经调度员，创建后进入 triaging，走 S01 Step 11 起的上下文包与分流卡流程。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source, path]
+              properties:
+                source:
+                  type: string
+                  description: "需求来源引用：Jira key（CIR-19418）、PR（apache/doris#67657）或一段文字"
+                  minLength: 1
+                repo:
+                  type: string
+                  description: "目标仓库 owner/name；缺省时由代码定位会话推断"
+                path:
+                  $ref: '#/components/schemas/TaskPath'
+                kind:
+                  $ref: '#/components/schemas/TaskKind'
+                channel:
+                  type: string
+                  description: "频道 slug；缺省用来源默认频道"
+                runtime: { type: string, description: "手动指定 runtime 名" }
+                agent: { $ref: '#/components/schemas/AgentName' }
+                pickTargets:
+                  type: array
+                  items: { type: string }
+                  description: "M1 只记录不执行"
+      responses:
+        '201':
+          description: "已创建，state=triaging"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '404':
+          description: "频道不存在（CHANNEL_NOT_FOUND）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /api/tasks/{taskKey}:
+    parameters:
+      - $ref: '#/components/parameters/taskKey'
+    get:
+      operationId: getTask
+      tags: [tasks]
+      summary: "任务详情（含上下文包、任务树、当前会话、分流卡）"
+      description: "来源：S03 Step 19 右栏任务详情、S07 线程视图。"
+      responses:
+        '200':
+          description: "任务详情"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/tasks/{taskKey}/messages:
+    parameters:
+      - $ref: '#/components/parameters/taskKey'
+    get:
+      operationId: listTaskMessages
+      tags: [messages]
+      summary: "线程消息流"
+      description: "来源：S07 Step 4、S03 Step 19。按时间正序，游标分页。"
+      parameters:
+        - name: after
+          in: query
+          schema: { type: string }
+          description: "游标：上一页最后一条消息的 id"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+      responses:
+        '200':
+          description: "消息列表"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Message' }
+                  nextCursor: { type: string, nullable: true }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      operationId: postTaskMessage
+      tags: [messages]
+      summary: "在线程追加用户消息（回答 ask_user 或续接会话）"
+      description: "来源：S07 Step 21（回答问题）、S07 Step 36（会话已停止后续接）。有挂起问题时作为答案唤醒 MCP；否则以 session.resume 送入会话；runtime 离线时排队（EX-37.1）。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string, minLength: 1, maxLength: 20000 }
+                questionId:
+                  type: string
+                  format: uuid
+                  description: "可选，明确回答哪个问题；缺省取该任务最新 open 问题"
+      responses:
+        '202':
+          description: "已落库并送入或排队"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message, delivery]
+                properties:
+                  message: { $ref: '#/components/schemas/Message' }
+                  delivery:
+                    type: string
+                    enum: [answered, resumed, queued]
+                    description: "answered=唤醒挂起问题；resumed=已下发 session.resume；queued=runtime 离线排队"
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: "问题已被另一通道回答（QUESTION_ALREADY_ANSWERED，S07 EX-25.1）；消息仍作为普通消息追加"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /api/tasks/{taskKey}/pause:
+    parameters:
+      - $ref: '#/components/parameters/taskKey'
+    post:
+      operationId: pauseTask
+      tags: [tasks]
+      summary: "暂停任务"
+      description: "来源：S04 EX-10.1（/task pause）、CLI task pause。运行中会话会被停止（S07 Step 44）。幂等。"
+      responses:
+        '200':
+          description: "已暂停"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/tasks/{taskKey}/resume:
+    parameters:
+      - $ref: '#/components/parameters/taskKey'
+    post:
+      operationId: resumeTask
+      tags: [tasks]
+      summary: "恢复任务到暂停前的状态"
+      description: "来源：S04 EX-10.1（/task resume）、CLI task resume。幂等。"
+      responses:
+        '200':
+          description: "已恢复"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/tasks/{taskKey}/retry:
+    parameters:
+      - $ref: '#/components/parameters/taskKey'
+    post:
+      operationId: retryTask
+      tags: [tasks]
+      summary: "失败卡三选一：重试 / 换 agent / 放弃"
+      description: "来源：S03 EX-32.1、EX-15.1、S07 EX-40.1。重试与换家复用 worktree。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode:
+                  type: string
+                  enum: [same_agent, switch_agent, abandon, fresh_session]
+                  description: "fresh_session 用于续接失败（S07 EX-40.1）：新会话并附线程摘要"
+      responses:
+        '202':
+          description: "已重新排队或已放弃"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: "任务不在 failed 状态（TASK_NOT_FAILED）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/tasks/{taskKey}/implement:
+    parameters:
+      - $ref: '#/components/parameters/taskKey'
+    post:
+      operationId: implementFromPlan
+      tags: [tasks]
+      summary: "按方案实现"
+      description: "来源：S03 Step 30（出方案路径的产物卡）。不再出分流卡，直接以简单修复路径、同一 runtime 创建实现会话，方案全文附加到上下文包。"
+      responses:
+        '202':
+          description: "已排队实现会话"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: "任务没有方案类产物（NO_PLAN_ARTIFACT）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/drafts/{draftId}/confirm:
+    parameters:
+      - name: draftId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: confirmDraft
+      tags: [drafts]
+      summary: "确认调度员草案，创建任务"
+      description: "来源：S04 Step 32 → Step 34。可带修改项。"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                edits:
+                  type: object
+                  description: "对草案字段的覆盖"
+                  properties:
+                    repo: { type: string }
+                    path: { $ref: '#/components/schemas/TaskPath' }
+                    runtime: { type: string }
+                    agent: { $ref: '#/components/schemas/AgentName' }
+                    pickTargets:
+                      type: array
+                      items: { type: string }
+      responses:
+        '201':
+          description: "任务已创建"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: "草案已取消或过期（DRAFT_NOT_OPEN，S04 EX-34.1）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/drafts/{draftId}/cancel:
+    parameters:
+      - name: draftId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: cancelDraft
+      tags: [drafts]
+      summary: "取消草案"
+      description: "来源：S04 Step 31 的「取消」。幂等。"
+      responses:
+        '200':
+          description: "已取消"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskDraft' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/sessions/{sessionId}/logs:
+    parameters:
+      - $ref: '#/components/parameters/sessionId'
+    get:
+      operationId: getSessionLogs
+      tags: [sessions]
+      summary: "读取会话原始日志片段"
+      description: "来源：S07 Step 6 → Step 12。日志不入库，中心经 worker 通道 session.logs 向会话所在 runtime 取。"
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 2000, default: 400 }
+      responses:
+        '200':
+          description: "日志片段"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [lines, truncated]
+                properties:
+                  lines:
+                    type: array
+                    items: { type: string }
+                  truncated: { type: boolean }
+                  from: { type: string, format: date-time }
+                  to: { type: string, format: date-time }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503':
+          description: "runtime 离线（RUNTIME_OFFLINE，S07 EX-8.1）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/sessions/{sessionId}/stop:
+    parameters:
+      - $ref: '#/components/parameters/sessionId'
+    post:
+      operationId: stopSession
+      tags: [sessions]
+      summary: "人工停止会话，任务进入 paused"
+      description: "来源：S07 Step 43 → Step 46。幂等：已停止的会话返回 200。"
+      responses:
+        '200':
+          description: "已停止"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503':
+          description: "runtime 离线，停止指令已排队（RUNTIME_OFFLINE）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+components:
+  securitySchemes:
+    panelToken:
+      type: http
+      scheme: bearer
+      description: "面板与 CLI 共用的长期 token，center init 时生成（FOREMAN_PANEL_TOKEN）"
+
+  parameters:
+    taskKey:
+      name: taskKey
+      in: path
+      required: true
+      schema: { type: string, pattern: '^T-\d+(\.\d+)?$' }
+      description: "任务 key，如 T-231 或子任务 T-231.1"
+    sessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    state:
+      name: state
+      in: query
+      schema: { $ref: '#/components/schemas/TaskState' }
+    page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    perPage:
+      name: perPage
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+  responses:
+    Unauthorized:
+      description: "未认证（UNAUTHORIZED）"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: "资源不存在（NOT_FOUND）"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    ValidationError:
+      description: "请求校验失败（VALIDATION_FAILED），details 含字段级错误"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: "机器可读错误码，UPPER_SNAKE，见 approvals.yaml 的错误码目录"
+        message: { type: string, description: "人类可读中文描述" }
+        details: { type: object, additionalProperties: true }
+
+    TaskState:
+      type: string
+      enum: [draft, triaging, pending_decision, queued, running, waiting_input, waiting_approval, failed, delivered, done, paused]
+      description: "任务状态机，见 core-02-panel-design.md 2.5"
+    TaskPath:
+      type: string
+      enum: [fix, plan, proto]
+      description: "分流档位：简单修复 / 出方案 / 出原型"
+    TaskKind:
+      type: string
+      enum: [code, analysis, text, review, pr, branch]
+      description: "任务类型，决定路由；根任务通常 code/analysis/text，子任务 pr/branch/review"
+    AgentName:
+      type: string
+      enum: [claude, codex, opencode]
+    RepoRef:
+      type: object
+      required: [name, source]
+      properties:
+        name: { type: string, nullable: true, description: "owner/name，如 selectdb/selectdb-core" }
+        source:
+          type: string
+          enum: [mapping, llm, manual, unresolved]
+        confidence: { type: number, minimum: 0, maximum: 1, nullable: true }
+        candidates:
+          type: array
+          items: { type: string }
+
+    TaskSummary:
+      type: object
+      required: [key, title, state, kind, channel, createdAt, updatedAt]
+      properties:
+        key: { type: string, example: T-231 }
+        parentKey: { type: string, nullable: true }
+        title: { type: string }
+        state: { $ref: '#/components/schemas/TaskState' }
+        kind: { $ref: '#/components/schemas/TaskKind' }
+        path: { $ref: '#/components/schemas/TaskPath' }
+        channel: { type: string, description: "频道 slug" }
+        source:
+          type: object
+          properties:
+            type: { type: string, enum: [jira, feishu, channel, cli, github] }
+            ref: { type: string, description: "CIR-20001 / 飞书 messageId / 频道消息 id" }
+            url: { type: string, nullable: true }
+        repo: { $ref: '#/components/schemas/RepoRef' }
+        runtime: { type: string, nullable: true }
+        agent: { $ref: '#/components/schemas/AgentName' }
+        queueReason: { type: string, nullable: true }
+        unreadCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    Task:
+      allOf:
+        - $ref: '#/components/schemas/TaskSummary'
+        - type: object
+          properties:
+            pickTargets:
+              type: array
+              items: { type: string }
+            decision:
+              type: object
+              nullable: true
+              description: "拍板结果（S03 Step 6）"
+              properties:
+                path: { $ref: '#/components/schemas/TaskPath' }
+                repo: { type: string }
+                runtime: { type: string }
+                agent: { $ref: '#/components/schemas/AgentName' }
+                modified: { type: boolean }
+                decidedVia: { type: string, enum: [panel, feishu, auto] }
+                decidedAt: { type: string, format: date-time }
+            terminalAt: { type: string, format: date-time, nullable: true }
+
+    TaskDetail:
+      allOf:
+        - $ref: '#/components/schemas/Task'
+        - type: object
+          required: [contextPack, children, artifacts]
+          properties:
+            contextPack: { $ref: '#/components/schemas/ContextPack' }
+            triageCard: { $ref: '#/components/schemas/TriageCard' }
+            children:
+              type: array
+              items: { $ref: '#/components/schemas/TaskSummary' }
+            currentSession: { $ref: '#/components/schemas/Session' }
+            sessions:
+              type: array
+              items: { $ref: '#/components/schemas/Session' }
+            artifacts:
+              type: array
+              items: { $ref: '#/components/schemas/Artifact' }
+            openQuestion: { $ref: '#/components/schemas/Question' }
+            pendingApprovals:
+              type: array
+              items:
+                type: object
+                properties:
+                  key: { type: string, example: A-88 }
+                  actionType: { type: string }
+            trustSummary:
+              type: array
+              description: "本任务触发过的动作类型及其信任计数"
+              items:
+                type: object
+                properties:
+                  actionType: { type: string }
+                  streak: { type: integer }
+                  threshold: { type: integer }
+
+    ContextPack:
+      type: object
+      required: [summary, sourceText, repo]
+      properties:
+        summary: { type: string }
+        sourceText: { type: string, description: "需求原文" }
+        conversation:
+          type: array
+          description: "来源对话前后文（飞书前后各 20 条）"
+          items:
+            type: object
+            properties:
+              sender: { type: string }
+              text: { type: string }
+              at: { type: string, format: date-time }
+        jira:
+          type: object
+          nullable: true
+          properties:
+            key: { type: string }
+            project: { type: string }
+            component: { type: string }
+            version: { type: string }
+            priority: { type: string }
+            commentsSummary: { type: string }
+            attachments:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  url: { type: string }
+        repo: { $ref: '#/components/schemas/RepoRef' }
+        codeLocations:
+          type: array
+          maxItems: 8
+          items:
+            type: object
+            required: [file]
+            properties:
+              file: { type: string }
+              line: { type: integer, nullable: true }
+              symbol: { type: string, nullable: true }
+              why: { type: string }
+        planDoc: { type: string, nullable: true, description: "按方案实现时附加的方案全文" }
+        partial: { type: boolean, description: "上下文读取失败的降级标记（S02 EX-8.1）" }
+
+    TriageCard:
+      type: object
+      required: [tier, effort, repo, suggestedPath, degraded]
+      properties:
+        tier: { $ref: '#/components/schemas/TaskPath' }
+        effort: { type: string, enum: [small, medium, large] }
+        repo: { $ref: '#/components/schemas/RepoRef' }
+        suggestedPath: { type: string }
+        codeLocations:
+          type: array
+          items:
+            type: object
+            properties:
+              file: { type: string }
+              line: { type: integer, nullable: true }
+        defaultRuntime: { type: string, nullable: true }
+        defaultAgent: { $ref: '#/components/schemas/AgentName' }
+        degraded: { type: boolean, description: "开发机离线或定位失败时的降级卡（S01 EX-12.1）" }
+        degradedReason: { type: string, nullable: true }
+        approvalKey: { type: string, example: A-87 }
+
+    TaskDraft:
+      type: object
+      required: [id, channel, status, fields, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        channel: { type: string }
+        status: { type: string, enum: [open, confirmed, cancelled, expired] }
+        fields:
+          type: object
+          properties:
+            source: { type: string }
+            sourceTitle: { type: string }
+            repo: { type: string, nullable: true }
+            repoSource: { type: string }
+            path: { $ref: '#/components/schemas/TaskPath' }
+            pickTargets:
+              type: array
+              items: { type: string }
+            runtime: { type: string }
+            agent: { $ref: '#/components/schemas/AgentName' }
+        taskKey: { type: string, nullable: true, description: "确认后创建的任务" }
+        createdAt: { type: string, format: date-time }
+
+    Message:
+      type: object
+      required: [id, taskKey, kind, author, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        taskKey: { type: string, nullable: true, description: "线程消息有值；频道消息为 null" }
+        channel: { type: string }
+        kind:
+          type: string
+          enum: [system, progress, ask, approval_card, artifact_card, failure_card, draft_card, triage_card, user, user_reply, clarification, dispatcher]
+        author:
+          type: string
+          description: "user / system / 调度员 / agent 名"
+        text: { type: string }
+        sessionId: { type: string, format: uuid, nullable: true }
+        refId:
+          type: string
+          nullable: true
+          description: "卡片消息引用的对象：审批 key、草案 id、问题 id、产物 id"
+        payload:
+          type: object
+          additionalProperties: true
+          description: "卡片结构化内容"
+        delivery:
+          type: string
+          nullable: true
+          enum: [delivered, queued]
+          description: "用户消息送入会话的状态（S07 EX-37.1）"
+        createdAt: { type: string, format: date-time }
+
+    Session:
+      type: object
+      required: [id, taskKey, runtime, agent, kind, state, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        taskKey: { type: string }
+        runtime: { type: string }
+        agent: { $ref: '#/components/schemas/AgentName' }
+        model: { type: string, nullable: true }
+        kind: { type: string, enum: [implement, review, code_locate, plan, proto, dispatcher, candidate_scan] }
+        state:
+          type: string
+          enum: [planned, running, waiting_input, done, failed, stopped, lost]
+        reachable: { type: boolean, description: "runtime 失联时为 false" }
+        agentSessionId: { type: string, nullable: true, description: "claude --bg 或 codex 的会话 ID" }
+        worktreePath: { type: string, nullable: true }
+        startedAt: { type: string, format: date-time, nullable: true }
+        endedAt: { type: string, format: date-time, nullable: true }
+        lastProgressAt: { type: string, format: date-time, nullable: true }
+        failureReason: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    Artifact:
+      type: object
+      required: [id, kind, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [pr, doc, branch, triage, candidates] }
+        url: { type: string, nullable: true }
+        title: { type: string, nullable: true }
+        path: { type: string, nullable: true }
+        branch: { type: string, nullable: true }
+        diffStat:
+          type: object
+          nullable: true
+          properties:
+            additions: { type: integer }
+            deletions: { type: integer }
+            files: { type: integer }
+        createdAt: { type: string, format: date-time }
+
+    Question:
+      type: object
+      required: [id, taskKey, sessionId, text, status, askedAt]
+      properties:
+        id: { type: string, format: uuid }
+        taskKey: { type: string }
+        sessionId: { type: string, format: uuid }
+        text: { type: string }
+        status: { type: string, enum: [open, answered, timeout] }
+        answer: { type: string, nullable: true }
+        answeredVia: { type: string, nullable: true, enum: [panel, feishu] }
+        askedAt: { type: string, format: date-time }
+        answeredAt: { type: string, format: date-time, nullable: true }

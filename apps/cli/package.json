@@ -1,0 +1,9 @@
+{
+  "name": "@foreman/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "foreman": "src/index.ts" },
+  "scripts": { "build": "tsc -p tsconfig.json --noEmit" },
+  "dependencies": { "@foreman/shared": "workspace:*", "@foreman/worker": "workspace:*", "commander": "^14.0.0", "yaml": "^2.8.1" }
+}

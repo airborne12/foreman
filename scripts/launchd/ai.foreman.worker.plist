@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ai.foreman.worker</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>__HOME__/foreman/current/scripts/worker-run.sh</string></array>
+  <key>WorkingDirectory</key><string>__HOME__/foreman/current</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__HOME__/foreman/logs/worker.out.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/foreman/logs/worker.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>FOREMAN_HOME</key><string>__HOME__/.foreman</string>
+    <key>HTTPS_PROXY</key><string>http://127.0.0.1:10809</string>
+    <key>HTTP_PROXY</key><string>http://127.0.0.1:10809</string>
+    <key>NO_PROXY</key><string>localhost,127.0.0.1,open.feishu.cn,open.larksuite.com,172.17.0.0/16,10.26.0.0/16</string>
+  </dict>
+</dict>
+</plist>

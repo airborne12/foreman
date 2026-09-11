@@ -1,0 +1,249 @@
+{
+  "$schema": "./core-00-format.schema.json",
+  "scenario": "S06",
+  "name": "审批双通道与信任升级",
+  "source": "logos/resources/prd/3-technical-plan/2-scenario-implementation/core-S06-approval-and-trust.md",
+  "baseUrl": "{{env.CENTER_URL}}",
+  "auth": { "panelToken": "{{env.FOREMAN_PANEL_TOKEN}}", "workerToken": "{{env.FOREMAN_TOKEN}}" },
+  "dependencies": [
+    { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "FOREMAN_LARK_CLI 指向假 lark-cli：回放 reaction 事件，记录发送与回帖", "handle": "lark" },
+    { "dependency": "Jira Server", "strategy": "mock-service", "config": "fake Jira comment 端点（执行器目标）", "handle": "jira" }
+  ],
+  "presets": {
+    "clock": [{ "step": "setup", "action": "clock.freeze" }],
+    "task": [
+      { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.running(key='T-231', channel='jira', runtime='dev')}}" } },
+      { "step": "setup", "action": "note", "args": { "text": "运行器提供 internal API：POST /__test/approvals/request {taskKey, actionType, title, body, executor} 直接调用领域核心的 approvals.request，返回 {key, bodyHash, feishuMessageId}；executor=center 时由假执行器（jira / lark）执行" } }
+    ]
+  },
+  "cases": [
+    {
+      "id": "ST-S06-01",
+      "title": "飞书先批，面板同步，回帖含信任计数",
+      "covers": "Step 1→24",
+      "kind": "main",
+      "use": ["clock", "task"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "trust_counters", "rows": [{ "action_type": "reply_review", "mode": "manual", "streak": 2 }] } }
+      ],
+      "steps": [
+        { "step": "Step 1-4", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "reply_review", "title": "回复 review 意见", "body": "感谢指出…", "executor": "center" }, "expected_status": 201, "assert": [{ "path": "body.status", "equals": "pending" }, { "path": "body.trustMode", "equals": "manual" }, { "path": "body.trustStreak", "equals": 2 }], "extract": { "ak": "body.key", "h": "body.bodyHash" } },
+        { "step": "Step 5-6", "action": "ws.expect", "args": { "type": "inbox.new", "match": { "payload.itemType": "approval", "payload.item.key": "{{ak}}" } } },
+        { "step": "Step 7-10", "action": "mock.expect", "mock": { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "假 lark-cli messages-send" }, "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "[审批] {{ak}}" } }, "extract": { "mid": "message_id" } },
+        { "step": "Step 11-13", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.reaction.created_v1", "event_id": "evt-s06-1", "message_id": "{{mid}}", "operator_type": "user", "operator_open_id": "ou_owner", "emoji": "DONE" } } },
+        { "step": "Step 17-22", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/approvals/{{ak}}" }, "assert": [{ "path": "body.status", "equals": "approved" }, { "path": "body.decidedVia", "equals": "feishu" }, { "path": "body.modified", "equals": false }], "timeoutMs": 5000 } },
+        { "step": "Step 19", "method": "GET", "url": "/api/trust", "expected_status": 200, "assert": [{ "path": "body.counters[?(@.actionType=='reply_review')].streak", "equals": 3 }, { "path": "body.counters[?(@.actionType=='reply_review')].mode", "equals": "manual" }] },
+        { "step": "Step 20", "action": "db.assert", "args": { "sql": "select status from actions where approval_id=(select id from approvals where key='{{ak}}')" }, "assert": [{ "path": "rows[0].status", "equals": "succeeded" }] },
+        { "step": "Step 22", "action": "ws.expect", "args": { "type": "inbox.removed", "match": { "payload.key": "{{ak}}", "payload.reason": "decided_feishu" } } },
+        { "step": "Step 23-24", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "match": { "message_id": "{{mid}}", "text": "已确认（信任 3/5）" } } }
+      ]
+    },
+    {
+      "id": "ST-S06-02",
+      "title": "面板确认后飞书回帖已在面板确认",
+      "covers": "Step 14→24",
+      "kind": "main",
+      "use": ["clock", "task"],
+      "steps": [
+        { "step": "Step 1-10", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "reply_review", "title": "回复 review 意见", "body": "感谢指出…", "executor": "center" }, "expected_status": 201, "extract": { "ak": "body.key", "h": "body.bodyHash" } },
+        { "step": "Step 7-10", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "[审批] {{ak}}" } }, "extract": { "mid": "message_id" } },
+        { "step": "Step 14-18", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 200, "assert": [{ "path": "body.approval.decidedVia", "equals": "panel" }, { "path": "body.trust.streak", "equals": 1 }] },
+        { "step": "Step 23-24", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "match": { "message_id": "{{mid}}", "text": "已在面板确认" } } }
+      ]
+    },
+    {
+      "id": "ST-S06-03",
+      "title": "五次原样确认后第六次自动执行",
+      "covers": "Step 19 + EX-4.1",
+      "kind": "main",
+      "use": ["clock", "task"],
+      "steps": [
+        { "step": "Step 1-22 ×5", "action": "note", "args": { "text": "运行器 repeat 5 次：request(rerun_ci) → decide approve（原样）" } },
+        { "step": "Step 1-22 #1", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "rerun_ci", "title": "重跑 CI", "body": "doris_be_ut", "executor": "center" }, "expected_status": 201, "extract": { "a1": "body.key", "h1": "body.bodyHash" } },
+        { "step": "Step 14-19 #1", "method": "POST", "url": "/api/approvals/{{a1}}/decide", "body": { "decision": "approve", "bodyHash": "{{h1}}" }, "expected_status": 200, "assert": [{ "path": "body.trust.streak", "equals": 1 }] },
+        { "step": "Step 1-22 #2", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "rerun_ci", "title": "重跑 CI", "body": "doris_be_ut", "executor": "center" }, "expected_status": 201, "extract": { "a2": "body.key", "h2": "body.bodyHash" } },
+        { "step": "Step 14-19 #2", "method": "POST", "url": "/api/approvals/{{a2}}/decide", "body": { "decision": "approve", "bodyHash": "{{h2}}" }, "expected_status": 200, "assert": [{ "path": "body.trust.streak", "equals": 2 }] },
+        { "step": "Step 1-22 #3", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "rerun_ci", "title": "重跑 CI", "body": "doris_be_ut", "executor": "center" }, "expected_status": 201, "extract": { "a3": "body.key", "h3": "body.bodyHash" } },
+        { "step": "Step 14-19 #3", "method": "POST", "url": "/api/approvals/{{a3}}/decide", "body": { "decision": "approve", "bodyHash": "{{h3}}" }, "expected_status": 200, "assert": [{ "path": "body.trust.streak", "equals": 3 }] },
+        { "step": "Step 1-22 #4", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "rerun_ci", "title": "重跑 CI", "body": "doris_be_ut", "executor": "center" }, "expected_status": 201, "extract": { "a4": "body.key", "h4": "body.bodyHash" } },
+        { "step": "Step 14-19 #4", "method": "POST", "url": "/api/approvals/{{a4}}/decide", "body": { "decision": "approve", "bodyHash": "{{h4}}" }, "expected_status": 200, "assert": [{ "path": "body.trust.streak", "equals": 4 }] },
+        { "step": "Step 1-22 #5", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "rerun_ci", "title": "重跑 CI", "body": "doris_be_ut", "executor": "center" }, "expected_status": 201, "extract": { "a5": "body.key", "h5": "body.bodyHash" } },
+        { "step": "Step 14-19 #5", "method": "POST", "url": "/api/approvals/{{a5}}/decide", "body": { "decision": "approve", "bodyHash": "{{h5}}" }, "expected_status": 200, "assert": [{ "path": "body.trust.streak", "equals": 5 }, { "path": "body.trust.mode", "equals": "auto" }] },
+        { "step": "Step 22", "action": "ws.expect", "args": { "type": "trust.updated", "match": { "payload.change": "promoted", "payload.counter.actionType": "rerun_ci" } } },
+        { "step": "EX-4.1 #6", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "rerun_ci", "title": "重跑 CI", "body": "doris_be_ut", "executor": "center" }, "expected_status": 201, "assert": [{ "path": "body.status", "equals": "auto_approved" }], "extract": { "a6": "body.key" } },
+        { "step": "EX-4.1", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{ "path": "body.approvals[?(@.key=='{{a6}}')]", "length": 0 }] },
+        { "step": "EX-4.1", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "{{a6}}" }, "expectNone": true, "timeoutMs": 1000 } },
+        { "step": "EX-4.1", "action": "db.assert", "args": { "sql": "select auto, status, revocable_until is not null as rv from actions where approval_id=(select id from approvals where key='{{a6}}')" }, "assert": [{ "path": "rows[0].auto", "equals": true }, { "path": "rows[0].status", "equals": "succeeded" }, { "path": "rows[0].rv", "equals": true }] },
+        { "step": "EX-4.1", "method": "GET", "url": "/api/tasks/T-231/messages", "expected_status": 200, "assert": [{ "path": "body.items[-1].text", "contains": "自动执行" }, { "path": "body.items[-1].payload.actionId", "exists": true }], "extract": { "actionId": "body.items[-1].payload.actionId" } }
+      ]
+    },
+    {
+      "id": "ST-S06-04",
+      "title": "信任视图升级行数据",
+      "covers": "Step 22",
+      "kind": "main",
+      "use": ["clock", "task"],
+      "steps": [
+        { "step": "Step 19-22", "action": "note", "args": { "text": "include ST-S06-03" } },
+        { "step": "Step 22", "method": "GET", "url": "/api/trust", "expected_status": 200, "assert": [{ "path": "body.threshold", "equals": 5 }, { "path": "body.counters", "length": 13 }, { "path": "body.counters[?(@.actionType=='rerun_ci')].mode", "equals": "auto" }, { "path": "body.counters[?(@.actionType=='rerun_ci')].streak", "equals": 5 }, { "path": "body.counters[?(@.actionType=='rerun_ci')].autoExecutions7d", "equals": 1 }, { "path": "body.counters[?(@.actionType=='merge_release')].mode", "equals": "locked" }, { "path": "body.weeklyConfirmations", "length": 4 }] }
+      ]
+    },
+    {
+      "id": "ST-S06-05",
+      "title": "自动执行的动作事后否决并回滚",
+      "covers": "EX-4.1 + Step 28→32",
+      "kind": "exception",
+      "use": ["clock", "task"],
+      "steps": [
+        { "step": "EX-4.1", "action": "note", "args": { "text": "include ST-S06-03（得到 actionId）" } },
+        { "step": "Step 28-31", "method": "POST", "url": "/api/actions/{{actionId}}/revoke", "body": { "reason": "这次不该重跑" }, "expected_status": 200, "assert": [{ "path": "body.trust.mode", "equals": "manual" }, { "path": "body.trust.streak", "equals": 0 }, { "path": "body.compensation.status", "equals": "reverted" }] },
+        { "step": "Step 31", "action": "ws.expect", "args": { "type": "trust.updated", "match": { "payload.change": "downgraded" } } },
+        { "step": "Step 32", "action": "db.assert", "args": { "sql": "select status, revoked_at is not null as r from actions where id='{{actionId}}'" }, "assert": [{ "path": "rows[0].status", "equals": "reverted" }, { "path": "rows[0].r", "equals": true }] },
+        { "step": "后续", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "rerun_ci", "title": "重跑 CI", "body": "doris_be_ut", "executor": "center" }, "expected_status": 201, "assert": [{ "path": "body.status", "equals": "pending" }] },
+        { "step": "EX 7 天后", "action": "clock.advance", "args": { "minutes": 11520 } },
+        { "step": "ACTION_NOT_REVOCABLE", "method": "POST", "url": "/api/actions/{{actionId}}/revoke", "expected_status": 409, "assert": [{ "path": "body.code", "in": ["ACTION_NOT_REVOCABLE", "APPROVAL_NOT_PENDING"] }] }
+      ]
+    },
+    {
+      "id": "ST-S06-06",
+      "title": "非 owner 表情被忽略",
+      "covers": "EX-12.1",
+      "kind": "exception",
+      "use": ["clock", "task"],
+      "steps": [
+        { "step": "Step 1-10", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "reply_review", "title": "回复", "body": "x", "executor": "center" }, "expected_status": 201, "extract": { "ak": "body.key" } },
+        { "step": "Step 7-10", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "{{ak}}" } }, "extract": { "mid": "message_id" } },
+        { "step": "EX-12.1", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.reaction.created_v1", "event_id": "evt-s06-6", "message_id": "{{mid}}", "operator_type": "user", "operator_open_id": "ou_colleague", "emoji": "DONE" } } },
+        { "step": "EX-12.1", "action": "clock.advance", "args": { "seconds": 5 } },
+        { "step": "EX-12.1", "method": "GET", "url": "/api/approvals/{{ak}}", "expected_status": 200, "assert": [{ "path": "body.status", "equals": "pending" }] },
+        { "step": "EX-12.1", "action": "db.assert", "args": { "sql": "select count(*) as n from events where type='approval.reaction_ignored'" }, "assert": [{ "path": "rows[0].n", "equals": 1 }] }
+      ]
+    },
+    {
+      "id": "ST-S06-07",
+      "title": "先 ✅ 后 ❌ 忽略后者并回帖",
+      "covers": "EX-12.2",
+      "kind": "exception",
+      "use": ["clock", "task"],
+      "steps": [
+        { "step": "Step 1-10", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "reply_review", "title": "回复", "body": "x", "executor": "center" }, "expected_status": 201, "extract": { "ak": "body.key" } },
+        { "step": "Step 7-10", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "{{ak}}" } }, "extract": { "mid": "message_id" } },
+        { "step": "Step 11", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.reaction.created_v1", "event_id": "evt-s06-7a", "message_id": "{{mid}}", "operator_type": "user", "operator_open_id": "ou_owner", "emoji": "DONE" } } },
+        { "step": "Step 17", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/approvals/{{ak}}" }, "assert": [{ "path": "body.status", "equals": "approved" }] } },
+        { "step": "EX-12.2", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.reaction.created_v1", "event_id": "evt-s06-7b", "message_id": "{{mid}}", "operator_type": "user", "operator_open_id": "ou_owner", "emoji": "CrossMark" } } },
+        { "step": "EX-12.2", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "match": { "message_id": "{{mid}}", "text": "已于" } } },
+        { "step": "EX-12.2", "method": "GET", "url": "/api/approvals/{{ak}}", "expected_status": 200, "assert": [{ "path": "body.status", "equals": "approved" }] }
+      ]
+    },
+    {
+      "id": "ST-S06-08",
+      "title": "对作废消息的表情回帖引导",
+      "covers": "EX-12.2",
+      "kind": "exception",
+      "use": ["clock", "task"],
+      "steps": [
+        { "step": "Step 1-10", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "reply_review", "title": "回复", "body": "v1", "executor": "center" }, "expected_status": 201, "extract": { "ak": "body.key" } },
+        { "step": "Step 7-10", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "{{ak}}" } }, "extract": { "mid": "message_id" } },
+        { "step": "Step 25-27", "method": "POST", "url": "/__test/approvals/{{ak}}/supersede", "body": { "body": "v2" }, "expected_status": 200, "assert": [{ "path": "body.old.status", "equals": "superseded" }, { "path": "body.new.status", "equals": "pending" }], "extract": { "ak2": "body.new.key" } },
+        { "step": "Step 27", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "match": { "message_id": "{{mid}}", "text": "已作废" } } },
+        { "step": "EX-12.2", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.reaction.created_v1", "event_id": "evt-s06-8", "message_id": "{{mid}}", "operator_type": "user", "operator_open_id": "ou_owner", "emoji": "DONE" } } },
+        { "step": "EX-12.2", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "match": { "message_id": "{{mid}}", "text": "请对新消息操作" } } },
+        { "step": "EX-12.2", "method": "GET", "url": "/api/approvals/{{ak2}}", "expected_status": 200, "assert": [{ "path": "body.status", "equals": "pending" }] }
+      ]
+    },
+    {
+      "id": "ST-S06-09",
+      "title": "两通道竞争只有一个生效",
+      "covers": "EX-18.1",
+      "kind": "concurrency",
+      "use": ["clock", "task"],
+      "steps": [
+        { "step": "Step 1-10", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "reply_review", "title": "回复", "body": "x", "executor": "center" }, "expected_status": 201, "extract": { "ak": "body.key", "h": "body.bodyHash" } },
+        { "step": "Step 7-10", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "{{ak}}" } }, "extract": { "mid": "message_id" } },
+        { "step": "EX-18.1", "action": "note", "args": { "text": "运行器并发执行下面两步（parallel 组）" } },
+        { "step": "EX-18.1 parallel", "action": "mock.emit", "args": { "handle": "lark", "parallelGroup": "race", "event": { "type": "im.message.reaction.created_v1", "event_id": "evt-s06-9", "message_id": "{{mid}}", "operator_type": "user", "operator_open_id": "ou_owner", "emoji": "DONE" } } },
+        { "step": "EX-18.1 parallel", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "headers": { "X-Parallel-Group": "race" }, "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 200, "assert": [{ "path": "$statusIn", "in": [200, 409] }] },
+        { "step": "EX-18.1", "action": "db.assert", "args": { "sql": "select count(*) as n from events where type='approval.decided' and payload->>'key'='{{ak}}'" }, "assert": [{ "path": "rows[0].n", "equals": 1 }] },
+        { "step": "EX-18.1", "method": "GET", "url": "/api/approvals/{{ak}}", "expected_status": 200, "assert": [{ "path": "body.status", "equals": "approved" }, { "path": "body.decidedVia", "in": ["panel", "feishu"] }] },
+        { "step": "EX-18.1", "method": "GET", "url": "/api/trust", "expected_status": 200, "assert": [{ "path": "body.counters[?(@.actionType=='reply_review')].streak", "equals": 1 }] }
+      ]
+    },
+    {
+      "id": "ST-S06-10",
+      "title": "正文变更后旧 hash 批准被拒，新审批可批",
+      "covers": "EX-18.2",
+      "kind": "exception",
+      "use": ["clock", "task"],
+      "steps": [
+        { "step": "Step 1-4", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "reply_review", "title": "回复", "body": "v1", "executor": "center" }, "expected_status": 201, "extract": { "ak": "body.key", "h1": "body.bodyHash" } },
+        { "step": "Step 25-26", "method": "POST", "url": "/__test/approvals/{{ak}}/supersede", "body": { "body": "v2" }, "expected_status": 200, "extract": { "ak2": "body.new.key", "h2": "body.new.bodyHash" } },
+        { "step": "EX-18.2", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h1}}" }, "expected_status": 409, "assert": [{ "path": "body.code", "in": ["APPROVAL_BODY_CHANGED", "APPROVAL_ALREADY_DECIDED"] }] },
+        { "step": "EX-18.2", "method": "GET", "url": "/api/approvals/{{ak}}", "expected_status": 200, "assert": [{ "path": "body.status", "equals": "superseded" }, { "path": "body.supersededBy", "equals": "{{ak2}}" }] },
+        { "step": "EX-18.2", "method": "POST", "url": "/api/approvals/{{ak2}}/decide", "body": { "decision": "approve", "bodyHash": "{{h2}}" }, "expected_status": 200, "assert": [{ "path": "body.approval.status", "equals": "approved" }] }
+      ]
+    },
+    {
+      "id": "ST-S06-11",
+      "title": "锁定类型十次确认仍人工",
+      "covers": "EX-19.1",
+      "kind": "exception",
+      "use": ["clock", "task"],
+      "steps": [
+        { "step": "×10", "action": "note", "args": { "text": "运行器 repeat 10 次：request(merge_release) → decide approve" } },
+        { "step": "×10", "action": "mock.set", "args": { "handle": "runner", "repeat": 10, "steps": [{ "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "merge_release", "title": "合入 release", "body": "b", "executor": "center" }, "expected_status": 201, "extract": { "k": "body.key", "h": "body.bodyHash" } }, { "method": "POST", "url": "/api/approvals/{{k}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 200, "assert": [{ "path": "body.trust.mode", "equals": "locked" }] }] } },
+        { "step": "EX-19.1 #11", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "merge_release", "title": "合入 release", "body": "b", "executor": "center" }, "expected_status": 201, "assert": [{ "path": "body.status", "equals": "pending" }, { "path": "body.trustMode", "equals": "locked" }] },
+        { "step": "EX-19.1", "method": "POST", "url": "/api/trust/merge_release/reset", "expected_status": 409, "assert": [{ "path": "body.code", "equals": "TRUST_LOCKED" }] },
+        { "step": "EX-19.1", "method": "GET", "url": "/api/trust", "expected_status": 200, "assert": [{ "path": "body.counters[?(@.actionType=='merge_release')].mode", "equals": "locked" }, { "path": "body.counters[?(@.actionType=='merge_release')].streak", "equals": 10 }] }
+      ]
+    },
+    {
+      "id": "ST-S06-12",
+      "title": "执行失败不回退信任并可重试",
+      "covers": "EX-20.1",
+      "kind": "exception",
+      "use": ["clock", "task"],
+      "setup": [
+        { "step": "setup", "action": "mock.set", "mock": { "dependency": "Jira Server", "strategy": "mock-service", "config": "fake Jira comment 先 500 后 200" }, "args": { "handle": "jira", "commentFailTimes": 1 } }
+      ],
+      "steps": [
+        { "step": "Step 1-4", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "jira_comment", "title": "Jira 评论", "body": "已修复", "executor": "center" }, "expected_status": 201, "extract": { "ak": "body.key", "h": "body.bodyHash" } },
+        { "step": "Step 14-20", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 200, "assert": [{ "path": "body.trust.streak", "equals": 1 }] },
+        { "step": "EX-20.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/approvals/{{ak}}" }, "assert": [{ "path": "body.status", "equals": "failed" }] } },
+        { "step": "EX-20.1", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{ "path": "body.approvals[?(@.key=='{{ak}}')].payload.retryable", "equals": true }] },
+        { "step": "EX-20.1", "method": "POST", "url": "/__test/actions/retry", "body": { "approvalKey": "{{ak}}" }, "expected_status": 200, "assert": [{ "path": "body.status", "equals": "succeeded" }] },
+        { "step": "EX-20.1", "method": "GET", "url": "/api/trust", "expected_status": 200, "assert": [{ "path": "body.counters[?(@.actionType=='jira_comment')].streak", "equals": 1 }] }
+      ]
+    },
+    {
+      "id": "ST-S06-13",
+      "title": "不可补偿动作回滚",
+      "covers": "EX-32.1",
+      "kind": "exception",
+      "use": ["clock", "task"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "trust_counters", "rows": [{ "action_type": "create_pr", "mode": "auto", "streak": 5 }] } }
+      ],
+      "steps": [
+        { "step": "EX-4.1", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "create_pr", "title": "创建 PR", "body": "…", "executor": "agent" }, "expected_status": 201, "assert": [{ "path": "body.status", "equals": "auto_approved" }], "extract": { "actionId": "body.actionId" } },
+        { "step": "Step 28-32", "method": "POST", "url": "/api/actions/{{actionId}}/revoke", "expected_status": 200, "assert": [{ "path": "body.trust.mode", "equals": "manual" }, { "path": "body.trust.streak", "equals": 0 }, { "path": "body.compensation.status", "equals": "not_revocable" }] },
+        { "step": "EX-32.1", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{ "path": "body.failures[?(@.key=='T-231')]", "exists": true }] },
+        { "step": "EX-32.1", "method": "GET", "url": "/api/tasks/T-231/messages", "expected_status": 200, "assert": [{ "path": "body.items[-1].text", "contains": "无法自动撤回" }] }
+      ]
+    },
+    {
+      "id": "ST-S06-14",
+      "title": "修改后确认不计数",
+      "covers": "Phase 1 AC-06",
+      "kind": "boundary",
+      "use": ["clock", "task"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "trust_counters", "rows": [{ "action_type": "reply_review", "mode": "manual", "streak": 2 }] } }
+      ],
+      "steps": [
+        { "step": "Step 1-4", "method": "POST", "url": "/__test/approvals/request", "body": { "taskKey": "T-231", "actionType": "reply_review", "title": "回复", "body": "v1", "executor": "center" }, "expected_status": 201, "extract": { "ak": "body.key", "h": "body.bodyHash" } },
+        { "step": "Step 14-19", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}", "editedBody": "v1 加一句" }, "expected_status": 200, "assert": [{ "path": "body.approval.modified", "equals": true }, { "path": "body.approval.finalBody", "equals": "v1 加一句" }, { "path": "body.trust.streak", "equals": 2 }] },
+        { "step": "Step 20", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "match": { "text": "v1 加一句" } } }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,252 @@
+{
+  "$schema": "./core-00-format.schema.json",
+  "scenario": "S07",
+  "name": "跟踪会话进展并在线程中介入",
+  "source": "logos/resources/prd/3-technical-plan/2-scenario-implementation/core-S07-session-progress.md",
+  "baseUrl": "{{env.CENTER_URL}}",
+  "auth": { "panelToken": "{{env.FOREMAN_PANEL_TOKEN}}", "workerToken": "{{env.FOREMAN_TOKEN}}" },
+  "dependencies": [
+    { "dependency": "Claude Code CLI", "strategy": "mock-service", "config": "假 claude 脚本模拟 --bg / agents --json / logs / --bg --resume，并按时间线调用 MCP 工具", "handle": "claude" },
+    { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "假 lark-cli：回放回复事件，记录发送", "handle": "lark" }
+  ],
+  "presets": {
+    "clock": [{ "step": "setup", "action": "clock.freeze" }],
+    "dev-online": [
+      { "step": "setup", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": [] } }
+    ],
+    "running-session": [
+      { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.runningOn(key='T-231', runtime='dev', agent='claude', session_state='running', agent_session_id='cl-231')}}" } },
+      { "step": "setup", "action": "db.assert", "args": { "sql": "select id, mcp_token_hash from sessions where task_id=(select id from tasks where key='T-231')" }, "extract": { "sessionId": "rows[0].id" } },
+      { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "attach": { "agentSessionId": "cl-231", "logs": "{{fixture:logs(lines=600)}}" } } }
+    ]
+  },
+  "cases": [
+    {
+      "id": "ST-S07-01",
+      "title": "进展摘要展示与展开日志",
+      "covers": "Step 1→12",
+      "kind": "main",
+      "use": ["clock", "dev-online", "running-session"],
+      "steps": [
+        { "step": "Step 1-3", "action": "mcp.call", "args": { "tool": "report_progress", "taskKey": "T-231", "sessionId": "{{sessionId}}", "arguments": { "taskKey": "T-231", "text": "复现成功：构造 200 万行 ngram 索引，LIKE 在 timeout=1s 时不返回" } }, "assert": [{ "path": "result.ok", "equals": true }] },
+        { "step": "Step 4", "action": "ws.expect", "args": { "type": "message.new", "match": { "payload.message.kind": "progress", "payload.message.taskKey": "T-231" } } },
+        { "step": "Step 1-3", "action": "clock.advance", "args": { "minutes": 8 } },
+        { "step": "Step 1-3", "action": "mcp.call", "args": { "tool": "report_progress", "taskKey": "T-231", "sessionId": "{{sessionId}}", "arguments": { "taskKey": "T-231", "text": "{{fixture:text(len=260)}}" } } },
+        { "step": "Step 4", "method": "GET", "url": "/api/tasks/T-231/messages", "expected_status": 200, "assert": [{ "path": "body.items[?(@.kind=='progress')]", "length": 2 }, { "path": "body.items[-1].text.length", "lte": 200 }, { "path": "body.items[-1].payload.truncated", "equals": true }, { "path": "body.items[-1].payload.logFrom", "exists": true }], "extract": { "from": "body.items[-1].payload.logFrom", "to": "body.items[-1].payload.logTo" } },
+        { "step": "Step 5-9", "action": "note", "args": { "text": "运行器在后台以假 worker 响应 session.logs（下面 expect/reply 与 HTTP 并行）" } },
+        { "step": "Step 8-11", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.logs", "match": { "payload.sessionId": "{{sessionId}}" }, "background": true, "replyWith": { "type": "session.logs.result", "payload": { "sessionId": "{{sessionId}}", "lines": "{{fixture:logs(lines=400)}}", "truncated": true } } } },
+        { "step": "Step 6-12", "method": "GET", "url": "/api/sessions/{{sessionId}}/logs?from={{from}}&to={{to}}&limit=400", "expected_status": 200, "assert": [{ "path": "body.lines", "length": 400 }, { "path": "body.truncated", "equals": true }] },
+        { "step": "边界", "method": "GET", "url": "/api/sessions/{{sessionId}}/logs?limit=5000", "expected_status": 422 }
+      ]
+    },
+    {
+      "id": "ST-S07-02",
+      "title": "agent 提问，面板回复送入会话，会话继续到完成",
+      "covers": "Step 13→34",
+      "kind": "main",
+      "use": ["clock", "dev-online", "running-session"],
+      "steps": [
+        { "step": "Step 13-15", "action": "mcp.call", "args": { "tool": "ask_user", "taskKey": "T-231", "sessionId": "{{sessionId}}", "arguments": { "taskKey": "T-231", "question": "方案一保留旧接口做兼容，方案二直接删除。选哪个？", "options": ["方案一", "方案二"] }, "background": true, "handle": "ask" } },
+        { "step": "Step 16", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/inbox" }, "assert": [{ "path": "body.questions[0].taskKey", "equals": "T-231" }, { "path": "body.questions[0].status", "equals": "open" }] }, "extract": { "qid": "body.questions[0].id" } },
+        { "step": "Step 15", "method": "GET", "url": "/api/tasks/T-231", "expected_status": 200, "assert": [{ "path": "body.state", "equals": "waiting_input" }, { "path": "body.openQuestion.id", "equals": "{{qid}}" }] },
+        { "step": "Step 17-18", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "[需要你回答] T-231" } } },
+        { "step": "Step 19", "action": "runtime.reply", "args": { "name": "dev", "type": "session.state", "payload": { "sessionId": "{{sessionId}}", "state": "waiting_input", "waitingFor": "input", "source": "hook", "observedAt": "{{now}}" } } },
+        { "step": "Step 20-21", "method": "POST", "url": "/api/tasks/T-231/messages", "body": { "text": "方案二" }, "expected_status": 202, "assert": [{ "path": "body.delivery", "equals": "answered" }, { "path": "body.message.kind", "equals": "user_reply" }] },
+        { "step": "Step 25-28", "action": "mcp.expectCall", "args": { "handle": "ask", "result": { "answered": true, "answer": "方案二", "answeredVia": "panel" } }, "timeoutMs": 10000 },
+        { "step": "Step 26-29", "method": "GET", "url": "/api/tasks/T-231", "expected_status": 200, "assert": [{ "path": "body.state", "equals": "running" }, { "path": "body.openQuestion", "equals": null }] },
+        { "step": "Step 29", "action": "ws.expect", "args": { "type": "inbox.removed", "match": { "payload.itemType": "question", "payload.reason": "answered" } } },
+        { "step": "Step 31-34", "action": "mcp.call", "args": { "tool": "deliver", "taskKey": "T-231", "sessionId": "{{sessionId}}", "arguments": { "taskKey": "T-231", "artifacts": [{ "kind": "branch", "branch": "foreman/T-231" }], "summary": "完成" } } },
+        { "step": "Step 31-32", "action": "runtime.reply", "args": { "name": "dev", "type": "session.state", "payload": { "sessionId": "{{sessionId}}", "state": "done", "source": "hook", "observedAt": "{{now}}" } } },
+        { "step": "Step 33-34", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-231" }, "assert": [{ "path": "body.state", "equals": "delivered" }, { "path": "body.artifacts[0].kind", "equals": "branch" }, { "path": "body.currentSession.state", "equals": "done" }] } }
+      ]
+    },
+    {
+      "id": "ST-S07-03",
+      "title": "飞书直接回复需要你回答",
+      "covers": "Step 22→30",
+      "kind": "main",
+      "use": ["clock", "dev-online", "running-session"],
+      "steps": [
+        { "step": "Step 13-18", "action": "mcp.call", "args": { "tool": "ask_user", "taskKey": "T-231", "sessionId": "{{sessionId}}", "arguments": { "taskKey": "T-231", "question": "选哪个？" }, "background": true, "handle": "ask" } },
+        { "step": "Step 17-18", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "[需要你回答]" } }, "extract": { "mid": "message_id" } },
+        { "step": "Step 22-23", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.receive_v1", "event_id": "evt-s07-3", "message_id": "om_reply", "operator_type": "user", "sender_open_id": "ou_owner", "parent_id": "{{mid}}", "text": "方案二" } } },
+        { "step": "Step 24-28", "action": "mcp.expectCall", "args": { "handle": "ask", "result": { "answered": true, "answer": "方案二", "answeredVia": "feishu" } }, "timeoutMs": 10000 },
+        { "step": "Step 30", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "match": { "message_id": "om_reply", "text": "已送入 T-231 的会话" } } },
+        { "step": "Step 26", "action": "db.assert", "args": { "sql": "select status, answered_via from questions where task_id=(select id from tasks where key='T-231') order by asked_at desc limit 1" }, "assert": [{ "path": "rows[0].status", "equals": "answered" }, { "path": "rows[0].answered_via", "equals": "feishu" }] }
+      ]
+    },
+    {
+      "id": "ST-S07-04",
+      "title": "会话停止一小时后追加消息续接",
+      "covers": "Step 35→41",
+      "kind": "main",
+      "use": ["clock", "dev-online"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.runningOn(key='T-231', runtime='dev', agent='claude', session_state='done', agent_session_id='cl-231')}}" } },
+        { "step": "setup", "action": "db.assert", "args": { "sql": "select id from sessions where task_id=(select id from tasks where key='T-231')" }, "extract": { "sessionId": "rows[0].id" } }
+      ],
+      "steps": [
+        { "step": "Step 35", "action": "clock.advance", "args": { "minutes": 70 } },
+        { "step": "Step 36-38", "method": "POST", "url": "/api/tasks/T-231/messages", "body": { "text": "顺便把 timeout 默认值从 1s 改成 5s" }, "expected_status": 202, "assert": [{ "path": "body.delivery", "equals": "resumed" }] },
+        { "step": "Step 38-40", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.resume", "match": { "payload.sessionId": "{{sessionId}}" } }, "assert": [{ "path": "payload.text", "contains": "5s" }], "extract": { "c": "id" } },
+        { "step": "Step 40", "action": "mock.expect", "mock": { "dependency": "Claude Code CLI", "strategy": "mock-service", "config": "假 claude 记录参数" }, "args": { "handle": "claude", "kind": "exec", "match": { "args": "--bg --resume cl-231" } } },
+        { "step": "Step 41", "action": "runtime.reply", "args": { "name": "dev", "type": "session.state", "payload": { "sessionId": "{{sessionId}}", "state": "running", "source": "poll", "observedAt": "{{now}}" } } },
+        { "step": "Step 41", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-231/messages" }, "assert": [{ "path": "body.items[*].text", "matches": "已恢复会话" }] } },
+        { "step": "Step 41", "method": "GET", "url": "/api/tasks/T-231", "expected_status": 200, "assert": [{ "path": "body.currentSession.id", "equals": "{{sessionId}}" }, { "path": "body.currentSession.state", "equals": "running" }] }
+      ]
+    },
+    {
+      "id": "ST-S07-05",
+      "title": "人工停止会话",
+      "covers": "Step 42→46",
+      "kind": "main",
+      "use": ["clock", "dev-online", "running-session"],
+      "steps": [
+        { "step": "Step 42-44", "method": "POST", "url": "/api/sessions/{{sessionId}}/stop", "expected_status": 200, "assert": [{ "path": "body.state", "in": ["stopped", "running"] }] },
+        { "step": "Step 44-45", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.stop", "match": { "payload.sessionId": "{{sessionId}}" } }, "assert": [{ "path": "payload.reason", "equals": "user" }] },
+        { "step": "Step 45", "action": "runtime.reply", "args": { "name": "dev", "type": "session.state", "payload": { "sessionId": "{{sessionId}}", "state": "stopped", "source": "exit", "observedAt": "{{now}}" } } },
+        { "step": "Step 46", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-231" }, "assert": [{ "path": "body.state", "equals": "paused" }, { "path": "body.currentSession.state", "equals": "stopped" }] } },
+        { "step": "Step 46", "action": "db.assert", "args": { "sql": "select state from worktrees where task_id=(select id from tasks where key='T-231')" }, "assert": [{ "path": "rows[0].state", "equals": "ready" }] },
+        { "step": "幂等", "method": "POST", "url": "/api/sessions/{{sessionId}}/stop", "expected_status": 200 }
+      ]
+    },
+    {
+      "id": "ST-S07-06",
+      "title": "runtime 离线时展开日志 503",
+      "covers": "EX-8.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "running-session"],
+      "steps": [
+        { "step": "EX-8.1", "action": "runtime.disconnect", "args": { "name": "dev" } },
+        { "step": "EX-8.1", "action": "clock.advance", "args": { "seconds": 95 } },
+        { "step": "EX-8.1", "action": "scheduler.tick", "args": { "job": "heartbeat-check" } },
+        { "step": "EX-8.1", "method": "GET", "url": "/api/sessions/{{sessionId}}/logs", "expected_status": 503, "assert": [{ "path": "body.code", "equals": "RUNTIME_OFFLINE" }, { "path": "body.message", "contains": "dev" }] }
+      ]
+    },
+    {
+      "id": "ST-S07-07",
+      "title": "提问 30 分钟无人答，稍后回复走续接",
+      "covers": "EX-13.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "running-session"],
+      "steps": [
+        { "step": "Step 13", "action": "mcp.call", "args": { "tool": "ask_user", "taskKey": "T-231", "sessionId": "{{sessionId}}", "arguments": { "taskKey": "T-231", "question": "选哪个？" }, "background": true, "handle": "ask" } },
+        { "step": "EX-13.1", "action": "clock.advance", "args": { "minutes": 30 } },
+        { "step": "EX-13.1", "action": "mcp.expectCall", "args": { "handle": "ask", "result": { "answered": false, "reason": "timeout" } } },
+        { "step": "EX-13.1", "action": "runtime.reply", "args": { "name": "dev", "type": "session.state", "payload": { "sessionId": "{{sessionId}}", "state": "done", "source": "exit", "exitCode": 0, "observedAt": "{{now}}" } } },
+        { "step": "EX-13.1", "method": "GET", "url": "/api/tasks/T-231", "expected_status": 200, "assert": [{ "path": "body.state", "equals": "waiting_input" }, { "path": "body.openQuestion.status", "equals": "open" }] },
+        { "step": "EX-13.1", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{ "path": "body.questions[0].taskKey", "equals": "T-231" }] },
+        { "step": "Step 35-41", "method": "POST", "url": "/api/tasks/T-231/messages", "body": { "text": "方案二" }, "expected_status": 202, "assert": [{ "path": "body.delivery", "equals": "resumed" }] },
+        { "step": "Step 38", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.resume" }, "assert": [{ "path": "payload.text", "contains": "方案二" }] },
+        { "step": "EX-13.1", "action": "db.assert", "args": { "sql": "select status from questions where task_id=(select id from tasks where key='T-231') order by asked_at desc limit 1" }, "assert": [{ "path": "rows[0].status", "equals": "answered" }] }
+      ]
+    },
+    {
+      "id": "ST-S07-08",
+      "title": "agent 未用 MCP 提问，钩子推断出问题",
+      "covers": "EX-19.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "running-session"],
+      "steps": [
+        { "step": "Step 19", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.logs", "background": true, "replyWith": { "type": "session.logs.result", "payload": { "sessionId": "{{sessionId}}", "lines": ["…", "要保留旧接口吗？(y/n)"], "truncated": false } } } },
+        { "step": "EX-19.1", "action": "runtime.reply", "args": { "name": "dev", "type": "session.state", "payload": { "sessionId": "{{sessionId}}", "state": "waiting_input", "waitingFor": "input", "source": "hook", "observedAt": "{{now}}" } } },
+        { "step": "EX-19.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/inbox" }, "assert": [{ "path": "body.questions[0].taskKey", "equals": "T-231" }, { "path": "body.questions[0].text", "contains": "旧接口" }] } },
+        { "step": "EX-19.1", "action": "db.assert", "args": { "sql": "select origin from questions where task_id=(select id from tasks where key='T-231')" }, "assert": [{ "path": "rows[0].origin", "equals": "hook" }] },
+        { "step": "EX-19.1", "method": "POST", "url": "/api/tasks/T-231/messages", "body": { "text": "y" }, "expected_status": 202, "assert": [{ "path": "body.delivery", "equals": "resumed" }] },
+        { "step": "EX-19.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.resume" }, "assert": [{ "path": "payload.text", "equals": "y" }] }
+      ]
+    },
+    {
+      "id": "ST-S07-09",
+      "title": "回复了待拍板消息被引导",
+      "covers": "EX-22.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "running-session"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "approvals", "rows": "{{fixture:approval.pending(key='A-87', taskKey='T-231', actionType='triage_confirm', feishu_message_id='om_a87')}}" } }
+      ],
+      "steps": [
+        { "step": "EX-22.1", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.receive_v1", "event_id": "evt-s07-9", "message_id": "om_reply2", "operator_type": "user", "sender_open_id": "ou_owner", "parent_id": "om_a87", "text": "改成出方案" } } },
+        { "step": "EX-22.1", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "match": { "message_id": "om_reply2", "text": "用 ✅/❌ 操作" } } },
+        { "step": "EX-22.1", "method": "GET", "url": "/api/approvals/A-87", "expected_status": 200, "assert": [{ "path": "body.status", "equals": "pending" }] },
+        { "step": "EX-22.1", "action": "db.assert", "args": { "sql": "select count(*) as n from messages where task_id=(select id from tasks where key='T-231') and kind='user_reply'" }, "assert": [{ "path": "rows[0].n", "equals": 0 }] }
+      ]
+    },
+    {
+      "id": "ST-S07-10",
+      "title": "两通道都回答，第二条作为补充送入",
+      "covers": "EX-25.1",
+      "kind": "concurrency",
+      "use": ["clock", "dev-online", "running-session"],
+      "steps": [
+        { "step": "Step 13-18", "action": "mcp.call", "args": { "tool": "ask_user", "taskKey": "T-231", "sessionId": "{{sessionId}}", "arguments": { "taskKey": "T-231", "question": "选哪个？" }, "background": true, "handle": "ask" } },
+        { "step": "Step 17-18", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "[需要你回答]" } }, "extract": { "mid": "message_id" } },
+        { "step": "Step 20-21", "method": "POST", "url": "/api/tasks/T-231/messages", "body": { "text": "方案二" }, "expected_status": 202, "assert": [{ "path": "body.delivery", "equals": "answered" }] },
+        { "step": "Step 28", "action": "mcp.expectCall", "args": { "handle": "ask", "result": { "answered": true, "answer": "方案二" } } },
+        { "step": "EX-25.1", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.receive_v1", "event_id": "evt-s07-10", "message_id": "om_reply3", "operator_type": "user", "sender_open_id": "ou_owner", "parent_id": "{{mid}}", "text": "补充：保留兼容一个版本" } } },
+        { "step": "EX-25.1", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "match": { "message_id": "om_reply3", "text": "在面板回复" } } },
+        { "step": "EX-25.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.resume" }, "assert": [{ "path": "payload.text", "contains": "保留兼容" }] },
+        { "step": "EX-25.1", "method": "GET", "url": "/api/tasks/T-231/messages", "expected_status": 200, "assert": [{ "path": "body.items[?(@.kind=='user_reply')]", "length": 2 }] }
+      ]
+    },
+    {
+      "id": "ST-S07-11",
+      "title": "runtime 离线时追加消息排队，上线后送入",
+      "covers": "EX-37.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "running-session"],
+      "steps": [
+        { "step": "EX-37.1", "action": "runtime.disconnect", "args": { "name": "dev" } },
+        { "step": "EX-37.1", "action": "clock.advance", "args": { "seconds": 95 } },
+        { "step": "EX-37.1", "action": "scheduler.tick", "args": { "job": "heartbeat-check" } },
+        { "step": "EX-37.1", "method": "POST", "url": "/api/tasks/T-231/messages", "body": { "text": "再检查一遍 UT" }, "expected_status": 202, "assert": [{ "path": "body.delivery", "equals": "queued" }, { "path": "body.message.delivery", "equals": "queued" }] },
+        { "step": "EX-37.1", "action": "db.assert", "args": { "sql": "select count(*) as n from sessions where task_id=(select id from tasks where key='T-231')" }, "assert": [{ "path": "rows[0].n", "equals": 1 }] },
+        { "step": "S05 Step 13", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] }, "assert": [{ "path": "ack.pendingCommands[0].type", "equals": "session.resume" }] },
+        { "step": "EX-37.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.resume" }, "assert": [{ "path": "payload.text", "equals": "再检查一遍 UT" }] },
+        { "step": "EX-37.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-231/messages" }, "assert": [{ "path": "body.items[-1].delivery", "equals": "delivered" }] } }
+      ]
+    },
+    {
+      "id": "ST-S07-12",
+      "title": "续接失败给三选一，以新会话继续",
+      "covers": "EX-40.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.runningOn(key='T-231', runtime='dev', agent='claude', session_state='done', agent_session_id='cl-gone')}}" } },
+        { "step": "setup", "action": "db.assert", "args": { "sql": "select id from sessions where task_id=(select id from tasks where key='T-231')" }, "extract": { "sessionId": "rows[0].id" } }
+      ],
+      "steps": [
+        { "step": "Step 36-38", "method": "POST", "url": "/api/tasks/T-231/messages", "body": { "text": "继续" }, "expected_status": 202, "assert": [{ "path": "body.delivery", "equals": "resumed" }] },
+        { "step": "Step 38-40", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.resume" }, "extract": { "c": "id" } },
+        { "step": "EX-40.1", "action": "runtime.reply", "args": { "name": "dev", "type": "error", "ref": "{{c}}", "payload": { "code": "RESUME_FAILED", "message": "session not found", "retryable": false } } },
+        { "step": "EX-40.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-231" }, "assert": [{ "path": "body.state", "equals": "failed" }] } },
+        { "step": "EX-40.1", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{ "path": "body.failures[0].key", "equals": "T-231" }] },
+        { "step": "EX-40.1", "method": "POST", "url": "/api/tasks/T-231/retry", "body": { "mode": "fresh_session" }, "expected_status": 202 },
+        { "step": "EX-40.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start", "match": { "payload.taskKey": "T-231" } }, "assert": [{ "path": "payload.sessionId", "notEquals": "{{sessionId}}" }, { "path": "payload.prompt", "contains": "线程摘要" }] },
+        { "step": "EX-40.1", "action": "db.assert", "args": { "sql": "select max(attempt) as a, count(distinct worktree_id) as w from sessions where task_id=(select id from tasks where key='T-231')" }, "assert": [{ "path": "rows[0].a", "equals": 2 }, { "path": "rows[0].w", "equals": 1 }] }
+      ]
+    },
+    {
+      "id": "ST-S07-13",
+      "title": "30 分钟无进展告警但不停止",
+      "covers": "EX-49.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "running-session"],
+      "steps": [
+        { "step": "Step 47-48", "action": "clock.advance", "args": { "minutes": 11 } },
+        { "step": "Step 47", "action": "scheduler.tick", "args": { "job": "progress-watch" } },
+        { "step": "Step 49", "action": "ws.expect", "args": { "type": "session.stale", "match": { "payload.sessionId": "{{sessionId}}", "payload.minutes": 10 } } },
+        { "step": "EX-49.1", "action": "clock.advance", "args": { "minutes": 20 } },
+        { "step": "Step 47", "action": "scheduler.tick", "args": { "job": "progress-watch" } },
+        { "step": "EX-49.1", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "无进展 30 分钟" } } },
+        { "step": "EX-49.1", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{ "path": "body.failures[?(@.key=='T-231')].queueReason", "contains": "无进展" }] },
+        { "step": "EX-49.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.stop" }, "timeoutMs": 1000, "assert": [{ "path": "$none", "equals": true }] },
+        { "step": "EX-49.1", "action": "clock.advance", "args": { "minutes": 30 } },
+        { "step": "EX-49.1", "action": "scheduler.tick", "args": { "job": "progress-watch" } },
+        { "step": "EX-49.1", "action": "db.assert", "args": { "sql": "select count(*) as n from notifications where kind='alert' and text like '%无进展%'" }, "assert": [{ "path": "rows[0].n", "equals": 1 }] },
+        { "step": "EX-49.1", "method": "GET", "url": "/api/tasks/T-231", "expected_status": 200, "assert": [{ "path": "body.currentSession.state", "equals": "running" }] }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,257 @@
+{
+  "$schema": "./core-00-format.schema.json",
+  "scenario": "S04",
+  "name": "在 IM 频道用口语派活",
+  "source": "logos/resources/prd/3-technical-plan/2-scenario-implementation/core-S04-channel-dispatch.md",
+  "baseUrl": "{{env.CENTER_URL}}",
+  "auth": { "panelToken": "{{env.FOREMAN_PANEL_TOKEN}}", "workerToken": "{{env.FOREMAN_TOKEN}}" },
+  "dependencies": [
+    { "dependency": "Claude Code CLI", "strategy": "mock-service", "config": "假 claude 脚本作为调度员，按时间线调用 MCP 工具", "handle": "claude" },
+    { "dependency": "Codex CLI", "strategy": "mock-service", "config": "假 codex 脚本", "handle": "codex" },
+    { "dependency": "Jira Server", "strategy": "mock-service", "config": "本地 fake Jira 实现 issue 查询", "handle": "jira" }
+  ],
+  "presets": {
+    "clock": [{ "step": "setup", "action": "clock.freeze" }],
+    "center-online": [
+      { "step": "setup", "action": "runtime.register", "args": { "name": "center", "transport": "local", "labels": ["agent:claude", "agent:codex", "text"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] } }
+    ],
+    "dev-jira": [
+      { "step": "setup", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core", "vpn:jira"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": ["jira-lookup", "jira-poll"] } },
+      { "step": "setup", "action": "mock.set", "mock": { "dependency": "Jira Server", "strategy": "mock-service", "config": "fake Jira" }, "args": { "handle": "jira", "issues": [{ "key": "CIR-19418", "summary": "FE 端 show index 语句报错", "project": "CIR", "status": "待办" }, { "key": "CIR-19420", "summary": "compaction 慢", "project": "CIR", "status": "待办" }] } }
+    ],
+    "channel": [
+      { "step": "setup", "action": "note", "args": { "text": "频道 doris-index 由 case 内 POST /api/channels 创建" } }
+    ],
+    "dispatcher-lookup-propose": [
+      { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "lookup_jira", "arguments": { "key": "{{regex:CIR-\\d+}}" }, "expect": { "found": true } }, { "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "CIR-19418", "sourceTitle": "FE 端 show index 语句报错", "repo": "selectdb/selectdb-core", "repoSource": "mapping", "path": "fix", "pickTargets": ["branch-selectdb-doris-3.1"] } }] } }
+    ]
+  },
+  "cases": [
+    {
+      "id": "ST-S04-01",
+      "title": "建频道、一句话到草案卡、确认建任务",
+      "covers": "Step 1→36",
+      "kind": "main",
+      "use": ["clock", "center-online", "dev-jira", "dispatcher-lookup-propose"],
+      "steps": [
+        { "step": "Step 1-5", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index", "title": "Doris 索引" }, "expected_status": 201, "assert": [{ "path": "body.slug", "equals": "doris-index" }, { "path": "body.kind", "equals": "user" }] },
+        { "step": "Step 6-9", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "把 CIR-19418 修了，顺便 pick 到 branch-selectdb-doris-3.1" }, "expected_status": 202, "assert": [{ "path": "body.handling", "equals": "dispatcher" }, { "path": "body.message.kind", "equals": "user" }] },
+        { "step": "Step 11-17", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.start", "match": { "payload.kind": "dispatcher" } }, "assert": [{ "path": "payload.prompt", "contains": "doris-index" }, { "path": "payload.prompt", "contains": "把 CIR-19418 修了" }], "extract": { "sessionId": "payload.sessionId", "c": "id" } },
+        { "step": "Step 16", "action": "runtime.reply", "args": { "name": "center", "type": "session.started", "ref": "{{c}}", "payload": { "sessionId": "{{sessionId}}", "agentSessionId": "disp-1", "startedAt": "{{now}}" } } },
+        { "step": "Step 17", "action": "ws.expect", "args": { "type": "channel.system", "match": { "payload.channel": "doris-index", "payload.text": "拉起中" } } },
+        { "step": "Step 18-26", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "job.run", "match": { "payload.kind": "jira-lookup", "payload.args.key": "CIR-19418" } }, "extract": { "j": "id" } },
+        { "step": "Step 22-24", "action": "runtime.reply", "args": { "name": "dev", "type": "job.result", "ref": "{{j}}", "payload": { "ok": true, "result": { "found": true, "issue": { "key": "CIR-19418", "summary": "FE 端 show index 语句报错", "project": "CIR", "status": "待办", "url": "http://jira/browse/CIR-19418" } } } } },
+        { "step": "Step 27-30", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/channels/doris-index/messages" }, "assert": [{ "path": "body.items[-1].kind", "equals": "draft_card" }, { "path": "body.items[-1].payload.fields.source", "equals": "CIR-19418" }, { "path": "body.items[-1].payload.fields.repo", "equals": "selectdb/selectdb-core" }, { "path": "body.items[-1].payload.fields.path", "equals": "fix" }, { "path": "body.items[-1].payload.fields.pickTargets[0]", "equals": "branch-selectdb-doris-3.1" }], "timeoutMs": 30000 }, "extract": { "draftId": "body.items[-1].refId" } },
+        { "step": "Step 31-34", "method": "POST", "url": "/api/drafts/{{draftId}}/confirm", "expected_status": 201, "assert": [{ "path": "body.channel", "equals": "doris-index" }, { "path": "body.state", "equals": "triaging" }, { "path": "body.pickTargets[0]", "equals": "branch-selectdb-doris-3.1" }], "extract": { "taskKey": "body.key" } },
+        { "step": "Step 35", "action": "ws.expect", "args": { "type": "thread.created", "match": { "payload.task.key": "{{taskKey}}" } } },
+        { "step": "Step 36", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create", "match": { "payload.taskKey": "{{taskKey}}" } } },
+        { "step": "Step 34", "action": "db.assert", "args": { "sql": "select status, task_id is not null as linked from task_drafts where id='{{draftId}}'" }, "assert": [{ "path": "rows[0].status", "equals": "confirmed" }, { "path": "rows[0].linked", "equals": true }] }
+      ]
+    },
+    {
+      "id": "ST-S04-02",
+      "title": "调度员空闲 30 分钟回收并在下次输入时重建",
+      "covers": "Step 37→40 + Step 13",
+      "kind": "main",
+      "use": ["clock", "center-online", "dev-jira", "dispatcher-lookup-propose"],
+      "steps": [
+        { "step": "Step 1-36", "action": "note", "args": { "text": "include ST-S04-01 Step 1–17（调度员 running）" } },
+        { "step": "Step 37", "action": "clock.advance", "args": { "minutes": 31 } },
+        { "step": "Step 37-38", "action": "scheduler.tick", "args": { "job": "dispatcher-idle" } },
+        { "step": "Step 38-40", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.stop" }, "assert": [{ "path": "payload.reason", "equals": "idle" }], "extract": { "stopped": "payload.sessionId" } },
+        { "step": "Step 40", "action": "runtime.reply", "args": { "name": "center", "type": "session.state", "payload": { "sessionId": "{{stopped}}", "state": "stopped", "source": "exit", "observedAt": "{{now}}" } } },
+        { "step": "Step 40", "method": "GET", "url": "/api/channels/doris-index", "expected_status": 200, "assert": [{ "path": "body.dispatcher.state", "equals": "stopped" }] },
+        { "step": "Step 13（重建）", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "CIR-19420 也看看" }, "expected_status": 202, "assert": [{ "path": "body.handling", "equals": "dispatcher" }] },
+        { "step": "Step 13", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.start", "match": { "payload.kind": "dispatcher" } }, "assert": [{ "path": "payload.sessionId", "notEquals": "{{stopped}}" }, { "path": "payload.prompt", "contains": "把 CIR-19418 修了" }] }
+      ]
+    },
+    {
+      "id": "ST-S04-03",
+      "title": "第二句话追加到活跃调度员",
+      "covers": "Step 13（resume 分支）",
+      "kind": "main",
+      "use": ["clock", "center-online", "dev-jira", "dispatcher-lookup-propose"],
+      "steps": [
+        { "step": "Step 1-17", "action": "note", "args": { "text": "include ST-S04-01 Step 1–17" } },
+        { "step": "Step 13", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "仓库改成 apache/doris" }, "expected_status": 202, "assert": [{ "path": "body.handling", "equals": "dispatcher" }] },
+        { "step": "Step 13", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.resume" }, "assert": [{ "path": "payload.text", "contains": "仓库改成 apache/doris" }] },
+        { "step": "Step 13", "action": "db.assert", "args": { "sql": "select count(*) as n from sessions where kind='dispatcher'" }, "assert": [{ "path": "rows[0].n", "equals": 1 }] }
+      ]
+    },
+    {
+      "id": "ST-S04-04",
+      "title": "频道重名",
+      "covers": "EX-4.1",
+      "kind": "exception",
+      "use": ["clock"],
+      "steps": [
+        { "step": "Step 2", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index" }, "expected_status": 201 },
+        { "step": "EX-4.1", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index" }, "expected_status": 409, "assert": [{ "path": "body.code", "equals": "CHANNEL_EXISTS" }] },
+        { "step": "边界", "method": "POST", "url": "/api/channels", "body": { "slug": "Doris_Index" }, "expected_status": 422 },
+        { "step": "边界", "method": "POST", "url": "/api/channels", "body": { "slug": "a123456789b123456789c123456789d123456789x" }, "expected_status": 422 }
+      ]
+    },
+    {
+      "id": "ST-S04-05",
+      "title": "斜杠命令直出草案不经调度员",
+      "covers": "EX-10.1",
+      "kind": "exception",
+      "use": ["clock", "center-online", "dev-jira"],
+      "steps": [
+        { "step": "Step 2", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index" }, "expected_status": 201 },
+        { "step": "EX-10.1", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "/task new --source CIR-19420 --repo selectdb/selectdb-core --path fix" }, "expected_status": 202, "assert": [{ "path": "body.handling", "equals": "command" }, { "path": "body.draft.status", "equals": "open" }, { "path": "body.draft.fields.source", "equals": "CIR-19420" }, { "path": "body.draft.fields.path", "equals": "fix" }], "extract": { "draftId": "body.draft.id" } },
+        { "step": "EX-10.1", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.start" }, "timeoutMs": 1500, "assert": [{ "path": "$none", "equals": true }] },
+        { "step": "EX-10.1 缺参数", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "/task new --source CIR-19420" }, "expected_status": 202, "assert": [{ "path": "body.draft.fields.path", "equals": null }, { "path": "body.draft.payload.highlight", "contains": "path" }] },
+        { "step": "EX-10.1 未知命令", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "/foo bar" }, "expected_status": 422, "assert": [{ "path": "body.details.command", "equals": "foo" }] },
+        { "step": "Step 32-34", "method": "POST", "url": "/api/drafts/{{draftId}}/confirm", "expected_status": 201, "assert": [{ "path": "body.state", "equals": "triaging" }] }
+      ]
+    },
+    {
+      "id": "ST-S04-06",
+      "title": "调度员不可用提示命令且不自动重放",
+      "covers": "EX-13.1",
+      "kind": "exception",
+      "use": ["clock", "center-online"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "sessions", "rows": "{{fixture:sessions.running(runtime='center', agent='claude', count=3)}}" } },
+        { "step": "setup", "action": "db.seed", "args": { "table": "sessions", "rows": "{{fixture:sessions.running(runtime='center', agent='codex', count=3)}}" } }
+      ],
+      "steps": [
+        { "step": "Step 2", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index" }, "expected_status": 201 },
+        { "step": "EX-13.1", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "把 CIR-19420 修了" }, "expected_status": 202, "assert": [{ "path": "body.handling", "equals": "unavailable" }, { "path": "body.hint", "contains": "/task new" }] },
+        { "step": "EX-13.1", "action": "ws.expect", "args": { "type": "channel.system", "match": { "payload.level": "warn" } } },
+        { "step": "EX-13.1", "action": "db.assert", "args": { "sql": "select id from sessions where runtime_id=(select id from runtimes where name='center') and state='running' limit 1" }, "extract": { "victim": "rows[0].id" } },
+        { "step": "EX-13.1", "action": "runtime.reply", "args": { "name": "center", "type": "session.state", "payload": { "sessionId": "{{victim}}", "state": "done", "source": "exit", "exitCode": 0, "observedAt": "{{now}}" } } },
+        { "step": "EX-13.1", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.start", "match": { "payload.kind": "dispatcher" } }, "timeoutMs": 2000, "assert": [{ "path": "$none", "equals": true }] },
+        { "step": "EX-13.1", "method": "GET", "url": "/api/channels/doris-index/messages", "expected_status": 200, "assert": [{ "path": "body.items[0].kind", "equals": "user" }, { "path": "body.items[*].kind", "notEquals": "draft_card" }] }
+      ]
+    },
+    {
+      "id": "ST-S04-07",
+      "title": "无 vpn:jira runtime 时调度员改为澄清",
+      "covers": "EX-20.1",
+      "kind": "exception",
+      "use": ["clock", "center-online"],
+      "setup": [
+        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "lookup_jira", "arguments": { "key": "CIR-19418" }, "expect": { "error": "SOURCE_UNAVAILABLE" } }, { "tool": "ask_clarification", "arguments": { "channel": "doris-index", "text": "暂时查不到 Jira，请确认 CIR-19418 的标题与仓库", "candidates": [] } }] } }
+      ],
+      "steps": [
+        { "step": "Step 2", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index" }, "expected_status": 201 },
+        { "step": "Step 6-9", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "把 CIR-19418 修了" }, "expected_status": 202 },
+        { "step": "Step 13-16", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.start" }, "extract": { "s": "payload.sessionId", "c": "id" } },
+        { "step": "Step 16", "action": "runtime.reply", "args": { "name": "center", "type": "session.started", "ref": "{{c}}", "payload": { "sessionId": "{{s}}", "agentSessionId": "d", "startedAt": "{{now}}" } } },
+        { "step": "EX-20.1", "action": "mcp.expectCall", "args": { "sessionId": "{{s}}", "tool": "lookup_jira", "result": { "error": "SOURCE_UNAVAILABLE" } } },
+        { "step": "EX-20.1", "action": "db.assert", "args": { "sql": "select count(*) as n from jobs where kind='jira-lookup'" }, "assert": [{ "path": "rows[0].n", "equals": 0 }] },
+        { "step": "EX-20.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/channels/doris-index/messages" }, "assert": [{ "path": "body.items[-1].kind", "equals": "clarification" }, { "path": "body.items[-1].text", "contains": "查不到 Jira" }] } },
+        { "step": "EX-20.1", "action": "db.assert", "args": { "sql": "select count(*) as n from task_drafts" }, "assert": [{ "path": "rows[0].n", "equals": 0 }] }
+      ]
+    },
+    {
+      "id": "ST-S04-08",
+      "title": "引用不存在走澄清并列候选，点候选后出草案",
+      "covers": "EX-22.1",
+      "kind": "exception",
+      "use": ["clock", "center-online", "dev-jira"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:tasks.recent(count=5, channel='jira')}}" } },
+        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "lookup_jira", "arguments": { "key": "CIR-99999" }, "expect": { "found": false } }, { "tool": "list_tasks", "arguments": { "recent": 5 } }, { "tool": "ask_clarification", "arguments": { "channel": "doris-index", "text": "没找到 CIR-99999，是这几个吗？", "candidates": "{{fromListTasks:5}}" } }, { "onResume": { "contains": "CIR-20001" }, "then": [{ "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "CIR-20001", "path": "fix", "repo": "selectdb/selectdb-core" } }] }] } }
+      ],
+      "steps": [
+        { "step": "Step 2", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index" }, "expected_status": 201 },
+        { "step": "Step 6-9", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "把 CIR-99999 修了" }, "expected_status": 202 },
+        { "step": "Step 13-16", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.start" }, "extract": { "s": "payload.sessionId", "c": "id" } },
+        { "step": "Step 16", "action": "runtime.reply", "args": { "name": "center", "type": "session.started", "ref": "{{c}}", "payload": { "sessionId": "{{s}}", "agentSessionId": "d", "startedAt": "{{now}}" } } },
+        { "step": "Step 18-25", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "job.run", "match": { "payload.kind": "jira-lookup" } }, "extract": { "j": "id" } },
+        { "step": "Step 22-24", "action": "runtime.reply", "args": { "name": "dev", "type": "job.result", "ref": "{{j}}", "payload": { "ok": true, "result": { "found": false } } } },
+        { "step": "EX-22.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/channels/doris-index/messages" }, "assert": [{ "path": "body.items[-1].kind", "equals": "clarification" }, { "path": "body.items[-1].payload.candidates", "length": 5 }] } },
+        { "step": "EX-22.1", "action": "db.assert", "args": { "sql": "select count(*) as n from task_drafts" }, "assert": [{ "path": "rows[0].n", "equals": 0 }] },
+        { "step": "EX-22.1 → Step 7", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "CIR-20001", "replyToCandidate": "CIR-20001" }, "expected_status": 202 },
+        { "step": "Step 13", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.resume", "match": { "payload.sessionId": "{{s}}" } } },
+        { "step": "Step 27-30", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/channels/doris-index/messages" }, "assert": [{ "path": "body.items[-1].kind", "equals": "draft_card" }, { "path": "body.items[-1].payload.fields.source", "equals": "CIR-20001" }] } }
+      ]
+    },
+    {
+      "id": "ST-S04-09",
+      "title": "一句话两个任务两张草案",
+      "covers": "EX-27.1",
+      "kind": "exception",
+      "use": ["clock", "center-online", "dev-jira"],
+      "setup": [
+        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "lookup_jira", "arguments": { "key": "CIR-19418" } }, { "tool": "lookup_jira", "arguments": { "key": "CIR-19420" } }, { "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "CIR-19418", "path": "fix", "repo": "selectdb/selectdb-core" } }, { "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "CIR-19420", "path": "fix", "repo": "selectdb/selectdb-core" } }] } }
+      ],
+      "steps": [
+        { "step": "Step 2", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index" }, "expected_status": 201 },
+        { "step": "Step 6-9", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "CIR-19418 和 CIR-19420 都修一下" }, "expected_status": 202 },
+        { "step": "Step 13-16", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.start" }, "extract": { "s": "payload.sessionId", "c": "id" } },
+        { "step": "Step 16", "action": "runtime.reply", "args": { "name": "center", "type": "session.started", "ref": "{{c}}", "payload": { "sessionId": "{{s}}", "agentSessionId": "d", "startedAt": "{{now}}" } } },
+        { "step": "Step 18-24 ×2", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "job.run", "match": { "payload.kind": "jira-lookup" } }, "extract": { "j1": "id" } },
+        { "step": "Step 24", "action": "runtime.reply", "args": { "name": "dev", "type": "job.result", "ref": "{{j1}}", "payload": { "ok": true, "result": { "found": true, "issue": { "key": "CIR-19418", "summary": "a" } } } } },
+        { "step": "Step 18-24 ×2", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "job.run", "match": { "payload.kind": "jira-lookup" } }, "extract": { "j2": "id" } },
+        { "step": "Step 24", "action": "runtime.reply", "args": { "name": "dev", "type": "job.result", "ref": "{{j2}}", "payload": { "ok": true, "result": { "found": true, "issue": { "key": "CIR-19420", "summary": "b" } } } } },
+        { "step": "EX-27.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/channels/doris-index/messages" }, "assert": [{ "path": "body.items[?(@.kind=='draft_card')]", "length": 2 }] } },
+        { "step": "EX-27.1", "action": "db.assert", "args": { "sql": "select count(*) as n from task_drafts where status='open'" }, "assert": [{ "path": "rows[0].n", "equals": 2 }] }
+      ]
+    },
+    {
+      "id": "ST-S04-10",
+      "title": "语义不明只澄清一轮",
+      "covers": "EX-27.2",
+      "kind": "exception",
+      "use": ["clock", "center-online", "dev-jira"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:tasks.recent(count=3, channel='jira')}}" } },
+        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "list_tasks", "arguments": { "q": "索引" } }, { "tool": "ask_clarification", "arguments": { "channel": "doris-index", "text": "你指的是哪一个？", "candidates": "{{fromListTasks:3}}" } }, { "onResume": { "any": true }, "then": [{ "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "{{resumeText}}", "path": "fix", "repo": "selectdb/selectdb-core" } }] }] } }
+      ],
+      "steps": [
+        { "step": "Step 2", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index" }, "expected_status": 201 },
+        { "step": "Step 6-9", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "看看那个索引的问题" }, "expected_status": 202 },
+        { "step": "Step 13-16", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.start" }, "extract": { "s": "payload.sessionId", "c": "id" } },
+        { "step": "Step 16", "action": "runtime.reply", "args": { "name": "center", "type": "session.started", "ref": "{{c}}", "payload": { "sessionId": "{{s}}", "agentSessionId": "d", "startedAt": "{{now}}" } } },
+        { "step": "EX-27.2", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/channels/doris-index/messages" }, "assert": [{ "path": "body.items[-1].kind", "equals": "clarification" }, { "path": "body.items[-1].payload.candidates", "length": 3 }] } },
+        { "step": "EX-27.2", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "T-231", "replyToCandidate": "T-231" }, "expected_status": 202 },
+        { "step": "EX-27.2", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.resume" } },
+        { "step": "EX-27.2", "action": "mcp.expectCall", "args": { "sessionId": "{{s}}", "tool": "propose_task" } },
+        { "step": "EX-27.2", "action": "db.assert", "args": { "sql": "select count(*) as n from messages where kind='clarification'" }, "assert": [{ "path": "rows[0].n", "equals": 1 }] }
+      ]
+    },
+    {
+      "id": "ST-S04-11",
+      "title": "调度员 60 秒无响应给出超时提示但会话继续",
+      "covers": "EX-30.1",
+      "kind": "exception",
+      "use": ["clock", "center-online", "dev-jira"],
+      "setup": [
+        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "sleepSeconds": 90 }, { "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "CIR-19418", "path": "fix", "repo": "selectdb/selectdb-core" } }] } }
+      ],
+      "steps": [
+        { "step": "Step 2", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index" }, "expected_status": 201 },
+        { "step": "Step 6-9", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "把 CIR-19418 修了" }, "expected_status": 202 },
+        { "step": "Step 13-16", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.start" }, "extract": { "s": "payload.sessionId", "c": "id" } },
+        { "step": "Step 16", "action": "runtime.reply", "args": { "name": "center", "type": "session.started", "ref": "{{c}}", "payload": { "sessionId": "{{s}}", "agentSessionId": "d", "startedAt": "{{now}}" } } },
+        { "step": "EX-30.1", "action": "clock.advance", "args": { "seconds": 60 } },
+        { "step": "EX-30.1", "action": "ws.expect", "args": { "type": "channel.system", "match": { "payload.text": "响应超时" } } },
+        { "step": "EX-30.1", "action": "runtime.expectCommand", "args": { "name": "center", "type": "session.stop" }, "timeoutMs": 1000, "assert": [{ "path": "$none", "equals": true }] },
+        { "step": "EX-30.1", "action": "clock.advance", "args": { "seconds": 30 } },
+        { "step": "EX-30.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/channels/doris-index/messages" }, "assert": [{ "path": "body.items[-1].kind", "equals": "draft_card" }] } }
+      ]
+    },
+    {
+      "id": "ST-S04-12",
+      "title": "草案取消或过期后确认返回 409",
+      "covers": "EX-34.1",
+      "kind": "exception",
+      "use": ["clock", "center-online"],
+      "steps": [
+        { "step": "Step 2", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index" }, "expected_status": 201 },
+        { "step": "EX-10.1", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "/task new --source CIR-19420 --repo selectdb/selectdb-core --path fix" }, "expected_status": 202, "extract": { "d1": "body.draft.id" } },
+        { "step": "EX-34.1", "method": "POST", "url": "/api/drafts/{{d1}}/cancel", "expected_status": 200, "assert": [{ "path": "body.status", "equals": "cancelled" }] },
+        { "step": "EX-34.1", "method": "POST", "url": "/api/drafts/{{d1}}/cancel", "expected_status": 200 },
+        { "step": "EX-34.1", "method": "POST", "url": "/api/drafts/{{d1}}/confirm", "expected_status": 409, "assert": [{ "path": "body.code", "equals": "DRAFT_NOT_OPEN" }] },
+        { "step": "EX-34.1 过期", "method": "POST", "url": "/api/channels/doris-index/messages", "body": { "text": "/task new --source CIR-19418 --repo selectdb/selectdb-core --path fix" }, "expected_status": 202, "extract": { "d2": "body.draft.id" } },
+        { "step": "EX-34.1 过期", "action": "clock.advance", "args": { "minutes": 1500 } },
+        { "step": "EX-34.1 过期", "method": "POST", "url": "/api/drafts/{{d2}}/confirm", "expected_status": 409, "assert": [{ "path": "body.code", "equals": "DRAFT_NOT_OPEN" }] },
+        { "step": "EX-34.1 过期", "action": "db.assert", "args": { "sql": "select status from task_drafts where id='{{d2}}'" }, "assert": [{ "path": "rows[0].status", "equals": "expired" }] }
+      ]
+    }
+  ]
+}

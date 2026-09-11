@@ -1,0 +1,390 @@
+openapi: 3.1.0
+info:
+  title: "foreman API — runtimes（runtime、健康检查、来源健康度、系统状态）"
+  version: 0.1.0
+  description: "来源：S05（runtime 接入与路由）、S01 EX-2.1 / EX-6.1（来源健康度）、部署交接的健康检查。"
+servers:
+  - url: http://127.0.0.1:7801
+security:
+  - panelToken: []
+tags:
+  - name: system
+  - name: runtimes
+
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      tags: [system]
+      summary: "中心健康检查（无需认证）"
+      description: "来源：S05 Step 4（doctor）、部署交接的健康检查入口。"
+      security: []
+      responses:
+        '200':
+          description: "健康"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+        '503':
+          description: "数据库不可用等致命问题，body 同 Health 但 status=down"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+
+  /api/runtimes/auth-check:
+    post:
+      operationId: runtimeAuthCheck
+      tags: [runtimes]
+      summary: "校验 worker 预共享 token（只校验不注册）"
+      description: "来源：S05 Step 4 → Step 5（doctor）。使用 workerToken 而非 panelToken。"
+      security:
+        - workerToken: []
+      responses:
+        '200':
+          description: "有效"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, centerVersion, minWorkerVersion]
+                properties:
+                  ok: { type: boolean }
+                  centerVersion: { type: string }
+                  minWorkerVersion: { type: string }
+        '401':
+          description: "AUTH_INVALID（S05 EX-5.1）"
+          content:
+            application/json:
+              schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
+
+  /api/runtimes:
+    get:
+      operationId: listRuntimes
+      tags: [runtimes]
+      summary: "runtime 列表（在线状态、传输、标签、会话数、磁盘、心跳）"
+      description: "来源：S05 Step 15、Step 24，CLI runtime list。"
+      responses:
+        '200':
+          description: "列表"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Runtime' }
+
+  /api/runtimes/{name}:
+    parameters:
+      - $ref: '#/components/parameters/runtimeName'
+    get:
+      operationId: getRuntime
+      tags: [runtimes]
+      summary: "runtime 详情（含其上会话列表与可回收 worktree）"
+      description: "来源：S05 Step 16–17、EX-19.1；面板状态视图会话表。"
+      responses:
+        '200':
+          description: "详情"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RuntimeDetail' }
+        '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
+
+  /api/runtimes/{name}/gc:
+    parameters:
+      - $ref: '#/components/parameters/runtimeName'
+    post:
+      operationId: runtimeGc
+      tags: [runtimes]
+      summary: "触发该 runtime 的 worktree 回收"
+      description: "来源：S05 EX-19.1，CLI worker gc（dryRun 对应 --dry-run）。经 worker 通道下发 worktree.gc。"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dryRun: { type: boolean, default: false }
+                policy: { type: string, enum: [retain_days, high_watermark], default: retain_days }
+      responses:
+        '200':
+          description: "回收结果或演练清单"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GcResult' }
+        '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
+        '503':
+          description: "RUNTIME_OFFLINE"
+          content:
+            application/json:
+              schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
+
+  /api/system/sources:
+    get:
+      operationId: getSourceHealth
+      tags: [system]
+      summary: "来源健康度：Jira、飞书事件、GitHub"
+      description: "来源：S01 EX-2.1 / EX-6.1、S02 EX-2.1；面板状态视图来源区块。"
+      responses:
+        '200':
+          description: "来源健康度"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/SourceHealth' }
+
+  /api/system/tunnels:
+    get:
+      operationId: listTunnels
+      tags: [system]
+      summary: "反向隧道列表"
+      description: "来源：S05 Step 6–7、EX-7.1；CLI foreman center tunnel <name> status。隧道由 center 内的隧道管理维持。"
+      responses:
+        '200':
+          description: "列表"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/TunnelStatus' }
+
+  /api/system/tunnels/{name}:
+    parameters:
+      - $ref: '#/components/parameters/runtimeName'
+    get:
+      operationId: getTunnel
+      tags: [system]
+      summary: "隧道状态"
+      description: "来源：S05 Step 7、EX-7.1（reconnects 与 lastError）。未启动返回 404。"
+      responses:
+        '200':
+          description: "状态"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TunnelStatus' }
+        '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
+
+  /api/system/tunnels/{name}/up:
+    parameters:
+      - $ref: '#/components/parameters/runtimeName'
+    post:
+      operationId: tunnelUp
+      tags: [system]
+      summary: "建立反向隧道（幂等）"
+      description: "来源：S05 Step 6–7。按 center.yaml tunnels.<name> 拉起 ssh -R，断线自动重连；未配置返回 404。"
+      responses:
+        '200':
+          description: "已启动或已在运行"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TunnelStatus' }
+        '404':
+          description: "隧道未在 center.yaml 配置（NOT_FOUND）"
+          content:
+            application/json:
+              schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
+
+  /api/system/tunnels/{name}/down:
+    parameters:
+      - $ref: '#/components/parameters/runtimeName'
+    post:
+      operationId: tunnelDown
+      tags: [system]
+      summary: "拆除隧道（幂等）"
+      description: "来源：CLI foreman center tunnel <name> down。"
+      responses:
+        '200':
+          description: "已关闭"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+
+  /api/system/settings:
+    get:
+      operationId: getSettings
+      tags: [system]
+      summary: "运行时可见的配置快照（脱敏）"
+      description: "来源：面板设置视图（Phase 2 2.1）。来自 center.yaml，不含任何 token。"
+      responses:
+        '200':
+          description: "配置"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Settings' }
+
+components:
+  securitySchemes:
+    panelToken:
+      type: http
+      scheme: bearer
+    workerToken:
+      type: http
+      scheme: bearer
+      description: "worker 预共享 token（FOREMAN_TOKEN）"
+  parameters:
+    runtimeName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[a-z0-9]+(-[a-z0-9]+)*$' }
+  schemas:
+    Health:
+      type: object
+      required: [status, version, checks]
+      properties:
+        status: { type: string, enum: [ok, degraded, down] }
+        version: { type: string }
+        checks:
+          type: object
+          properties:
+            database: { type: string, enum: [ok, down] }
+            feishuSubscription: { type: string, enum: [ok, down, disabled] }
+            onlineRuntimes: { type: integer }
+            scheduler: { type: string, enum: [ok, down] }
+    Runtime:
+      type: object
+      required: [name, online, transport, labels, agents, sessions, lastSeenAt]
+      properties:
+        name: { type: string, example: dev }
+        online: { type: boolean }
+        transport: { type: string, enum: [direct, reverse-tunnel, local] }
+        labels:
+          type: array
+          items: { type: string }
+          example: [agent:claude, agent:codex, build:doris, repo:apache/doris, vpn:jira]
+        agents:
+          type: object
+          description: "每家 agent 的运行中会话数与上限"
+          additionalProperties:
+            type: object
+            properties:
+              running: { type: integer }
+              max: { type: integer }
+        sessions: { type: integer, description: "运行中会话总数" }
+        maxSessions: { type: integer }
+        diskUsedRatio: { type: number, nullable: true }
+        load: { type: number, nullable: true }
+        workerVersion: { type: string, nullable: true }
+        tunnel:
+          type: object
+          nullable: true
+          properties:
+            state: { type: string, enum: [up, down, reconnecting] }
+            reconnects: { type: integer }
+            lastError: { type: string, nullable: true }
+        lastSeenAt: { type: string, format: date-time, nullable: true }
+    RuntimeDetail:
+      allOf:
+        - $ref: '#/components/schemas/Runtime'
+        - type: object
+          properties:
+            repos:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  main: { type: string }
+                  worktreeRoot: { type: string }
+            activeSessions:
+              type: array
+              items: { $ref: 'tasks.yaml#/components/schemas/Session' }
+            reclaimableWorktrees:
+              type: object
+              properties:
+                count: { type: integer }
+                bytes: { type: integer }
+    GcResult:
+      type: object
+      required: [dryRun, removed, freedBytes, diskUsedRatioAfter]
+      properties:
+        dryRun: { type: boolean }
+        removed:
+          type: array
+          items:
+            type: object
+            properties:
+              taskKey: { type: string }
+              path: { type: string }
+              terminalAt: { type: string, format: date-time }
+              bytes: { type: integer }
+        skippedRunning: { type: integer }
+        freedBytes: { type: integer }
+        diskUsedRatioAfter: { type: number }
+    TunnelStatus:
+      type: object
+      required: [name, state, reconnects]
+      properties:
+        name: { type: string }
+        state: { type: string, enum: [up, down, reconnecting] }
+        reconnects: { type: integer }
+        lastError: { type: string, nullable: true }
+        since: { type: string, format: date-time, nullable: true }
+        downSince: { type: string, format: date-time, nullable: true }
+    SourceHealth:
+      type: object
+      required: [source, status]
+      properties:
+        source: { type: string, enum: [jira, feishu, github] }
+        status: { type: string, enum: [ok, unreachable, no_runtime, disabled] }
+        lastSuccessAt: { type: string, format: date-time, nullable: true }
+        lastError: { type: string, nullable: true }
+        consecutiveFailures: { type: integer }
+        executedOn: { type: string, nullable: true, description: "执行轮询的 runtime 名或 center" }
+    Settings:
+      type: object
+      properties:
+        sourceChannels:
+          type: object
+          additionalProperties: { type: string }
+          example: { jira: jira, feishu: feishu }
+        routing:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              require: { type: array, items: { type: string } }
+              prefer: { type: string }
+        agentConcurrency:
+          type: object
+          additionalProperties: { type: integer }
+        feishu:
+          type: object
+          properties:
+            appId: { type: string, description: "脱敏，只显示前缀" }
+            intakeEmoji: { type: string }
+            approveEmoji: { type: string }
+            rejectEmoji: { type: string }
+            dailyPushLimit: { type: integer }
+        jira:
+          type: object
+          properties:
+            pollSeconds: { type: integer }
+            projectRepoMap:
+              type: object
+              additionalProperties: { type: string }
+        trust:
+          type: object
+          properties:
+            threshold: { type: integer }
+            lockedManual: { type: array, items: { type: string } }
+        worktree:
+          type: object
+          properties:
+            retainDays: { type: integer }
+            diskHighWatermark: { type: number }

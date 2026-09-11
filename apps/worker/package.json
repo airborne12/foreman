@@ -1,0 +1,9 @@
+{
+  "name": "@foreman/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/worker.ts",
+  "scripts": { "build": "tsc -p tsconfig.json --noEmit", "start": "tsx src/index.ts" },
+  "dependencies": { "@foreman/shared": "workspace:*", "ws": "^8.18.3", "yaml": "^2.8.1", "zod": "^3.25.76" }
+}

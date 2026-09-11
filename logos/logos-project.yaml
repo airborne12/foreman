@@ -1,0 +1,199 @@
+project:
+  name: "foreman"
+  description: "单人使用的 AI 协作平台：以任务为中心，把飞书/Jira/GitHub 的需求与多机器上的 Claude Code/Codex 会话串成可拍板、可逐步自动化的流水线"
+  methodology: "OpenLogos"
+
+tech_stack:
+  language: "TypeScript (Node 24)"
+  package_manager: "pnpm 9 + turbo"
+  repo_layout: "apps/center, apps/worker, apps/cli, apps/panel, packages/shared, packages/agent-adapters"
+  backend: "Hono + @hono/zod-openapi（REST JSON + OpenAPI 3.1）；ws（WebSocket 面板订阅与 worker 通道）；@modelcontextprotocol/sdk（Streamable HTTP MCP）"
+  frontend: "Vite + React 19 + TanStack Query + shadcn/ui + Tailwind，静态产物由 center 托管，单端口 7801"
+  database: "PostgreSQL 17（中心机已有实例，库名 foreman）"
+  orm: "pg（node-postgres）直连 + SQL 迁移；schema.sql 即 0001_init（实现阶段由 Prisma 修订）"
+  scheduler: "进程内 croner + events/jobs 表，不使用 Redis"
+  agents: "claude --bg / --bg --resume；codex exec / exec resume；opencode run；全部订阅登录态，禁止 API key 与 claude -p"
+  integrations: "飞书 lark-cli（机器人身份）；Jira REST v2（系统作业在 vpn:jira runtime）；GitHub gh CLI（系统作业）"
+  transport: "worker 经 WebSocket 拨中心；开发机走 ssh -R 反向隧道"
+  process_manager: "launchd（中心机、笔记本）；systemd --user（开发机）"
+  logging: "pino；agent 原始日志留 worker 本地"
+  testing: "vitest；编排测试直接调用 REST API；外部依赖 mock-service"
+
+scenario_counter:
+  next_id: 13
+
+modules:
+  - id: core
+    name: 核心功能
+    lifecycle: initial
+    # skip_phases: [api, scenario]   # 由 architecture-designer Skill 在技术选型后填写
+    # 可选值: api（无 HTTP API）, database（无数据库）, scenario（无 API 编排测试）, deployment（无部署执行与 smoke 门禁）
+    # deployment_required: false   # 纯文档、纯库或明确无需部署的模块可设为 false
+
+external_dependencies:
+  - name: "飞书事件与消息"
+    provider: "lark-cli（机器人身份）"
+    used_in: ["S01", "S02", "S06", "S07"]
+    test_strategy: "mock-service"
+    test_config: "FOREMAN_LARK_CLI 指向假 lark-cli：event +subscribe 回放 NDJSON，im 子命令写 JSON 文件"
+  - name: "Jira Server"
+    provider: "SelectDB Jira 8.20（PAT，VPN）"
+    used_in: ["S01", "S04"]
+    test_strategy: "mock-service"
+    test_config: "本地 fake Jira 实现 search / issue / comment，测试 worker 的 JIRA_URL 指向它"
+  - name: "GitHub"
+    provider: "gh CLI"
+    used_in: ["S03", "S04"]
+    test_strategy: "mock-service"
+    test_config: "假 gh 脚本按参数返回固定 JSON"
+  - name: "Claude Code CLI"
+    provider: "claude（订阅）"
+    used_in: ["S03", "S04", "S07"]
+    test_strategy: "mock-service"
+    test_config: "假 claude 脚本模拟 --bg / agents --json / logs / --bg --resume，并按时间线调用 MCP 工具"
+  - name: "Codex CLI"
+    provider: "codex（ChatGPT 订阅）"
+    used_in: ["S03", "S04", "S07"]
+    test_strategy: "mock-service"
+    test_config: "假 codex 脚本模拟 exec / exec resume"
+  - name: "OpenCode CLI"
+    provider: "opencode"
+    used_in: ["S03"]
+    test_strategy: "mock-service"
+    test_config: "假 opencode 脚本模拟 run"
+  - name: "ssh 反向隧道"
+    provider: "ssh / autossh"
+    used_in: ["S05"]
+    test_strategy: "env-disable"
+    test_config: "测试中所有 runtime 使用 transport: direct；隧道管理器单测用假 ssh"
+
+deployment_gates:
+  core:
+    deployment_required: true
+    smoke_required: true
+    environments:
+      - local
+      - prod
+
+scenarios:
+  - id: S01
+    name: Jira 单自动入库并生成分流卡
+  - id: S02
+    name: 飞书消息显式入库
+  - id: S03
+    name: 拍板分流路径并一键启动 agent
+  - id: S04
+    name: 在 IM 频道用口语派活
+  - id: S05
+    name: 接入一台 runtime 并让任务路由到它
+  - id: S06
+    name: 审批双通道与信任升级
+  - id: S07
+    name: 跟踪会话进展并在线程中介入
+  - id: S08
+    name: PR 的 CI 失败与 review 意见闭环（M2）
+  - id: S09
+    name: 指定分支 pick 与冲突处理（M2）
+  - id: S10
+    name: 合入与来源系统闭环（M2）
+  - id: S11
+    name: 每日摘要与飞书指令回流（M3）
+  - id: S12
+    name: 查看 runtime 与会话总览（M3）
+
+resource_index:
+  - path: logos/resources/prd/1-product-requirements/core-01-requirements.md
+    desc: foreman 需求文档。涉及产品定位、7 条痛点（P01–P07）、12 个场景（S01–S12，M1 为 S01–S07）、GIVEN/WHEN/THEN 验收条件、技术约束与"不做"清单时必读。
+  - path: logos/resources/prd/2-product-design/1-feature-specs/core-02-panel-design.md
+    desc: 面板与 IM 功能规格（M1）。信息架构（三栏布局、路由、消息类型、任务状态机）与 S01/S03/S04/S06/S07 面板侧交互规格及交互级验收条件；涉及页面、收件箱、线程、审批卡、信任视图时必读。
+  - path: logos/resources/prd/2-product-design/1-feature-specs/core-03-runtime-cli-design.md
+    desc: runtime 接入与 CLI 功能规格（M1）。foreman 命令树、worker/center 配置文件、S05 接入/反向隧道/路由离线、worktree 生命周期与斜杠命令等价表；涉及 worker、隧道、路由、配置时必读。
+  - path: logos/resources/prd/2-product-design/1-feature-specs/core-04-conversation-design.md
+    desc: 对话式交互功能规格（M1）。飞书表情协议与消息模板、调度员与任务会话的 AI 行为规范、MCP 工具清单，覆盖 S02/S04/S06/S07 及 S01 推送；涉及飞书机器人、调度员、会话回写时必读。
+  - path: logos/resources/prd/2-product-design/2-page-design/core-02-panel-prototype.html
+    desc: 面板与 IM 可交互 HTML 原型：收件箱、频道/线程、状态、信任、设置视图，含分流卡、审批卡、需要输入、草案卡、日志展开等交互；涉及页面交互与视觉时必读。
+  - path: logos/resources/prd/2-product-design/2-page-design/core-03-runtime-cli-prototype-terminal.md
+    desc: CLI 终端交互模拟：worker init/doctor/start、center tunnel、runtime list、task new、gc、inbox/approve；涉及命令输出格式与错误提示时必读。
+  - path: logos/resources/prd/2-product-design/2-page-design/core-04-conversation-prototype-dialogue.md
+    desc: 对话流程脚本：飞书表情入库与推送、频道口语派活（含澄清/多任务/不可用）、任务线程完整对话、表情审批各分支、飞书回复需要输入；涉及对话步骤与机器人措辞时必读。
+
+  - path: logos/resources/prd/3-technical-plan/1-architecture/core-01-architecture-overview.md
+    desc: 系统架构概要。模块化单体 center + 分布式 worker、单端口 7801、Agent 契约与适配器、MCP 服务、技术选型表、非功能约束、外部依赖测试策略、部署交接；涉及技术栈、组件划分、协议、测试隔离时必读。
+
+  - path: logos/resources/prd/3-technical-plan/2-scenario-implementation/core-00-scenario-overview.md
+    desc: 场景实现概览索引。参与方别名约定、S01–S12 场景地图与依赖关系、跨场景约定（幂等键、事件先落库、审批先到先得、MCP 阻塞工具、错误码格式）；涉及全量场景分类、参与方、实现文档映射关系时必读。
+  - path: logos/resources/prd/3-technical-plan/2-scenario-implementation/core-S01-jira-intake.md
+    desc: S01 Jira 单自动入库并生成分流卡时序图（31 步，9 个 EX）。涉及 Jira 轮询系统作业、上下文包组装、代码定位会话、分流卡与审批生成、飞书推送时必读。
+  - path: logos/resources/prd/3-technical-plan/2-scenario-implementation/core-S02-feishu-intake.md
+    desc: S02 飞书消息显式入库时序图（表情/@ 入库 17 步，候选扫描 13 步，7 个 EX）。涉及飞书事件订阅、owner 校验、上下文拉取、候选扫描时必读。
+  - path: logos/resources/prd/3-technical-plan/2-scenario-implementation/core-S03-decide-and-dispatch.md
+    desc: S03 拍板分流路径并一键启动 agent 时序图（34 步，11 个 EX）。涉及审批抢占、路由与选家、worktree 创建、会话启动、MCP request_approval/deliver、子任务创建时必读。
+  - path: logos/resources/prd/3-technical-plan/2-scenario-implementation/core-S04-channel-dispatch.md
+    desc: S04 在 IM 频道用口语派活时序图（40 步，9 个 EX）。涉及频道与消息、调度员会话生命周期、lookup_jira 系统作业、草案卡确认、斜杠命令兜底时必读。
+  - path: logos/resources/prd/3-technical-plan/2-scenario-implementation/core-S05-runtime-onboarding.md
+    desc: S05 接入 runtime 并路由时序图（24 步，7 个 EX）。涉及 worker init/doctor/start、反向隧道、注册与心跳、路由规则、离线判定、磁盘高水位回收时必读。
+  - path: logos/resources/prd/3-technical-plan/2-scenario-implementation/core-S06-approval-and-trust.md
+    desc: S06 审批双通道与信任升级时序图（32 步，8 个 EX，横切场景）。涉及审批创建、先到先得条件更新、信任计数升降级、正文变更作废、事后否决与补偿时必读。
+  - path: logos/resources/prd/3-technical-plan/2-scenario-implementation/core-S07-session-progress.md
+    desc: S07 跟踪会话进展并在线程中介入时序图（49 步，8 个 EX）。涉及 report_progress、日志切片、ask_user 长轮询、双通道回复、会话续接与停止、无进展检测时必读。
+
+  - path: logos/resources/api/tasks.yaml
+    desc: tasks 领域 API 规格（OpenAPI 3.1）。任务列表/创建/详情、线程消息（回答与续接）、暂停/恢复/重试/按方案实现、草案确认/取消、会话日志/停止；含 Task/ContextPack/TriageCard/Session/Message/Question 等核心 schema 与 ErrorResponse；涉及任务与会话的请求/响应结构时必读。
+  - path: logos/resources/api/approvals.yaml
+    desc: approvals 领域 API 规格。收件箱聚合、审批列表/详情/决定（先到先得、bodyHash）、动作回滚、信任视图与重置、候选入库/忽略；含 ActionType 枚举与全局错误码目录 x-error-codes；涉及审批、信任、错误码时必读。
+  - path: logos/resources/api/channels.yaml
+    desc: channels 领域 API 规格。频道列表/创建/改名、频道线程列表、频道消息（口语交调度员 / 斜杠命令直出）；涉及 IM 频道与派活入口时必读。
+  - path: logos/resources/api/runtimes.yaml
+    desc: runtimes 与系统 API 规格。healthz、worker token 校验、runtime 列表/详情/gc、来源健康度、脱敏配置；涉及 runtime 状态、健康检查、设置视图时必读。
+  - path: logos/resources/api/worker-channel.yaml
+    desc: 中心与 worker 的 WebSocket 协议（/ws/worker）。Envelope 幂等约定与 18 种消息 schema：register/ack、heartbeat、job.run/result、worktree.create/ready/gc、session.start/started/resume/stop/state/list/logs、error；涉及 worker 实现与 agent 适配器时必读。
+  - path: logos/resources/api/mcp.yaml
+    desc: MCP 端点（POST /mcp，Streamable HTTP）与 10 个工具的入参/出参 schema：get_task、report_progress、ask_user、request_approval（阻塞）、deliver（5 类产物）、lookup_jira/pr、list_tasks、propose_task、ask_clarification；涉及 agent 会话与调度员如何回写时必读。
+  - path: logos/resources/api/panel-events.yaml
+    desc: 面板 WebSocket 推送（/ws/panel）事件规格。EventEnvelope 与 12 种事件（inbox.new/removed、thread.created、message.new、task.updated、approval.decided、trust.updated、runtime.updated、session.stale、candidates.updated、channel.system、source.health）及断线补发；涉及面板实时刷新时必读。
+  - path: logos/resources/database/schema.sql
+    desc: PostgreSQL 17 完整 Schema（DDL）。21 张表：runtimes、channels、tasks（树）、source_items、context_packs、triage_cards、sessions、worktrees、trust_counters、approvals、actions、questions、task_drafts、messages、artifacts、candidates、jobs、source_health、notifications、feishu_events、events；含索引理由、RLS、updated_at 触发器、初始数据；涉及表结构、字段、索引、外键时必读。
+
+  - path: logos/resources/prd/3-technical-plan/3-deployment/core-01-deployment-plan.md
+    desc: 部署方案（M1）。部署目标 local/prod、三机拓扑（中心 launchd + 开发机 systemd --user + 可选笔记本）、环境变量与 keychain 密钥、发布脚本（releases 目录 + current 软链、先中心后 worker）、Prisma 迁移与 pg_dump 备份、回滚、部署后检查清单、smoke 检查项输入；涉及发布、回滚、smoke、进程守护、首次部署前置项时必读。
+
+  - path: logos/resources/test/core-S01-test-cases.md
+    desc: S01 Jira 单自动入库并生成分流卡测试用例。UT-S01（API/DB/业务规则单元用例）、ST-S01（主路径与 EX 异常场景用例，含 [manual]）、验收条件追溯 S01-AC-xx；实现测试代码与 verify 验收时必读。
+  - path: logos/resources/test/core-S02-test-cases.md
+    desc: S02 飞书消息显式入库测试用例。UT-S02（API/DB/业务规则单元用例）、ST-S02（主路径与 EX 异常场景用例，含 [manual]）、验收条件追溯 S02-AC-xx；实现测试代码与 verify 验收时必读。
+  - path: logos/resources/test/core-S03-test-cases.md
+    desc: S03 拍板分流路径并一键启动 agent测试用例。UT-S03（API/DB/业务规则单元用例）、ST-S03（主路径与 EX 异常场景用例，含 [manual]）、验收条件追溯 S03-AC-xx；实现测试代码与 verify 验收时必读。
+  - path: logos/resources/test/core-S04-test-cases.md
+    desc: S04 在 IM 频道用口语派活测试用例。UT-S04（API/DB/业务规则单元用例）、ST-S04（主路径与 EX 异常场景用例，含 [manual]）、验收条件追溯 S04-AC-xx；实现测试代码与 verify 验收时必读。
+  - path: logos/resources/test/core-S05-test-cases.md
+    desc: S05 接入一台 runtime 并让任务路由到它测试用例。UT-S05（API/DB/业务规则单元用例）、ST-S05（主路径与 EX 异常场景用例，含 [manual]）、验收条件追溯 S05-AC-xx；实现测试代码与 verify 验收时必读。
+  - path: logos/resources/test/core-S06-test-cases.md
+    desc: S06 审批双通道与信任升级测试用例。UT-S06（API/DB/业务规则单元用例）、ST-S06（主路径与 EX 异常场景用例，含 [manual]）、验收条件追溯 S06-AC-xx；实现测试代码与 verify 验收时必读。
+  - path: logos/resources/test/core-S07-test-cases.md
+    desc: S07 跟踪会话进展并在线程中介入测试用例。UT-S07（API/DB/业务规则单元用例）、ST-S07（主路径与 EX 异常场景用例，含 [manual]）、验收条件追溯 S07-AC-xx；实现测试代码与 verify 验收时必读。
+  - path: logos/resources/test/smoke/core-smoke-test-cases.md
+    desc: 部署后冒烟测试用例 SMOKE-core-01..16（健康、守护、密钥、代理、迁移、静态资源、认证、runtime、隧道、文本类与代码类核心链路、飞书、Jira、来源健康度、面板推送、日志备份）；实现 scripts/smoke.sh 与 openlogos smoke 时必读。
+
+  - path: logos/resources/scenario/core-00-format.schema.json
+    desc: API 编排测试文件格式（JSON Schema）。case/httpStep/controlStep/mockRef/assertion 定义、控制动作清单、测试专用端点 /__test/*、fixture 名称、include 复用约定；实现编排运行器 apps/center/test/orchestration/runner.ts 与读任何 core-Sxx-*.json 前必读。
+  - path: logos/resources/scenario/core-S01-jira-intake.json
+    desc: S01 Jira 单自动入库并生成分流卡的 API 编排测试用例（可执行 JSON）。每个 case 的 id 对应 core-S01-test-cases.md 的 ST 编号，含主路径、EX 异常与边界编排，外部依赖按 mock-service/env-disable 策略标注；实现编排测试与 verify 验收时必读。
+  - path: logos/resources/scenario/core-S02-feishu-intake.json
+    desc: S02 飞书消息显式入库的 API 编排测试用例（可执行 JSON）。每个 case 的 id 对应 core-S02-test-cases.md 的 ST 编号，含主路径、EX 异常与边界编排，外部依赖按 mock-service/env-disable 策略标注；实现编排测试与 verify 验收时必读。
+  - path: logos/resources/scenario/core-S03-decide-and-dispatch.json
+    desc: S03 拍板分流路径并一键启动 agent的 API 编排测试用例（可执行 JSON）。每个 case 的 id 对应 core-S03-test-cases.md 的 ST 编号，含主路径、EX 异常与边界编排，外部依赖按 mock-service/env-disable 策略标注；实现编排测试与 verify 验收时必读。
+  - path: logos/resources/scenario/core-S04-channel-dispatch.json
+    desc: S04 在 IM 频道用口语派活的 API 编排测试用例（可执行 JSON）。每个 case 的 id 对应 core-S04-test-cases.md 的 ST 编号，含主路径、EX 异常与边界编排，外部依赖按 mock-service/env-disable 策略标注；实现编排测试与 verify 验收时必读。
+  - path: logos/resources/scenario/core-S05-runtime-onboarding.json
+    desc: S05 接入一台 runtime 并让任务路由到它的 API 编排测试用例（可执行 JSON）。每个 case 的 id 对应 core-S05-test-cases.md 的 ST 编号，含主路径、EX 异常与边界编排，外部依赖按 mock-service/env-disable 策略标注；实现编排测试与 verify 验收时必读。
+  - path: logos/resources/scenario/core-S06-approval-and-trust.json
+    desc: S06 审批双通道与信任升级的 API 编排测试用例（可执行 JSON）。每个 case 的 id 对应 core-S06-test-cases.md 的 ST 编号，含主路径、EX 异常与边界编排，外部依赖按 mock-service/env-disable 策略标注；实现编排测试与 verify 验收时必读。
+  - path: logos/resources/scenario/core-S07-session-progress.json
+    desc: S07 跟踪会话进展并在线程中介入的 API 编排测试用例（可执行 JSON）。每个 case 的 id 对应 core-S07-test-cases.md 的 ST 编号，含主路径、EX 异常与边界编排，外部依赖按 mock-service/env-disable 策略标注；实现编排测试与 verify 验收时必读。
+
+  - path: logos/resources/implementation/implementation-manifest.md
+    desc: 实现清单：各批次范围、覆盖用例、代码结构、与规格的偏离、延后项、运行方式；实现新批次或 verify 前必读。
+
+conventions:
+  - "遵循 OpenLogos 三层推进模型（Why → What → How）"
+  - "每次变更必须先创建 logos/changes/ 变更提案"

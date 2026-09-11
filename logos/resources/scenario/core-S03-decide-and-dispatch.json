@@ -1,0 +1,351 @@
+{
+  "$schema": "./core-00-format.schema.json",
+  "scenario": "S03",
+  "name": "拍板分流路径并一键启动 agent",
+  "source": "logos/resources/prd/3-technical-plan/2-scenario-implementation/core-S03-decide-and-dispatch.md",
+  "baseUrl": "{{env.CENTER_URL}}",
+  "auth": { "panelToken": "{{env.FOREMAN_PANEL_TOKEN}}", "workerToken": "{{env.FOREMAN_TOKEN}}" },
+  "dependencies": [
+    { "dependency": "Claude Code CLI", "strategy": "mock-service", "config": "假 claude 脚本模拟 --bg / agents --json / logs / --bg --resume，并按时间线调用 MCP 工具", "handle": "claude" },
+    { "dependency": "Codex CLI", "strategy": "mock-service", "config": "假 codex 脚本模拟 exec / exec resume", "handle": "codex" },
+    { "dependency": "GitHub", "strategy": "mock-service", "config": "假 gh 脚本按参数返回固定 JSON", "handle": "gh" },
+    { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "FOREMAN_LARK_CLI 指向假 lark-cli", "handle": "lark" },
+    { "dependency": "Jira Server", "strategy": "mock-service", "config": "本地 fake Jira 实现 comment", "handle": "jira" }
+  ],
+  "presets": {
+    "clock": [{ "step": "setup", "action": "clock.freeze" }],
+    "dev-online": [
+      { "step": "setup", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core", "vpn:jira"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt", "pushRemote": "jk" } }, "capabilities": ["jira-lookup"] } }
+    ],
+    "pending-triage": [
+      { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.pendingDecision(key='T-231', repo='selectdb/selectdb-core', tier='fix', channel='jira', source='jira:CIR-20001')}}" } },
+      { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.done(key='T-100', author_agent='claude')}}" } },
+      { "step": "setup", "action": "note", "args": { "text": "fixture 同时写入 triage_cards 与 pending 的 triage_confirm 审批 A-87；上一实现任务 author=claude，故本次轮换到 codex" } }
+    ],
+    "codex-implement-pr": [
+      { "step": "setup", "action": "mock.set", "mock": { "dependency": "Codex CLI", "strategy": "mock-service", "config": "fake codex 脚本" }, "args": { "handle": "codex", "script": [{ "tool": "get_task" }, { "tool": "report_progress", "arguments": { "text": "复现成功" } }, { "tool": "report_progress", "arguments": { "text": "改动 2 个文件，UT 通过" } }, { "tool": "request_approval", "arguments": { "actionType": "create_pr", "title": "创建 PR", "body": "title: [fix](index) pass timeout\nbase: selectdb-cloud-4.0\nhead: airborne12:foreman/T-231", "payload": { "repo": "selectdb/selectdb-core", "base": "selectdb-cloud-4.0", "head": "airborne12:foreman/T-231", "title": "[fix](index) pass timeout" } }, "expect": { "approved": true } }, { "exec": "gh pr create --repo selectdb/selectdb-core --base selectdb-cloud-4.0 --head airborne12:foreman/T-231" }, { "tool": "deliver", "arguments": { "artifacts": [{ "kind": "pr", "url": "https://github.com/selectdb/selectdb-core/pull/6612", "title": "[fix](index) pass timeout", "diffStat": { "additions": 48, "deletions": 9, "files": 3 } }], "summary": "PR 已创建" } }, { "exit": 0 }] } },
+      { "step": "setup", "action": "mock.set", "mock": { "dependency": "GitHub", "strategy": "mock-service", "config": "假 gh" }, "args": { "handle": "gh", "prCreate": { "url": "https://github.com/selectdb/selectdb-core/pull/6612" } } }
+    ]
+  },
+  "cases": [
+    {
+      "id": "ST-S03-01",
+      "title": "简单修复从拍板到 PR 与子任务",
+      "covers": "Step 1→34",
+      "kind": "main",
+      "use": ["clock", "dev-online", "pending-triage", "codex-implement-pr"],
+      "steps": [
+        { "step": "Step 1-2", "method": "GET", "url": "/api/approvals/A-87", "expected_status": 200, "assert": [{ "path": "body.actionType", "equals": "triage_confirm" }, { "path": "body.status", "equals": "pending" }], "extract": { "bodyHash": "body.bodyHash" } },
+        { "step": "Step 2-6", "method": "POST", "url": "/api/approvals/A-87/decide", "body": { "decision": "approve", "bodyHash": "{{bodyHash}}" }, "expected_status": 200, "assert": [{ "path": "body.approval.status", "equals": "approved" }, { "path": "body.approval.decidedVia", "equals": "panel" }, { "path": "body.approval.modified", "equals": false }, { "path": "body.trust.actionType", "equals": "triage_confirm" }, { "path": "body.trust.streak", "equals": 1 }] },
+        { "step": "Step 6-8", "method": "GET", "url": "/api/tasks/T-231", "expected_status": 200, "assert": [{ "path": "body.state", "in": ["queued", "running"] }, { "path": "body.runtime", "equals": "dev" }, { "path": "body.agent", "equals": "codex" }] },
+        { "step": "Step 9-10", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create", "match": { "payload.taskKey": "T-231" } }, "assert": [{ "path": "payload.branchName", "equals": "foreman/T-231" }, { "path": "payload.contextMarkdown", "exists": true }, { "path": "payload.hooks", "exists": true }], "extract": { "wtCmd": "id" } },
+        { "step": "Step 12", "action": "runtime.reply", "args": { "name": "dev", "type": "worktree.ready", "ref": "{{wtCmd}}", "payload": { "taskKey": "T-231", "path": "/tmp/fx/wt/T-231-ngram", "branchName": "foreman/T-231", "reused": false } } },
+        { "step": "Step 13-14", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start", "match": { "payload.taskKey": "T-231" } }, "assert": [{ "path": "payload.agent", "equals": "codex" }, { "path": "payload.kind", "equals": "implement" }, { "path": "payload.cwd", "equals": "/tmp/fx/wt/T-231-ngram" }, { "path": "payload.mcp.token", "exists": true }], "extract": { "sessionId": "payload.sessionId", "startCmd": "id" } },
+        { "step": "Step 15-17", "action": "runtime.reply", "args": { "name": "dev", "type": "session.started", "ref": "{{startCmd}}", "payload": { "sessionId": "{{sessionId}}", "agentSessionId": "codex-1", "startedAt": "{{now}}" } } },
+        { "step": "Step 18-19", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-231" }, "assert": [{ "path": "body.state", "equals": "running" }, { "path": "body.currentSession.state", "equals": "running" }] } },
+        { "step": "Step 20", "action": "mcp.expectCall", "args": { "taskKey": "T-231", "tool": "report_progress", "count": 2 } },
+        { "step": "Step 21-22", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/inbox" }, "assert": [{ "path": "body.approvals[?(@.actionType=='create_pr')].taskKey", "equals": "T-231" }] }, "extract": { "prApproval": "body.approvals[?(@.actionType=='create_pr')].key", "prHash": "body.approvals[?(@.actionType=='create_pr')].bodyHash" } },
+        { "step": "Step 22", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "[审批] {{prApproval}}" } } },
+        { "step": "Step 23", "method": "POST", "url": "/api/approvals/{{prApproval}}/decide", "body": { "decision": "approve", "bodyHash": "{{prHash}}" }, "expected_status": 200, "assert": [{ "path": "body.trust.actionType", "equals": "create_pr" }, { "path": "body.trust.streak", "equals": 1 }] },
+        { "step": "Step 25-26", "action": "mock.expect", "mock": { "dependency": "GitHub", "strategy": "mock-service", "config": "假 gh pr create" }, "args": { "handle": "gh", "kind": "pr create", "match": { "args": "--base selectdb-cloud-4.0" } } },
+        { "step": "Step 27-30", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-231" }, "assert": [{ "path": "body.state", "equals": "delivered" }, { "path": "body.artifacts[0].kind", "equals": "pr" }, { "path": "body.artifacts[0].url", "contains": "/pull/6612" }, { "path": "body.children", "length": 2 }, { "path": "body.children[0].key", "equals": "T-231.1" }, { "path": "body.children[0].kind", "equals": "pr" }, { "path": "body.children[1].kind", "equals": "review" }, { "path": "body.children[1].agent", "equals": "claude" }] } },
+        { "step": "Step 31-33", "action": "runtime.reply", "args": { "name": "dev", "type": "session.state", "payload": { "sessionId": "{{sessionId}}", "state": "done", "source": "exit", "exitCode": 0, "observedAt": "{{now}}" } } },
+        { "step": "Step 34", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/approvals?taskKey=T-231&status=pending" }, "assert": [{ "path": "body.items[0].actionType", "in": ["jira_comment", "feishu_reply"] }] } },
+        { "step": "Step 34", "action": "db.assert", "args": { "sql": "select state from sessions where id='{{sessionId}}'" }, "assert": [{ "path": "rows[0].state", "equals": "done" }] }
+      ]
+    },
+    {
+      "id": "ST-S03-02",
+      "title": "出方案路径并按方案实现",
+      "covers": "Step 1→30（plan）+ implementFromPlan",
+      "kind": "main",
+      "use": ["clock", "dev-online"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.pendingDecision(key='T-232', repo='selectdb/selectdb-core', tier='plan', channel='jira', source='jira:CIR-20002')}}" } },
+        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "get_task" }, { "tool": "deliver", "arguments": { "artifacts": [{ "kind": "doc", "path": "docs/plan.md", "title": "方案", "content": "# 方案\n方案二：删除旧接口" }], "summary": "方案已出" } }, { "exit": 0 }] } },
+        { "step": "setup", "action": "mock.set", "args": { "handle": "codex", "script": [{ "tool": "get_task", "expect": { "contextPack.planDoc": "contains:方案二" } }, { "tool": "report_progress", "arguments": { "text": "按方案实现中" } }, { "exit": 0 }] } }
+      ],
+      "steps": [
+        { "step": "Step 1-6", "method": "GET", "url": "/api/approvals?taskKey=T-232&status=pending", "expected_status": 200, "extract": { "ak": "body.items[0].key", "h": "body.items[0].bodyHash" } },
+        { "step": "Step 2-6", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 200 },
+        { "step": "Step 9-19", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create" }, "extract": { "wtCmd": "id" } },
+        { "step": "Step 12", "action": "runtime.reply", "args": { "name": "dev", "type": "worktree.ready", "ref": "{{wtCmd}}", "payload": { "taskKey": "T-232", "path": "/tmp/fx/wt/T-232", "branchName": "foreman/T-232", "reused": false } } },
+        { "step": "Step 13-17", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "assert": [{ "path": "payload.kind", "equals": "plan" }], "extract": { "s1": "payload.sessionId", "c1": "id" } },
+        { "step": "Step 17", "action": "runtime.reply", "args": { "name": "dev", "type": "session.started", "ref": "{{c1}}", "payload": { "sessionId": "{{s1}}", "agentSessionId": "x1", "startedAt": "{{now}}" } } },
+        { "step": "Step 27-30", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-232" }, "assert": [{ "path": "body.artifacts[0].kind", "equals": "doc" }, { "path": "body.state", "equals": "delivered" }] } },
+        { "step": "Step 30", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{ "path": "body.approvals[?(@.taskKey=='T-232')].title", "contains": "方案" }] },
+        { "step": "Step 30 → implement", "method": "POST", "url": "/api/tasks/T-232/implement", "expected_status": 202, "assert": [{ "path": "body.state", "in": ["queued", "running"] }] },
+        { "step": "implement", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "assert": [{ "path": "payload.kind", "equals": "implement" }, { "path": "payload.cwd", "equals": "/tmp/fx/wt/T-232" }], "extract": { "s2": "payload.sessionId", "c2": "id" } },
+        { "step": "implement", "action": "runtime.reply", "args": { "name": "dev", "type": "session.started", "ref": "{{c2}}", "payload": { "sessionId": "{{s2}}", "agentSessionId": "x2", "startedAt": "{{now}}" } } },
+        { "step": "implement", "action": "mcp.expectCall", "args": { "taskKey": "T-232", "tool": "get_task" } },
+        { "step": "implement", "method": "GET", "url": "/api/tasks/T-232", "expected_status": 200, "assert": [{ "path": "body.contextPack.planDoc", "contains": "方案二" }, { "path": "body.triageCard.approvalKey", "exists": true }], "extract": { "n": "body.pendingApprovals.length" } },
+        { "step": "implement", "method": "GET", "url": "/api/approvals?taskKey=T-232&actionType=triage_confirm", "expected_status": 200, "assert": [{ "path": "body.total", "equals": 1 }] }
+      ]
+    },
+    {
+      "id": "ST-S03-03",
+      "title": "修改 runtime 后执行不计数",
+      "covers": "Step 1→6",
+      "kind": "boundary",
+      "use": ["clock", "dev-online", "pending-triage"],
+      "setup": [
+        { "step": "setup", "action": "runtime.register", "args": { "name": "laptop", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/l/core", "worktreeRoot": "/tmp/fx/l/wt" } }, "capabilities": [] } }
+      ],
+      "steps": [
+        { "step": "Step 1", "method": "GET", "url": "/api/approvals/A-87", "expected_status": 200, "extract": { "h": "body.bodyHash" } },
+        { "step": "Step 2-6", "method": "POST", "url": "/api/approvals/A-87/decide", "body": { "decision": "approve", "bodyHash": "{{h}}", "overrides": { "runtime": "laptop" } }, "expected_status": 200, "assert": [{ "path": "body.approval.modified", "equals": true }, { "path": "body.trust.streak", "equals": 0 }] },
+        { "step": "Step 6-7", "method": "GET", "url": "/api/tasks/T-231", "expected_status": 200, "assert": [{ "path": "body.runtime", "equals": "laptop" }, { "path": "body.decision.modified", "equals": true }] },
+        { "step": "Step 7", "action": "runtime.expectCommand", "args": { "name": "laptop", "type": "worktree.create" } },
+        { "step": "Step 7", "method": "GET", "url": "/api/tasks/T-231/messages", "expected_status": 200, "assert": [{ "path": "body.items[-1].text", "contains": "手动覆盖" }] }
+      ]
+    },
+    {
+      "id": "ST-S03-04",
+      "title": "飞书先批后面板再批返回 409",
+      "covers": "EX-4.1",
+      "kind": "concurrency",
+      "use": ["clock", "dev-online", "pending-triage"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "approvals", "rows": "{{fixture:approval.setFeishuMessage(key='A-87', message_id='om_a87')}}" } }
+      ],
+      "steps": [
+        { "step": "Step 1", "method": "GET", "url": "/api/approvals/A-87", "expected_status": 200, "extract": { "h": "body.bodyHash" } },
+        { "step": "S06 Step 11-13", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.reaction.created_v1", "event_id": "evt-a87", "message_id": "om_a87", "operator_type": "user", "operator_open_id": "ou_owner", "emoji": "DONE" } } },
+        { "step": "EX-4.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/approvals/A-87" }, "assert": [{ "path": "body.status", "equals": "approved" }, { "path": "body.decidedVia", "equals": "feishu" }] } },
+        { "step": "EX-4.1", "method": "POST", "url": "/api/approvals/A-87/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 409, "assert": [{ "path": "body.code", "equals": "APPROVAL_ALREADY_DECIDED" }, { "path": "body.details.decidedVia", "equals": "feishu" }] },
+        { "step": "EX-4.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create" } },
+        { "step": "EX-4.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create" }, "timeoutMs": 1500, "assert": [{ "path": "$none", "equals": true }] }
+      ]
+    },
+    {
+      "id": "ST-S03-05",
+      "title": "仓库待确认时无法执行",
+      "covers": "EX-6.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.pendingDecision(key='T-233', repo=null, tier='fix', channel='jira', source='jira:DORIS-300')}}" } }
+      ],
+      "steps": [
+        { "step": "Step 1", "method": "GET", "url": "/api/approvals?taskKey=T-233&status=pending", "expected_status": 200, "extract": { "ak": "body.items[0].key", "h": "body.items[0].bodyHash" } },
+        { "step": "EX-6.1", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 422, "assert": [{ "path": "body.code", "equals": "REPO_REQUIRED" }] },
+        { "step": "EX-6.1", "method": "GET", "url": "/api/approvals/{{ak}}", "expected_status": 200, "assert": [{ "path": "body.status", "equals": "pending" }] },
+        { "step": "EX-6.1", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}", "overrides": { "repo": "apache/doris" } }, "expected_status": 200, "assert": [{ "path": "body.approval.modified", "equals": true }] },
+        { "step": "EX-6.1", "method": "GET", "url": "/api/tasks/T-233", "expected_status": 200, "assert": [{ "path": "body.repo.name", "equals": "apache/doris" }, { "path": "body.repo.source", "equals": "manual" }] }
+      ]
+    },
+    {
+      "id": "ST-S03-06",
+      "title": "开发机离线排队，上线后自动启动",
+      "covers": "EX-7.1",
+      "kind": "exception",
+      "use": ["clock", "pending-triage"],
+      "setup": [
+        { "step": "setup", "action": "runtime.register", "args": { "name": "laptop", "transport": "direct", "labels": ["agent:claude"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] } }
+      ],
+      "steps": [
+        { "step": "Step 1", "method": "GET", "url": "/api/approvals/A-87", "expected_status": 200, "extract": { "h": "body.bodyHash" } },
+        { "step": "Step 2-7", "method": "POST", "url": "/api/approvals/A-87/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 200 },
+        { "step": "EX-7.1", "method": "GET", "url": "/api/tasks/T-231", "expected_status": 200, "assert": [{ "path": "body.state", "equals": "queued" }, { "path": "body.queueReason", "contains": "dev" }, { "path": "body.currentSession", "equals": null }] },
+        { "step": "EX-7.1", "action": "runtime.expectCommand", "args": { "name": "laptop", "type": "session.start" }, "timeoutMs": 1500, "assert": [{ "path": "$none", "equals": true }] },
+        { "step": "EX-7.1", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": [] } },
+        { "step": "EX-7.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create", "match": { "payload.taskKey": "T-231" } }, "timeoutMs": 10000 }
+      ]
+    },
+    {
+      "id": "ST-S03-07",
+      "title": "并发已满排队并在会话结束后启动",
+      "covers": "EX-7.2",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "pending-triage"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "sessions", "rows": "{{fixture:sessions.running(runtime='dev', agent='codex', count=3)}}" } }
+      ],
+      "steps": [
+        { "step": "Step 1", "method": "GET", "url": "/api/approvals/A-87", "expected_status": 200, "extract": { "h": "body.bodyHash" } },
+        { "step": "Step 2-7", "method": "POST", "url": "/api/approvals/A-87/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 200 },
+        { "step": "EX-7.2", "method": "GET", "url": "/api/tasks/T-231", "expected_status": 200, "assert": [{ "path": "body.state", "equals": "queued" }, { "path": "body.queueReason", "matches": "codex.*队列" }] },
+        { "step": "EX-7.2", "action": "db.assert", "args": { "sql": "select id from sessions where runtime_id=(select id from runtimes where name='dev') and agent='codex' and state='running' limit 1" }, "extract": { "victim": "rows[0].id" } },
+        { "step": "EX-7.2", "action": "runtime.reply", "args": { "name": "dev", "type": "session.state", "payload": { "sessionId": "{{victim}}", "state": "done", "source": "exit", "exitCode": 0, "observedAt": "{{now}}" } } },
+        { "step": "EX-7.2", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create", "match": { "payload.taskKey": "T-231" } } }
+      ]
+    },
+    {
+      "id": "ST-S03-08",
+      "title": "分析类任务并发满自动换家",
+      "covers": "EX-7.2",
+      "kind": "exception",
+      "use": ["clock", "dev-online"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.pendingDecision(key='T-234', repo='selectdb/selectdb-core', tier='plan', kind='analysis', channel='jira', source='jira:CIR-20004')}}" } },
+        { "step": "setup", "action": "db.seed", "args": { "table": "sessions", "rows": "{{fixture:sessions.running(runtime='dev', agent='codex', count=3)}}" } },
+        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.done(key='T-101', author_agent='claude')}}" } }
+      ],
+      "steps": [
+        { "step": "Step 1", "method": "GET", "url": "/api/approvals?taskKey=T-234&status=pending", "expected_status": 200, "extract": { "ak": "body.items[0].key", "h": "body.items[0].bodyHash" } },
+        { "step": "Step 2-7", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 200 },
+        { "step": "EX-7.2", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create" }, "extract": { "c": "id" } },
+        { "step": "EX-7.2", "action": "runtime.reply", "args": { "name": "dev", "type": "worktree.ready", "ref": "{{c}}", "payload": { "taskKey": "T-234", "path": "/tmp/fx/wt/T-234", "branchName": "foreman/T-234", "reused": false } } },
+        { "step": "EX-7.2", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start", "match": { "payload.taskKey": "T-234" } }, "assert": [{ "path": "payload.agent", "equals": "claude" }] },
+        { "step": "EX-7.2", "method": "GET", "url": "/api/tasks/T-234/messages", "expected_status": 200, "assert": [{ "path": "body.items[-1].text", "contains": "已改派 claude" }] }
+      ]
+    },
+    {
+      "id": "ST-S03-09",
+      "title": "worktree 创建失败先 fetch 重试再失败卡",
+      "covers": "EX-11.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "pending-triage"],
+      "steps": [
+        { "step": "Step 1", "method": "GET", "url": "/api/approvals/A-87", "expected_status": 200, "extract": { "h": "body.bodyHash" } },
+        { "step": "Step 2-9", "method": "POST", "url": "/api/approvals/A-87/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 200 },
+        { "step": "Step 9-10", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create" }, "extract": { "c1": "id" } },
+        { "step": "EX-11.1", "action": "runtime.reply", "args": { "name": "dev", "type": "error", "ref": "{{c1}}", "payload": { "code": "WORKTREE_FAILED", "message": "fatal: branch exists", "retryable": true } } },
+        { "step": "EX-11.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create" }, "assert": [{ "path": "payload.fetchFirst", "equals": true }], "extract": { "c2": "id" } },
+        { "step": "EX-11.1", "action": "runtime.reply", "args": { "name": "dev", "type": "error", "ref": "{{c2}}", "payload": { "code": "WORKTREE_FAILED", "message": "fatal: branch exists", "retryable": false } } },
+        { "step": "EX-11.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-231" }, "assert": [{ "path": "body.state", "equals": "failed" }] } },
+        { "step": "EX-11.1", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{ "path": "body.failures[0].key", "equals": "T-231" }] },
+        { "step": "EX-11.1", "method": "GET", "url": "/api/tasks/T-231/messages", "expected_status": 200, "assert": [{ "path": "body.items[-1].kind", "equals": "failure_card" }, { "path": "body.items[-1].payload.options", "contains": "retry" }] }
+      ]
+    },
+    {
+      "id": "ST-S03-10",
+      "title": "agent 启动失败自动换家一次",
+      "covers": "EX-15.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "pending-triage"],
+      "steps": [
+        { "step": "Step 1-12", "action": "note", "args": { "text": "include ST-S03-01 Step 1–12（worktree.ready 已回）" } },
+        { "step": "Step 13-14", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "assert": [{ "path": "payload.agent", "equals": "codex" }], "extract": { "c1": "id" } },
+        { "step": "EX-15.1", "action": "runtime.reply", "args": { "name": "dev", "type": "error", "ref": "{{c1}}", "payload": { "code": "AGENT_START_FAILED", "message": "codex: native binary missing", "retryable": true } } },
+        { "step": "EX-15.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "assert": [{ "path": "payload.agent", "equals": "claude" }, { "path": "payload.cwd", "equals": "/tmp/fx/wt/T-231-ngram" }], "extract": { "c2": "id", "s2": "payload.sessionId" } },
+        { "step": "EX-15.1", "action": "runtime.reply", "args": { "name": "dev", "type": "session.started", "ref": "{{c2}}", "payload": { "sessionId": "{{s2}}", "agentSessionId": "cl-2", "startedAt": "{{now}}" } } },
+        { "step": "EX-15.1", "action": "db.assert", "args": { "sql": "select agent, state, attempt from sessions where task_id=(select id from tasks where key='T-231') order by attempt" }, "assert": [{ "path": "rows[0].agent", "equals": "codex" }, { "path": "rows[0].state", "equals": "failed" }, { "path": "rows[1].agent", "equals": "claude" }, { "path": "rows[1].attempt", "equals": 2 }] },
+        { "step": "EX-15.1", "method": "GET", "url": "/api/tasks/T-231/messages", "expected_status": 200, "assert": [{ "path": "body.items[*].text", "contains": "native binary missing" }] }
+      ]
+    },
+    {
+      "id": "ST-S03-11",
+      "title": "创建 PR 审批超时后续接送回批准",
+      "covers": "EX-22.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "pending-triage"],
+      "setup": [
+        { "step": "setup", "action": "mock.set", "args": { "handle": "codex", "script": [{ "tool": "get_task" }, { "tool": "request_approval", "arguments": { "actionType": "create_pr", "title": "创建 PR", "body": "…" }, "onTimeout": [{ "tool": "report_progress", "arguments": { "text": "等待创建 PR 的确认" } }, { "exit": 0 }] }] } }
+      ],
+      "steps": [
+        { "step": "Step 1-19", "action": "note", "args": { "text": "include ST-S03-01 Step 1–19（会话 running）" } },
+        { "step": "Step 21-22", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/inbox" }, "assert": [{ "path": "body.approvals[?(@.actionType=='create_pr')].key", "exists": true }] }, "extract": { "ak": "body.approvals[?(@.actionType=='create_pr')].key", "h": "body.approvals[?(@.actionType=='create_pr')].bodyHash", "sessionId": "body.approvals[?(@.actionType=='create_pr')].sessionId" } },
+        { "step": "EX-22.1", "action": "clock.advance", "args": { "minutes": 30 } },
+        { "step": "EX-22.1", "action": "mcp.expectCall", "args": { "taskKey": "T-231", "tool": "request_approval", "result": { "approved": false, "reason": "timeout" } } },
+        { "step": "EX-22.1", "action": "runtime.reply", "args": { "name": "dev", "type": "session.state", "payload": { "sessionId": "{{sessionId}}", "state": "done", "source": "exit", "exitCode": 0, "observedAt": "{{now}}" } } },
+        { "step": "EX-22.1", "method": "GET", "url": "/api/tasks/T-231", "expected_status": 200, "assert": [{ "path": "body.state", "equals": "waiting_approval" }] },
+        { "step": "EX-22.1", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 200 },
+        { "step": "EX-22.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.resume", "match": { "payload.sessionId": "{{sessionId}}" } }, "assert": [{ "path": "payload.text", "contains": "已批准" }] }
+      ]
+    },
+    {
+      "id": "ST-S03-12",
+      "title": "审批被否决，信任清零",
+      "covers": "EX-23.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "pending-triage", "codex-implement-pr"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "trust_counters", "rows": [{ "action_type": "create_pr", "mode": "manual", "streak": 3 }] } }
+      ],
+      "steps": [
+        { "step": "Step 1-22", "action": "note", "args": { "text": "include ST-S03-01 Step 1–22（create_pr 审批已出现）" } },
+        { "step": "Step 22", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/inbox" }, "assert": [{ "path": "body.approvals[?(@.actionType=='create_pr')].key", "exists": true }] }, "extract": { "ak": "body.approvals[?(@.actionType=='create_pr')].key", "h": "body.approvals[?(@.actionType=='create_pr')].bodyHash" } },
+        { "step": "EX-23.1", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "reject", "bodyHash": "{{h}}", "comment": "改标题" }, "expected_status": 200, "assert": [{ "path": "body.trust.streak", "equals": 0 }, { "path": "body.trust.mode", "equals": "manual" }] },
+        { "step": "EX-23.1", "action": "mcp.expectCall", "args": { "taskKey": "T-231", "tool": "request_approval", "result": { "approved": false, "reason": "rejected", "comment": "改标题" } } },
+        { "step": "EX-23.1", "method": "GET", "url": "/api/tasks/T-231/messages", "expected_status": 200, "assert": [{ "path": "body.items[*].text", "contains": "改标题" }] }
+      ]
+    },
+    {
+      "id": "ST-S03-13",
+      "title": "gh pr create 失败只交付分支",
+      "covers": "EX-25.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "pending-triage"],
+      "setup": [
+        { "step": "setup", "action": "mock.set", "args": { "handle": "gh", "prCreate": { "fail": true, "stderr": "push rejected" } } },
+        { "step": "setup", "action": "mock.set", "args": { "handle": "codex", "script": [{ "tool": "get_task" }, { "tool": "request_approval", "arguments": { "actionType": "create_pr", "title": "创建 PR", "body": "…" }, "expect": { "approved": true } }, { "exec": "gh pr create", "expectFail": true }, { "tool": "report_progress", "arguments": { "text": "创建 PR 失败：push rejected" } }, { "tool": "deliver", "arguments": { "artifacts": [{ "kind": "branch", "branch": "foreman/T-231" }] } }, { "exit": 0 }] } }
+      ],
+      "steps": [
+        { "step": "Step 1-24", "action": "note", "args": { "text": "include ST-S03-01 Step 1–24（审批已通过）" } },
+        { "step": "EX-25.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-231" }, "assert": [{ "path": "body.artifacts[0].kind", "equals": "branch" }, { "path": "body.state", "equals": "running" }] } },
+        { "step": "EX-25.1", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{ "path": "body.failures[?(@.key=='T-231')].queueReason", "contains": "重试创建 PR" }] }
+      ]
+    },
+    {
+      "id": "ST-S03-14",
+      "title": "会话失败三选一：换 agent",
+      "covers": "EX-32.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "pending-triage"],
+      "steps": [
+        { "step": "Step 1-19", "action": "note", "args": { "text": "include ST-S03-01 Step 1–19" } },
+        { "step": "Step 13", "action": "db.assert", "args": { "sql": "select id from sessions where task_id=(select id from tasks where key='T-231') and state='running'" }, "extract": { "sessionId": "rows[0].id" } },
+        { "step": "EX-32.1", "action": "runtime.reply", "args": { "name": "dev", "type": "session.state", "payload": { "sessionId": "{{sessionId}}", "state": "failed", "source": "exit", "exitCode": 2, "failureReason": "compile error", "observedAt": "{{now}}" } } },
+        { "step": "EX-32.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-231" }, "assert": [{ "path": "body.state", "equals": "failed" }] } },
+        { "step": "EX-32.1", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{ "path": "body.failures[0].key", "equals": "T-231" }] },
+        { "step": "EX-32.1", "method": "POST", "url": "/api/tasks/T-231/retry", "body": { "mode": "switch_agent" }, "expected_status": 202, "assert": [{ "path": "body.state", "in": ["queued", "running"] }] },
+        { "step": "EX-32.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "assert": [{ "path": "payload.agent", "equals": "claude" }, { "path": "payload.cwd", "equals": "/tmp/fx/wt/T-231-ngram" }] },
+        { "step": "EX-32.1", "action": "db.assert", "args": { "sql": "select count(*) as n from sessions where runtime_id=(select id from runtimes where name='dev') and state in ('planned','running','waiting_input')" }, "assert": [{ "path": "rows[0].n", "equals": 1 }] }
+      ]
+    },
+    {
+      "id": "ST-S03-15",
+      "title": "会话失败三选一：放弃",
+      "covers": "EX-32.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "pending-triage"],
+      "steps": [
+        { "step": "EX-32.1", "action": "note", "args": { "text": "include ST-S03-14 至 tasks.state failed" } },
+        { "step": "EX-32.1", "method": "POST", "url": "/api/tasks/T-231/retry", "body": { "mode": "abandon" }, "expected_status": 202, "assert": [{ "path": "body.state", "equals": "paused" }, { "path": "body.terminalAt", "exists": true }] },
+        { "step": "EX-32.1", "action": "db.assert", "args": { "sql": "select state from worktrees where task_id=(select id from tasks where key='T-231')" }, "assert": [{ "path": "rows[0].state", "equals": "ready" }] },
+        { "step": "EX-32.1", "method": "POST", "url": "/api/tasks/T-231/retry", "body": { "mode": "same_agent" }, "expected_status": 409, "assert": [{ "path": "body.code", "equals": "TASK_NOT_FAILED" }] }
+      ]
+    },
+    {
+      "id": "ST-S03-16",
+      "title": "镜像回写失败生成重试条目",
+      "covers": "EX-34.1",
+      "kind": "exception",
+      "use": ["clock", "dev-online", "pending-triage", "codex-implement-pr"],
+      "setup": [
+        { "step": "setup", "action": "mock.set", "mock": { "dependency": "Jira Server", "strategy": "mock-service", "config": "fake Jira comment 返回 500" }, "args": { "handle": "jira", "commentFailWith": 500 } }
+      ],
+      "steps": [
+        { "step": "Step 1-34", "action": "note", "args": { "text": "include ST-S03-01 全部（到镜像回写审批出现）" } },
+        { "step": "Step 34", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/approvals?taskKey=T-231&status=pending" }, "assert": [{ "path": "body.items[0].actionType", "equals": "jira_comment" }] }, "extract": { "ak": "body.items[0].key", "h": "body.items[0].bodyHash" } },
+        { "step": "EX-34.1", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 200 },
+        { "step": "EX-34.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/approvals/{{ak}}" }, "assert": [{ "path": "body.status", "equals": "failed" }] } },
+        { "step": "EX-34.1", "action": "db.assert", "args": { "sql": "select status from actions where approval_id=(select id from approvals where key='{{ak}}')" }, "assert": [{ "path": "rows[0].status", "equals": "failed" }] },
+        { "step": "EX-34.1", "method": "GET", "url": "/api/tasks/T-231", "expected_status": 200, "assert": [{ "path": "body.state", "equals": "delivered" }] },
+        { "step": "EX-34.1", "method": "GET", "url": "/api/tasks/T-231/messages", "expected_status": 200, "assert": [{ "path": "body.items[-1].text", "contains": "回写失败" }] }
+      ]
+    },
+    {
+      "id": "ST-S03-17",
+      "title": "worktree 终态 3 天后回收，磁盘高水位优先",
+      "covers": "S05 EX-19.1 / core-03 §5.2",
+      "kind": "boundary",
+      "use": ["clock", "dev-online"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "worktrees", "rows": "{{fixture:worktrees(runtime='dev', done_days=[4,4,4,4,1,1], running=3)}}" } }
+      ],
+      "steps": [
+        { "step": "gc retain", "action": "scheduler.tick", "args": { "job": "worktree-gc" } },
+        { "step": "gc retain", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.gc" }, "assert": [{ "path": "payload.policy", "equals": "retain_days" }, { "path": "payload.protectedTaskKeys", "length": 3 }], "extract": { "c1": "id" } },
+        { "step": "gc retain", "action": "runtime.reply", "args": { "name": "dev", "type": "worktree.gc.result", "ref": "{{c1}}", "payload": { "dryRun": false, "removed": "{{fixture:gc.removed(done_days_gte=3)}}", "skippedRunning": 3, "freedBytes": 12000000000, "diskUsedRatioAfter": 0.66 } } },
+        { "step": "gc retain", "action": "db.assert", "args": { "sql": "select count(*) as n from worktrees where state='removed'" }, "assert": [{ "path": "rows[0].n", "equals": 4 }] },
+        { "step": "gc high", "action": "runtime.heartbeat", "args": { "name": "dev", "disk": { "usedRatio": 0.88, "freeBytes": 1 } } },
+        { "step": "gc high", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.gc" }, "assert": [{ "path": "payload.policy", "equals": "high_watermark" }], "extract": { "c2": "id" } },
+        { "step": "gc high", "action": "runtime.reply", "args": { "name": "dev", "type": "worktree.gc.result", "ref": "{{c2}}", "payload": { "dryRun": false, "removed": "{{fixture:gc.removed(done_days_gte=1)}}", "skippedRunning": 3, "freedBytes": 7700000000, "diskUsedRatioAfter": 0.81 } } },
+        { "step": "gc high", "action": "db.assert", "args": { "sql": "select count(*) filter (where state='removed') as removed, count(*) filter (where state='ready') as ready from worktrees" }, "assert": [{ "path": "rows[0].removed", "equals": 6 }, { "path": "rows[0].ready", "equals": 3 }] },
+        { "step": "gc events", "action": "db.assert", "args": { "sql": "select count(*) as n from events where type='thread.event' and payload->>'text' like '%worktree%回收%'" }, "assert": [{ "path": "rows[0].n", "equals": 6 }] }
+      ]
+    }
+  ]
+}

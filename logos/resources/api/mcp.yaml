@@ -1,0 +1,339 @@
+openapi: 3.1.0
+info:
+  title: "foreman API — MCP（agent 会话调用的工具端点）"
+  version: 0.1.0
+  description: "来源：S01 Step 20–22、S03 Step 20–27、S04 Step 18–27、S07 Step 1 / 13 / 28、S02 Step 26。传输为 MCP Streamable HTTP（JSON-RPC 2.0 over POST /mcp），鉴权用任务级一次性 token。工具的入参与出参以 components 定义；ask_user 与 request_approval 为阻塞工具，HTTP 层挂起最长 30 分钟，超时返回结构化结果而非错误。"
+servers:
+  - url: http://127.0.0.1:7801
+security:
+  - mcpTaskToken: []
+
+x-mcp-tools:
+  - { name: get_task, input: GetTaskInput, output: GetTaskOutput, callers: [task_session], source: "S01 Step 20" }
+  - { name: report_progress, input: ReportProgressInput, output: Ack, callers: [task_session], source: "S07 Step 1" }
+  - { name: ask_user, input: AskUserInput, output: AskUserOutput, callers: [task_session], blocking: true, source: "S07 Step 13 → Step 28" }
+  - { name: request_approval, input: RequestApprovalInput, output: RequestApprovalOutput, callers: [task_session], blocking: true, source: "S03 Step 21 → Step 24、S06" }
+  - { name: deliver, input: DeliverInput, output: Ack, callers: [task_session], source: "S01 Step 22、S03 Step 27、S02 Step 26" }
+  - { name: lookup_jira, input: LookupJiraInput, output: LookupJiraOutput, callers: [dispatcher, task_session], source: "S04 Step 18 → Step 26" }
+  - { name: lookup_pr, input: LookupPrInput, output: LookupPrOutput, callers: [dispatcher, task_session], source: "S04（PR 引用查证）" }
+  - { name: list_tasks, input: ListTasksInput, output: ListTasksOutput, callers: [dispatcher], source: "S04 EX-22.1、EX-27.2" }
+  - { name: propose_task, input: ProposeTaskInput, output: ProposeTaskOutput, callers: [dispatcher], source: "S04 Step 27" }
+  - { name: ask_clarification, input: AskClarificationInput, output: Ack, callers: [dispatcher], source: "S04 EX-22.1" }
+
+paths:
+  /mcp:
+    post:
+      operationId: mcpRpc
+      summary: "MCP Streamable HTTP 端点"
+      description: "来源：见 x-mcp-tools。请求体为 JSON-RPC 2.0（initialize / tools/list / tools/call）。tools/call 的 params.name 为工具名，params.arguments 按对应 *Input schema。token 绑定任务：调用时 taskKey 若与 token 不符返回 -32001。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JsonRpcRequest' }
+      responses:
+        '200':
+          description: "JSON-RPC 响应；阻塞工具最长 30 分钟后返回"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JsonRpcResponse' }
+        '401':
+          description: "token 无效或已过期（任务终态后 token 失效）"
+          content:
+            application/json:
+              schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
+
+components:
+  securitySchemes:
+    mcpTaskToken:
+      type: http
+      scheme: bearer
+      description: "session.start 时下发的任务级一次性 token，任务终态即失效"
+
+  schemas:
+    JsonRpcRequest:
+      type: object
+      required: [jsonrpc, id, method]
+      properties:
+        jsonrpc: { type: string, const: "2.0" }
+        id: { oneOf: [{ type: string }, { type: integer }] }
+        method: { type: string, enum: [initialize, tools/list, tools/call, ping] }
+        params:
+          type: object
+          properties:
+            name: { type: string }
+            arguments: { type: object, additionalProperties: true }
+    JsonRpcResponse:
+      type: object
+      required: [jsonrpc, id]
+      properties:
+        jsonrpc: { type: string, const: "2.0" }
+        id: { oneOf: [{ type: string }, { type: integer }] }
+        result: { type: object, additionalProperties: true }
+        error:
+          type: object
+          properties:
+            code: { type: integer, description: "-32001 TASK_MISMATCH，-32002 TASK_TERMINAL，-32003 SOURCE_UNAVAILABLE" }
+            message: { type: string }
+
+    Ack:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean }
+
+    GetTaskInput:
+      type: object
+      required: [taskKey]
+      properties:
+        taskKey: { type: string }
+    GetTaskOutput:
+      type: object
+      required: [task, contextPack, thread]
+      properties:
+        task: { $ref: 'tasks.yaml#/components/schemas/Task' }
+        contextPack: { $ref: 'tasks.yaml#/components/schemas/ContextPack' }
+        thread:
+          type: array
+          description: "最近 50 条线程消息（含用户消息与产物）"
+          items: { $ref: 'tasks.yaml#/components/schemas/Message' }
+        repoConfig:
+          type: object
+          nullable: true
+          properties:
+            name: { type: string }
+            pushRemote: { type: string }
+            upstream: { type: string }
+            baseBranch: { type: string }
+
+    ReportProgressInput:
+      type: object
+      required: [taskKey, text]
+      properties:
+        taskKey: { type: string }
+        text: { type: string, maxLength: 200, description: "超出由服务端截断并标记" }
+        step: { type: string, nullable: true, description: "可选的阶段标签，如 reproduce / implement / test" }
+
+    AskUserInput:
+      type: object
+      required: [taskKey, question]
+      properties:
+        taskKey: { type: string }
+        question: { type: string, maxLength: 4000 }
+        options:
+          type: array
+          items: { type: string }
+          description: "可选的选项列表，面板与飞书按按钮渲染"
+        timeoutMinutes: { type: integer, default: 30, maximum: 30 }
+    AskUserOutput:
+      type: object
+      required: [answered]
+      properties:
+        answered: { type: boolean }
+        answer: { type: string, nullable: true }
+        answeredVia: { type: string, nullable: true, enum: [panel, feishu] }
+        reason: { type: string, nullable: true, enum: [timeout, task_paused] }
+        questionId: { type: string, format: uuid }
+
+    RequestApprovalInput:
+      type: object
+      required: [taskKey, actionType, title, body]
+      properties:
+        taskKey: { type: string }
+        actionType: { $ref: 'approvals.yaml#/components/schemas/ActionType' }
+        title: { type: string, maxLength: 200 }
+        body: { type: string, maxLength: 20000, description: "动作完整正文，用户在面板看到并可修改" }
+        payload:
+          type: object
+          additionalProperties: true
+          description: "结构化参数（如 create_pr 的 {repo, base, head, title}），执行时使用"
+        timeoutMinutes: { type: integer, default: 30, maximum: 30 }
+    RequestApprovalOutput:
+      type: object
+      required: [approved, approvalKey]
+      properties:
+        approved: { type: boolean }
+        approvalKey: { type: string, example: A-90 }
+        via: { type: string, nullable: true, enum: [panel, feishu, auto] }
+        finalBody: { type: string, nullable: true, description: "用户修改后的正文，agent 必须以此为准" }
+        reason: { type: string, nullable: true, enum: [rejected, timeout, superseded] }
+        comment: { type: string, nullable: true }
+
+    DeliverInput:
+      type: object
+      required: [taskKey, artifacts]
+      properties:
+        taskKey: { type: string }
+        artifacts:
+          type: array
+          minItems: 1
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/PrArtifact'
+              - $ref: '#/components/schemas/DocArtifact'
+              - $ref: '#/components/schemas/BranchArtifact'
+              - $ref: '#/components/schemas/TriageArtifact'
+              - $ref: '#/components/schemas/CandidatesArtifact'
+        summary: { type: string, maxLength: 2000, description: "完成摘要，写入线程" }
+    PrArtifact:
+      type: object
+      required: [kind, url]
+      properties:
+        kind: { type: string, const: pr }
+        url: { type: string }
+        title: { type: string }
+        diffStat:
+          type: object
+          properties:
+            additions: { type: integer }
+            deletions: { type: integer }
+            files: { type: integer }
+    DocArtifact:
+      type: object
+      required: [kind, path]
+      properties:
+        kind: { type: string, const: doc }
+        path: { type: string, description: "worktree 内相对路径" }
+        title: { type: string }
+        content: { type: string, description: "全文，供线程展示与镜像" }
+    BranchArtifact:
+      type: object
+      required: [kind, branch]
+      properties:
+        kind: { type: string, const: branch }
+        branch: { type: string }
+        readmePath: { type: string, nullable: true }
+    TriageArtifact:
+      type: object
+      required: [kind, tier, effort, repo, suggestedPath]
+      properties:
+        kind: { type: string, const: triage }
+        tier: { $ref: 'tasks.yaml#/components/schemas/TaskPath' }
+        effort: { type: string, enum: [small, medium, large] }
+        repo:
+          type: object
+          required: [name, confidence]
+          properties:
+            name: { type: string, nullable: true }
+            confidence: { type: number }
+            candidates: { type: array, items: { type: string } }
+        suggestedPath: { type: string }
+        codeLocations:
+          type: array
+          maxItems: 8
+          items:
+            type: object
+            required: [file]
+            properties:
+              file: { type: string }
+              line: { type: integer, nullable: true }
+              symbol: { type: string, nullable: true }
+              why: { type: string }
+    CandidatesArtifact:
+      type: object
+      required: [kind, candidates]
+      properties:
+        kind: { type: string, const: candidates }
+        candidates:
+          type: array
+          items:
+            type: object
+            required: [messageId, reason, confidence]
+            properties:
+              messageId: { type: string }
+              reason: { type: string }
+              confidence: { type: number }
+
+    LookupJiraInput:
+      type: object
+      required: [key]
+      properties:
+        key: { type: string, pattern: '^[A-Z]+-\d+$' }
+    LookupJiraOutput:
+      type: object
+      required: [found]
+      properties:
+        found: { type: boolean }
+        issue:
+          type: object
+          nullable: true
+          properties:
+            key: { type: string }
+            summary: { type: string }
+            status: { type: string }
+            project: { type: string }
+            component: { type: string, nullable: true }
+            version: { type: string, nullable: true }
+            assignee: { type: string, nullable: true }
+            descriptionExcerpt: { type: string }
+            url: { type: string }
+        existingTaskKey: { type: string, nullable: true, description: "该单已有任务时返回" }
+    LookupPrInput:
+      type: object
+      required: [repo, number]
+      properties:
+        repo: { type: string }
+        number: { type: integer }
+    LookupPrOutput:
+      type: object
+      required: [found]
+      properties:
+        found: { type: boolean }
+        pr:
+          type: object
+          nullable: true
+          properties:
+            title: { type: string }
+            state: { type: string }
+            baseRefName: { type: string }
+            mergedAt: { type: string, nullable: true }
+            url: { type: string }
+    ListTasksInput:
+      type: object
+      properties:
+        q: { type: string, nullable: true }
+        recent: { type: integer, default: 5, maximum: 20 }
+        channel: { type: string, nullable: true }
+    ListTasksOutput:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: 'tasks.yaml#/components/schemas/TaskSummary' }
+
+    ProposeTaskInput:
+      type: object
+      required: [channel, source, path]
+      properties:
+        channel: { type: string }
+        source: { type: string, description: "查证过的引用或原文" }
+        sourceTitle: { type: string }
+        repo: { type: string, nullable: true }
+        repoSource: { type: string, enum: [mapping, llm, manual], default: llm }
+        path: { $ref: 'tasks.yaml#/components/schemas/TaskPath' }
+        pickTargets: { type: array, items: { type: string } }
+        runtime: { type: string, nullable: true }
+        agent: { type: string, nullable: true, enum: [claude, codex, opencode] }
+        note: { type: string, nullable: true, description: "一句话说明，显示在卡片上" }
+    ProposeTaskOutput:
+      type: object
+      required: [draftId]
+      properties:
+        draftId: { type: string, format: uuid }
+
+    AskClarificationInput:
+      type: object
+      required: [channel, text]
+      properties:
+        channel: { type: string }
+        text: { type: string, maxLength: 1000 }
+        candidates:
+          type: array
+          maxItems: 5
+          items:
+            type: object
+            required: [label, value]
+            properties:
+              label: { type: string }
+              value: { type: string, description: "用户点击后作为回复文本送回" }

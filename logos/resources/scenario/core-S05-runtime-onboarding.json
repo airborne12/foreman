@@ -1,0 +1,213 @@
+{
+  "$schema": "./core-00-format.schema.json",
+  "scenario": "S05",
+  "name": "接入一台 runtime 并让任务路由到它",
+  "source": "logos/resources/prd/3-technical-plan/2-scenario-implementation/core-S05-runtime-onboarding.md",
+  "baseUrl": "{{env.CENTER_URL}}",
+  "auth": { "panelToken": "{{env.FOREMAN_PANEL_TOKEN}}", "workerToken": "{{env.FOREMAN_TOKEN}}" },
+  "dependencies": [
+    { "dependency": "ssh 反向隧道", "strategy": "env-disable", "config": "测试中所有 runtime 使用 transport: direct；隧道管理器单测用假 ssh", "handle": "ssh" },
+    { "dependency": "Claude Code CLI", "strategy": "mock-service", "config": "假 claude 脚本（探测用）", "handle": "claude" },
+    { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "假 lark-cli 记录告警", "handle": "lark" }
+  ],
+  "presets": {
+    "clock": [{ "step": "setup", "action": "clock.freeze" }],
+    "three-online": [
+      { "step": "setup", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core", "vpn:jira"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": ["jira-poll", "jira-lookup"] } },
+      { "step": "setup", "action": "runtime.register", "args": { "name": "center", "transport": "local", "labels": ["agent:claude", "agent:codex", "text"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] } },
+      { "step": "setup", "action": "runtime.register", "args": { "name": "laptop", "transport": "direct", "labels": ["agent:claude", "agent:opencode", "repo:apache/doris"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] } }
+    ]
+  },
+  "cases": [
+    {
+      "id": "ST-S05-01",
+      "title": "笔记本直连：init → doctor → start → 面板可见",
+      "covers": "Step 1→5、8→15",
+      "kind": "main",
+      "use": ["clock"],
+      "steps": [
+        { "step": "Step 1-2", "action": "note", "args": { "text": "运行器用子进程执行 CLI：PATH 只含假 claude、opencode、git；FOREMAN_HOME 指向临时目录" } },
+        { "step": "Step 1-2", "action": "mock.set", "args": { "handle": "cli", "exec": ["foreman", "worker", "init", "--non-interactive", "--name", "laptop", "--center", "{{env.CENTER_URL}}", "--transport", "direct", "--token", "{{env.FOREMAN_TOKEN}}"] }, "assert": [{ "path": "exitCode", "equals": 0 }, { "path": "stdout", "contains": "agent:claude" }, { "path": "stdout", "contains": "agent:codex ✗" }, { "path": "stdout", "contains": "build:doris ✗" }] },
+        { "step": "Step 2", "action": "mock.set", "args": { "handle": "cli", "readFile": "{{env.FOREMAN_HOME}}/worker.yaml" }, "assert": [{ "path": "mode", "equals": "0600" }, { "path": "yaml.name", "equals": "laptop" }, { "path": "yaml.transport", "equals": "direct" }, { "path": "yaml.labels", "contains": "agent:claude" }] },
+        { "step": "Step 3-5", "action": "mock.set", "args": { "handle": "cli", "exec": ["foreman", "worker", "doctor"] }, "assert": [{ "path": "exitCode", "equals": 0 }, { "path": "stdout", "contains": "可以启动" }] },
+        { "step": "Step 4", "method": "POST", "url": "/api/runtimes/auth-check", "auth": "worker", "expected_status": 200, "assert": [{ "path": "body.ok", "equals": true }] },
+        { "step": "Step 8-10", "action": "mock.set", "args": { "handle": "cli", "spawn": ["foreman", "worker", "start", "--foreground"] } },
+        { "step": "Step 11-15", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/runtimes" }, "assert": [{ "path": "body.items[?(@.name=='laptop')].online", "equals": true }, { "path": "body.items[?(@.name=='laptop')].transport", "equals": "direct" }, { "path": "body.items[?(@.name=='laptop')].labels", "contains": "agent:claude" }] } },
+        { "step": "Step 15", "method": "GET", "url": "/api/runtimes/laptop", "expected_status": 200, "assert": [{ "path": "body.labels", "notEquals": "build:doris" }, { "path": "body.agents.claude.max", "equals": 3 }] },
+        { "step": "Step 15", "action": "ws.expect", "args": { "type": "runtime.updated", "match": { "payload.runtime.name": "laptop" } } }
+      ]
+    },
+    {
+      "id": "ST-S05-02",
+      "title": "反向隧道接入（假 ssh）",
+      "covers": "Step 6→17",
+      "kind": "main",
+      "use": ["clock"],
+      "steps": [
+        { "step": "Step 6-7", "action": "mock.set", "mock": { "dependency": "ssh 反向隧道", "strategy": "env-disable", "config": "假 ssh 把 -R 映射为本地端口转发" }, "args": { "handle": "ssh", "mode": "forward-local", "listen": 17801 } },
+        { "step": "Step 6-7", "action": "mock.set", "args": { "handle": "cli", "exec": ["foreman", "center", "tunnel", "dev", "up"] }, "assert": [{ "path": "exitCode", "equals": 0 }, { "path": "stdout", "contains": "tunnel dev: up" }] },
+        { "step": "Step 8-10", "action": "mock.set", "args": { "handle": "cli", "spawn": ["foreman", "worker", "start", "--foreground", "--config", "{{fixture:workerYaml(name='dev', transport='reverse-tunnel', center='ws://127.0.0.1:17801', labels=['agent:claude','agent:codex','build:doris','repo:selectdb/selectdb-core','vpn:jira'])}}"] } },
+        { "step": "Step 11-15", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/runtimes/dev" }, "assert": [{ "path": "body.online", "equals": true }, { "path": "body.transport", "equals": "reverse-tunnel" }, { "path": "body.labels", "contains": "vpn:jira" }] } },
+        { "step": "Step 16-17", "action": "db.assert", "args": { "sql": "select count(*) as n from sessions where state='lost'" }, "assert": [{ "path": "rows[0].n", "equals": 0 }] },
+        { "step": "Step 7", "action": "mock.set", "args": { "handle": "cli", "exec": ["foreman", "center", "tunnel", "dev", "status", "--json"] }, "assert": [{ "path": "json.state", "equals": "up" }, { "path": "json.reconnects", "equals": 0 }] }
+      ]
+    },
+    {
+      "id": "ST-S05-03",
+      "title": "按类型路由与手动覆盖",
+      "covers": "Step 20",
+      "kind": "main",
+      "use": ["clock", "three-online"],
+      "steps": [
+        { "step": "Step 20 code", "method": "POST", "url": "/api/tasks", "body": { "source": "CIR-20001", "repo": "selectdb/selectdb-core", "path": "fix", "kind": "code" }, "expected_status": 201, "extract": { "t1": "body.key" } },
+        { "step": "Step 20 code", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/{{t1}}" }, "assert": [{ "path": "body.runtime", "equals": "dev" }] } },
+        { "step": "Step 20 code", "method": "GET", "url": "/api/tasks/{{t1}}/messages", "expected_status": 200, "assert": [{ "path": "body.items[*].text", "matches": "require build:doris" }] },
+        { "step": "Step 20 text", "method": "POST", "url": "/api/tasks", "body": { "source": "调研 ngram 索引方案", "path": "plan", "kind": "text" }, "expected_status": 201, "extract": { "t2": "body.key" } },
+        { "step": "Step 20 text", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/{{t2}}" }, "assert": [{ "path": "body.runtime", "equals": "center" }] } },
+        { "step": "Step 20 override", "method": "POST", "url": "/api/tasks", "body": { "source": "CIR-20002", "repo": "selectdb/selectdb-core", "path": "fix", "kind": "code", "runtime": "laptop" }, "expected_status": 201, "extract": { "t3": "body.key" } },
+        { "step": "Step 20 override", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/{{t3}}" }, "assert": [{ "path": "body.runtime", "equals": "laptop" }] } },
+        { "step": "Step 20 override", "method": "GET", "url": "/api/tasks/{{t3}}/messages", "expected_status": 200, "assert": [{ "path": "body.items[*].text", "matches": "手动覆盖" }] }
+      ]
+    },
+    {
+      "id": "ST-S05-04",
+      "title": "心跳与状态视图字段",
+      "covers": "Step 18–19",
+      "kind": "main",
+      "use": ["clock", "three-online"],
+      "steps": [
+        { "step": "Step 18", "action": "runtime.heartbeat", "args": { "name": "dev", "disk": { "usedRatio": 0.71, "freeBytes": 900000000000 }, "load": 12.5, "sessions": { "claude": 2, "codex": 0 } } },
+        { "step": "Step 18", "action": "clock.advance", "args": { "seconds": 30 } },
+        { "step": "Step 18", "action": "runtime.heartbeat", "args": { "name": "dev", "disk": { "usedRatio": 0.72, "freeBytes": 890000000000 }, "load": 10.0, "sessions": { "claude": 2, "codex": 1 } } },
+        { "step": "Step 18", "action": "clock.advance", "args": { "seconds": 30 } },
+        { "step": "Step 18", "action": "runtime.heartbeat", "args": { "name": "dev", "disk": { "usedRatio": 0.73, "freeBytes": 880000000000 }, "load": 9.5, "sessions": { "claude": 1, "codex": 1 } } },
+        { "step": "Step 19", "method": "GET", "url": "/api/runtimes/dev", "expected_status": 200, "assert": [{ "path": "body.diskUsedRatio", "equals": 0.73 }, { "path": "body.load", "equals": 9.5 }, { "path": "body.lastSeenAt", "equals": "{{now}}" }, { "path": "body.agents.claude.max", "equals": 3 }] }
+      ]
+    },
+    {
+      "id": "ST-S05-05",
+      "title": "doctor 发现 token 无效",
+      "covers": "EX-5.1",
+      "kind": "exception",
+      "use": ["clock"],
+      "steps": [
+        { "step": "EX-5.1", "method": "POST", "url": "/api/runtimes/auth-check", "auth": "none", "headers": { "Authorization": "Bearer wrong-token" }, "expected_status": 401, "assert": [{ "path": "body.code", "equals": "AUTH_INVALID" }] },
+        { "step": "EX-5.1", "action": "mock.set", "args": { "handle": "cli", "exec": ["foreman", "worker", "doctor", "--config", "{{fixture:workerYaml(name='laptop', transport='direct', token='wrong-token')}}"] }, "assert": [{ "path": "exitCode", "equals": 1 }, { "path": "stdout", "contains": "token 无效" }] },
+        { "step": "EX-5.1", "method": "GET", "url": "/api/runtimes", "expected_status": 200, "assert": [{ "path": "body.items", "length": 0 }] }
+      ]
+    },
+    {
+      "id": "ST-S05-06",
+      "title": "doctor 中心不可达提示先建隧道",
+      "covers": "EX-5.2",
+      "kind": "exception",
+      "steps": [
+        { "step": "EX-5.2", "action": "mock.set", "args": { "handle": "cli", "exec": ["foreman", "worker", "doctor", "--config", "{{fixture:workerYaml(name='dev', transport='reverse-tunnel', center='ws://127.0.0.1:1')}}"] }, "assert": [{ "path": "exitCode", "equals": 1 }, { "path": "stdout", "contains": "foreman center tunnel" }] }
+      ]
+    },
+    {
+      "id": "ST-S05-07",
+      "title": "隧道断开重连，worker 离线不超过 90 秒",
+      "covers": "EX-7.1",
+      "kind": "exception",
+      "use": ["clock"],
+      "steps": [
+        { "step": "Step 6-17", "action": "note", "args": { "text": "include ST-S05-02（dev 经假隧道在线）" } },
+        { "step": "EX-7.1", "action": "mock.set", "mock": { "dependency": "ssh 反向隧道", "strategy": "env-disable", "config": "假 ssh 被 kill" }, "args": { "handle": "ssh", "kill": true } },
+        { "step": "EX-7.1", "action": "clock.advance", "args": { "seconds": 10 } },
+        { "step": "EX-7.1", "action": "mock.set", "args": { "handle": "cli", "exec": ["foreman", "center", "tunnel", "dev", "status", "--json"] }, "assert": [{ "path": "json.reconnects", "gte": 1 }] },
+        { "step": "EX-7.1", "action": "clock.advance", "args": { "seconds": 60 } },
+        { "step": "EX-7.1", "action": "scheduler.tick", "args": { "job": "heartbeat-check" } },
+        { "step": "EX-7.1", "method": "GET", "url": "/api/runtimes/dev", "expected_status": 200, "assert": [{ "path": "body.online", "equals": true }] },
+        { "step": "EX-7.1", "action": "clock.advance", "args": { "minutes": 5 } },
+        { "step": "EX-7.1", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "expectNone": true, "timeoutMs": 1000 } }
+      ]
+    },
+    {
+      "id": "ST-S05-08",
+      "title": "隧道 5 分钟无法重建推一次告警",
+      "covers": "EX-7.1",
+      "kind": "exception",
+      "use": ["clock"],
+      "steps": [
+        { "step": "Step 6-17", "action": "note", "args": { "text": "include ST-S05-02" } },
+        { "step": "EX-7.1", "action": "mock.set", "args": { "handle": "ssh", "failForever": true, "kill": true } },
+        { "step": "EX-7.1", "action": "clock.advance", "args": { "minutes": 5 } },
+        { "step": "EX-7.1", "action": "scheduler.tick", "args": { "job": "heartbeat-check" } },
+        { "step": "EX-7.1", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "[告警] dev 离线" } } },
+        { "step": "EX-7.1", "action": "clock.advance", "args": { "minutes": 5 } },
+        { "step": "EX-7.1", "action": "scheduler.tick", "args": { "job": "heartbeat-check" } },
+        { "step": "EX-7.1", "action": "db.assert", "args": { "sql": "select count(*) as n from notifications where kind='alert' and text like '%dev 离线%'" }, "assert": [{ "path": "rows[0].n", "equals": 1 }] }
+      ]
+    },
+    {
+      "id": "ST-S05-09",
+      "title": "worker token 错误退避重试",
+      "covers": "EX-10.1",
+      "kind": "exception",
+      "use": ["clock"],
+      "steps": [
+        { "step": "EX-10.1", "action": "mock.set", "args": { "handle": "cli", "spawn": ["foreman", "worker", "start", "--foreground", "--config", "{{fixture:workerYaml(name='laptop', transport='direct', token='wrong-token')}}"], "captureSeconds": 3 } },
+        { "step": "EX-10.1", "action": "mock.expect", "args": { "handle": "cli", "kind": "stdout", "match": { "text": "AUTH_INVALID" } } },
+        { "step": "EX-10.1", "action": "mock.expect", "args": { "handle": "cli", "kind": "stdout", "match": { "text": "retrying in 60s" } } },
+        { "step": "EX-10.1", "action": "clock.advance", "args": { "seconds": 60 } },
+        { "step": "EX-10.1", "action": "mock.expect", "args": { "handle": "cli", "kind": "stdout", "match": { "text": "retrying in 120s" } } },
+        { "step": "EX-10.1", "action": "mock.set", "args": { "handle": "cli", "exec": ["foreman", "worker", "status", "--json"] }, "assert": [{ "path": "json.state", "equals": "auth_failed" }] },
+        { "step": "EX-10.1", "action": "db.assert", "args": { "sql": "select count(*) as n from events where type='worker.auth_failed'" }, "assert": [{ "path": "rows[0].n", "gte": 2 }] }
+      ]
+    },
+    {
+      "id": "ST-S05-10",
+      "title": "runtime 名冲突被拒",
+      "covers": "EX-12.1",
+      "kind": "exception",
+      "use": ["clock"],
+      "steps": [
+        { "step": "Step 11", "action": "runtime.register", "args": { "name": "dev", "instanceId": "11111111-1111-1111-1111-111111111111", "transport": "direct", "labels": ["agent:claude"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] } },
+        { "step": "EX-12.1", "action": "runtime.register", "args": { "name": "dev", "instanceId": "22222222-2222-2222-2222-222222222222", "transport": "direct", "labels": ["agent:claude"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [], "expectError": "RUNTIME_NAME_CONFLICT" } },
+        { "step": "EX-12.1", "method": "GET", "url": "/api/runtimes/dev", "expected_status": 200, "assert": [{ "path": "body.online", "equals": true }] },
+        { "step": "EX-12.1", "action": "runtime.disconnect", "args": { "name": "dev" } },
+        { "step": "EX-12.1 重连", "action": "runtime.register", "args": { "name": "dev", "instanceId": "11111111-1111-1111-1111-111111111111", "transport": "direct", "labels": ["agent:claude"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] }, "assert": [{ "path": "ack.runtimeId", "exists": true }] }
+      ]
+    },
+    {
+      "id": "ST-S05-11",
+      "title": "磁盘高水位自动回收",
+      "covers": "EX-19.1",
+      "kind": "exception",
+      "use": ["clock", "three-online"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "worktrees", "rows": "{{fixture:worktrees(runtime='dev', done_days=[1,1], running=3)}}" } }
+      ],
+      "steps": [
+        { "step": "Step 18-19", "action": "runtime.heartbeat", "args": { "name": "dev", "disk": { "usedRatio": 0.88, "freeBytes": 10 }, "sessions": {} } },
+        { "step": "EX-19.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.gc" }, "assert": [{ "path": "payload.policy", "equals": "high_watermark" }, { "path": "payload.protectedTaskKeys", "length": 3 }], "extract": { "c": "id" } },
+        { "step": "EX-19.1", "action": "runtime.reply", "args": { "name": "dev", "type": "worktree.gc.result", "ref": "{{c}}", "payload": { "dryRun": false, "removed": "{{fixture:gc.removed(done_days_gte=1)}}", "skippedRunning": 3, "freedBytes": 7700000000, "diskUsedRatioAfter": 0.81 } } },
+        { "step": "EX-19.1", "action": "db.assert", "args": { "sql": "select count(*) filter (where state='removed') as removed, count(*) filter (where state='ready') as ready from worktrees" }, "assert": [{ "path": "rows[0].removed", "equals": 2 }, { "path": "rows[0].ready", "equals": 3 }] },
+        { "step": "EX-19.1", "action": "db.assert", "args": { "sql": "select count(*) as n from events where type='thread.event' and payload->>'text' like '%回收%'" }, "assert": [{ "path": "rows[0].n", "equals": 2 }] },
+        { "step": "EX-19.1", "method": "GET", "url": "/api/runtimes/dev", "expected_status": 200, "assert": [{ "path": "body.reclaimableWorktrees.count", "equals": 0 }] }
+      ]
+    },
+    {
+      "id": "ST-S05-12",
+      "title": "离线期间任务排队与消息排队，上线后补发",
+      "covers": "EX-23.1",
+      "kind": "exception",
+      "use": ["clock"],
+      "setup": [
+        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.pendingDecision(key='T-240', repo='selectdb/selectdb-core', tier='fix', channel='jira', source='jira:CIR-20010')}}" } },
+        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.runningOn(key='T-241', runtime='dev', agent='claude', session_state='done')}}" } }
+      ],
+      "steps": [
+        { "step": "EX-23.1", "method": "GET", "url": "/api/approvals?taskKey=T-240&status=pending", "expected_status": 200, "extract": { "ak": "body.items[0].key", "h": "body.items[0].bodyHash" } },
+        { "step": "EX-23.1", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 200 },
+        { "step": "EX-23.1", "method": "GET", "url": "/api/tasks/T-240", "expected_status": 200, "assert": [{ "path": "body.state", "equals": "queued" }, { "path": "body.queueReason", "contains": "dev" }] },
+        { "step": "EX-23.1", "method": "POST", "url": "/api/tasks/T-241/messages", "body": { "text": "顺便改一下默认值" }, "expected_status": 202, "assert": [{ "path": "body.delivery", "equals": "queued" }] },
+        { "step": "EX-23.1", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": [] }, "assert": [{ "path": "ack.pendingCommands[*].type", "contains": "session.resume" }] },
+        { "step": "EX-23.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.resume", "match": { "payload.text": "顺便改一下默认值" } } },
+        { "step": "EX-23.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create", "match": { "payload.taskKey": "T-240" } } },
+        { "step": "EX-23.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-241/messages" }, "assert": [{ "path": "body.items[-1].delivery", "equals": "delivered" }] } }
+      ]
+    }
+  ]
+}
