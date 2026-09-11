@@ -174,6 +174,10 @@ export async function startApp(config: CenterConfig, opts?: Parameters<typeof cr
     else socket.destroy();
   });
   ctx.scheduler.start(); ctx.schedulerRunning = true;
+  // 生产环境：把 center.yaml 里配置的反向隧道拉起来（带退避重连，状态见 /api/system/tunnels）
+  if (!config.test_mode) for (const name of Object.keys(config.tunnels)) {
+    ctx.tunnels.up(name).catch((e) => ctx.log.error({ err: String(e), tunnel: name }, 'tunnel up failed'));
+  }
   const actualPort = (server.address() as any)?.port ?? port;
   const started: StartedApp = {
     ...ctx, server, port: actualPort, url: `http://127.0.0.1:${actualPort}`,

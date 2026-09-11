@@ -15,14 +15,15 @@ bash "$ROOT/scripts/build.sh"
 say "2/7 准备中心机目录（~/foreman/{releases,logs,backups} 与 ~/.foreman）"
 ssh "$CENTER_SSH" "mkdir -p ~/foreman/releases/$TS ~/foreman/logs ~/foreman/backups ~/.foreman && chmod 700 ~/.foreman"
 
-say "3/7 首次部署：生成 token 进 keychain、建库与 center.yaml（已存在则跳过）"
+say "3/7 首次部署：生成 token、建库与配置（已存在则跳过）"
 ssh "$CENTER_SSH" "PSQL='$PSQL' bash -s" <<'REMOTE'
 set -euo pipefail
-have() { security find-generic-password -s "$1" -w >/dev/null 2>&1; }
 gen() { LC_ALL=C tr -dc 'a-f0-9' </dev/urandom | head -c 64; }
-for s in foreman-worker-token foreman-panel-token; do
-  have "$s" || { security add-generic-password -a "$USER" -s "$s" -w "$(gen)" -U; echo "keychain: $s 已创建"; }
-done
+# 非交互 ssh 会话写不了 keychain，改用 0600 的 EnvironmentFile（部署方案 §3.4 允许）
+if [ ! -f ~/.foreman/env ]; then
+  printf 'FOREMAN_TOKEN=%s\nFOREMAN_PANEL_TOKEN=%s\n' "$(gen)" "$(gen)" > ~/.foreman/env
+  chmod 600 ~/.foreman/env; echo "~/.foreman/env 已生成（两枚 token，0600）"
+else echo "~/.foreman/env 已存在，保留"; fi
 if ! "$PSQL" -lqt 2>/dev/null | cut -d'|' -f1 | tr -d ' ' | grep -qx foreman; then
   "${PSQL%psql}createdb" foreman && echo "postgres: 数据库 foreman 已创建"
 else echo "postgres: 数据库 foreman 已存在"; fi
@@ -53,6 +54,22 @@ tunnels:
 YAML
   chmod 600 ~/.foreman/center.yaml; echo "center.yaml 已生成"
 else echo "center.yaml 已存在，保留"; fi
+if [ ! -f ~/.foreman/worker.yaml ]; then
+  cat > ~/.foreman/worker.yaml <<YAML
+name: center
+center:
+  url: ws://127.0.0.1:7801
+  token: \${FOREMAN_TOKEN}
+transport: local
+labels: [agent:claude, agent:codex, text]
+agents:
+  claude: { bin: claude, maxConcurrent: 3 }
+  codex: { bin: codex, maxConcurrent: 3 }
+repos: {}
+capabilities: []
+YAML
+  chmod 600 ~/.foreman/worker.yaml; echo "worker.yaml（中心机 runtime）已生成"
+else echo "worker.yaml 已存在，保留"; fi
 REMOTE
 
 say "4/7 同步 release 到中心机"
@@ -69,11 +86,13 @@ set -euo pipefail
 TS="$1"; H="$HOME"
 ln -sfn "$H/foreman/releases/$TS" "$H/foreman/current"
 mkdir -p "$H/Library/LaunchAgents"
-for u in ai.foreman.center ai.foreman.worker ai.foreman.tunnel.dev; do
+# 隧道不再单独用 launchd：由中心的 TunnelManager 拉起并保活（状态见 /api/system/tunnels）
+for u in ai.foreman.center ai.foreman.worker; do
   sed "s|__HOME__|$H|g" "$H/foreman/current/scripts/launchd/$u.plist" > "$H/Library/LaunchAgents/$u.plist"
 done
 UID_N="$(id -u)"
-for u in ai.foreman.center ai.foreman.worker ai.foreman.tunnel.dev; do
+launchctl bootout "gui/$UID_N/ai.foreman.tunnel.dev" 2>/dev/null || true
+for u in ai.foreman.center ai.foreman.worker; do
   launchctl bootstrap "gui/$UID_N" "$H/Library/LaunchAgents/$u.plist" 2>/dev/null || true
   launchctl kickstart -k "gui/$UID_N/$u" >/dev/null 2>&1 || true
 done

@@ -29,7 +29,7 @@ check() { # id description command...
 }
 remote() { ssh -o ConnectTimeout=8 "$CENTER_SSH" "$@"; }
 TOKEN=""
-if [ "$ENV_NAME" = prod ]; then TOKEN="$(remote 'security find-generic-password -s foreman-panel-token -w' 2>/dev/null || true)"
+if [ "$ENV_NAME" = prod ]; then TOKEN="$(remote 'security find-generic-password -s foreman-panel-token -w 2>/dev/null || sed -n "s/^FOREMAN_PANEL_TOKEN=//p" ~/.foreman/env' 2>/dev/null || true)"
 else TOKEN="${FOREMAN_PANEL_TOKEN:-}"; fi
 
 echo "冒烟环境：$ENV_NAME（$BASE）"
@@ -43,14 +43,16 @@ check SMOKE-core-01 c01
 
 # SMOKE-core-02 launchd 三项
 c02() { local l; l="$(remote 'launchctl list | grep ai.foreman' )" || { echo "无 ai.foreman 单元"; return 1; }
-  for u in ai.foreman.center ai.foreman.worker ai.foreman.tunnel.dev; do
-    echo "$l" | awk -v u="$u" '$3==u {print}' | grep -qE '^[0-9]+\s+0\s' || { echo "$u 未在线或退出码非 0：$(echo "$l" | grep "$u")"; return 1; }
+  for u in ai.foreman.center ai.foreman.worker; do
+    # 第一列是 PID：非 "-" 即在跑；第二列是上次退出码，部署时 kickstart -k 会留下 -15，不算异常
+    echo "$l" | awk -v u="$u" '$3==u && $1 ~ /^[0-9]+$/ {ok=1} END{exit ok?0:1}' || { echo "$u 未在运行：$(echo "$l" | grep "$u" || echo 未加载)"; return 1; }
   done; }
 if [ "$ENV_NAME" = prod ]; then check SMOKE-core-02 c02; else report SMOKE-core-02 skip "仅 prod"; fi
 
 # SMOKE-core-03 配置与密钥
-c03() { [ -n "$TOKEN" ] || { echo "keychain 读不到 panel token"; return 1; }
-  remote 'security find-generic-password -s foreman-worker-token -w >/dev/null' || { echo "keychain 无 worker token"; return 1; }
+c03() { [ -n "$TOKEN" ] || { echo "读不到 panel token（keychain 与 ~/.foreman/env 都没有）"; return 1; }
+  remote 'security find-generic-password -s foreman-worker-token -w >/dev/null 2>&1 || grep -q "^FOREMAN_TOKEN=" ~/.foreman/env' || { echo "无 worker token"; return 1; }
+  [ "$(remote 'stat -f %Lp ~/.foreman/env 2>/dev/null || echo 600')" = 600 ] || { echo "~/.foreman/env 权限不是 0600"; return 1; }
   remote 'grep -q changeme ~/.foreman/center.yaml' && { echo "center.yaml 含占位值"; return 1; }
   curl -fsS --max-time 5 "$BASE/healthz" | grep -q '"database":"ok"' || { echo "DATABASE_URL 不可连"; return 1; }; }
 if [ "$ENV_NAME" = prod ]; then check SMOKE-core-03 c03; else report SMOKE-core-03 skip "仅 prod"; fi
