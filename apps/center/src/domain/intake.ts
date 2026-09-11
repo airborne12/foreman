@@ -15,6 +15,15 @@ import { sha256 } from './approvals.js';
 
 export interface JiraIssue { key: string; summary: string; description?: string; project?: string; component?: string | null; version?: string | null; priority?: string | null; assignee?: string | null; status?: string; updated?: string; comments?: Array<{ author: string; body: string }>; attachments?: Array<{ name: string; url: string }>; url?: string }
 
+/**
+ * JQL 日期字面量：Jira 只认 'yyyy-MM-dd HH:mm' 这类格式，ISO 8601（带 T 与 Z）会被判为无效日期。
+ * 用本地时区格式化：Jira 按服务器/用户时区解释这个字面量，中心与 Jira 在同一时区。
+ */
+export function jqlDate(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 export class Intake {
   /** MCP lookup 等待者：jobId → resolve */
   private jobWaiters = new Map<string, { resolve: (r: Record<string, unknown>) => void; reject: (e: Error) => void; cancel: () => void }>();
@@ -28,17 +37,17 @@ export class Intake {
     if (existing) return { skipped: true, reason: 'already_queued', jobId: existing.id };
     const rt = await this.findRuntime(label, 'jira-poll');
     const health = await this.db.one<any>(`SELECT * FROM source_health WHERE source='jira'`);
-    const since = health?.watermark ? new Date(health.watermark).toISOString() : '1970-01-01T00:00:00Z';
-    const jql = `${this.cfg.sources.jira.jql} AND updated >= "${since}"`;
+    const since = health?.watermark ? new Date(health.watermark) : new Date(0);
+    const jql = `${this.cfg.sources.jira.jql} AND updated >= "${jqlDate(since)}"`;
     const now = this.clock.now();
     const job = await this.db.one<{ id: string }>(`INSERT INTO jobs (kind, status, runtime_id, required_label, args, dedupe_key, scheduled_at, created_at) VALUES ('jira-poll',$1,$2,$3,$4,'jira-poll',$5,$5) RETURNING id`,
-      [rt ? 'dispatched' : 'queued', rt?.id ?? null, label, JSON.stringify({ jql, since }), now]);
+      [rt ? 'dispatched' : 'queued', rt?.id ?? null, label, JSON.stringify({ jql, since: since.toISOString() }), now]);
     if (!rt) {
       await this.db.query(`UPDATE source_health SET status='no_runtime', last_error=$1, updated_at=$2 WHERE source='jira'`, ['no online runtime with ' + label, now]);
       return { queued: true, jobId: job!.id };
     }
     await this.db.query(`UPDATE jobs SET dispatched_at=$2 WHERE id=$1`, [job!.id, now]);
-    this.hub.send(rt.name, 'job.run', { kind: 'jira-poll', args: { jql, since }, timeoutSeconds: 60 }, { id: job!.id });
+    this.hub.send(rt.name, 'job.run', { kind: 'jira-poll', args: { jql, since: since.toISOString() }, timeoutSeconds: 60 }, { id: job!.id });
     return { dispatched: true, jobId: job!.id, runtime: rt.name };
   }
 

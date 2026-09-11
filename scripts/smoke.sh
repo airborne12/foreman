@@ -118,10 +118,17 @@ c12() { local b; b="$(curl -fsS --max-time 5 "$BASE/healthz")"
     else echo "飞书未启用：中心机没有 lark-cli（部署方案 §4.4.1）"; fi; return 1; }; }
 if [ "$ENV_NAME" = prod ]; then check SMOKE-core-12 c12; else report SMOKE-core-12 skip "仅 prod"; fi
 
-# SMOKE-core-13 Jira 只读
-c13() { echo "smoke.jiraKey 未配置或 sources.jira.enabled=false"; return 1; }
+# SMOKE-core-13 Jira 只读：设计里是 POST /api/system/smoke/jira-lookup（未实现），这里退而查最近一次 jira-poll 作业
+c13() {
+  local row; row="$(remote "$PSQL -d foreman -tAc \"select status||'|'||coalesce(error_message,'-') from jobs where kind='jira-poll' order by created_at desc limit 1\"")"
+  [ -n "$row" ] || { echo "还没有 jira-poll 作业（轮询周期 ${JIRA_POLL_SECONDS:-300} 秒，稍后再跑）"; return 1; }
+  case "$row" in
+    succeeded*) return 0 ;;
+    *) echo "最近一次 jira-poll：${row}"; return 1 ;;
+  esac
+}
 if [ "$ENV_NAME" = prod ]; then
-  if remote 'grep -q "enabled: true" ~/.foreman/center.yaml' 2>/dev/null; then check SMOKE-core-13 c13; else report SMOKE-core-13 skip "sources.jira.enabled=false（首次发布未开启真实轮询）"; fi
+  if remote 'grep -qE "^    enabled: true" ~/.foreman/center.yaml' 2>/dev/null; then check SMOKE-core-13 c13; else report SMOKE-core-13 skip "sources.jira.enabled=false（未开启真实轮询）"; fi
 else report SMOKE-core-13 skip "仅 prod"; fi
 
 # SMOKE-core-14 来源健康度

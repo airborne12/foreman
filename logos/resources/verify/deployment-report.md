@@ -17,7 +17,7 @@
 | 数据库迁移 | ✅ `0001_init` 已应用，trust_counters 13 行、source_health 3 行 |
 | 面板 | ✅ 已上线（批次 5 交付），`GET /` 200 |
 | 飞书通道 | ⏸️ 关闭（lark-cli 已装，未登录） |
-| Jira 轮询 | ⏸️ 关闭（首次发布不自动拉真实单，需人工打开） |
+| Jira 轮询 | ✅ 已开启（水位线设为开启时刻，不回补历史单） |
 | 冒烟测试 | 已跑：通过 10 · 失败 2 · 跳过 4，Gate 3.8 FAIL（见第六节） |
 
 ## 二、执行的命令
@@ -74,7 +74,12 @@
    `ln -s /mnt/disk6/common/doris-thirdparties/<你选的>/installed /mnt/disk15/jiangkai/selectdb-core/thirdparty/installed`
    并在 `~/.foreman/worker.yaml` 的 labels 里加 `build:doris`、重启 `foreman-worker`。
 3. **/mnt/disk15 已用 84%**：接近 worker 的 0.85 高水位，worktree 回收会比较频繁。
-4. **Jira 轮询关闭**：确认无误后把 `sources.jira.enabled` 改 true 再重启中心，它会开始按 JQL 拉真实单并建任务。
+4. **Jira 轮询已开启（2026-09-11 18:42）**：`sources.jira.enabled: true`，按 `assignee = currentUser() AND resolution = Unresolved` 每 5 分钟轮询一次，作业派到开发机执行。
+   开启前用只读查询数过：符合该 JQL 的未解决单有 **112 个**。水位线原本为空，首轮会把这 112 个全部入库并各生成一张降级分流卡，还会排 112 个 code-locate 作业——等 dev 拿到 `build:doris` 上线时会一次性创建 112 个 worktree，而 `/mnt/disk15` 已用 84%。
+   所以开启前把 `source_health.jira.watermark` 设成了当时的时间，**只收今后有更新的单，不回补历史**。要改成全量回补，在中心机执行：
+   `psql -d foreman -c "UPDATE source_health SET watermark = NULL WHERE source='jira'"`，下一轮就会把 112 个单拉进来。
+
+   开启后第一轮轮询暴露了一个实现 bug：`Intake.pollJira` 把水位线拼成 ISO 8601（`2026-09-11T10:42:07.619Z`），而 Jira 的 JQL 日期字面量只接受 `yyyy-MM-dd HH:mm` 这类格式，作业直接 400 失败。已修为按本地时区格式化（`jqlDate()`），UT-S01-01 原来断言的就是错误格式，一并改掉；全量 268 个用例通过后重新发布（release `20260911184927`）。这个 bug 单靠 M1 的测试发现不了：fake Jira 不校验 JQL 语法。
 5. **冒烟结果（2026-09-11）**：通过 10、失败 2、跳过 4，Gate 3.8 FAIL。
 
 | 用例 | 结果 | 说明 |

@@ -8,7 +8,7 @@ import { bootTestApp, http, TEST_TOKEN, type TestApp } from '../helpers/testApp.
 import { FakeWorker } from '../helpers/fakeWorker.js';
 import { seedTask, seedRuntime, seedSession } from '../helpers/seed.js';
 import { WORKER_TO_CENTER } from '@foreman/shared';
-import { Intake, type JiraIssue } from '../../apps/center/src/domain/intake.js';
+import { Intake, jqlDate, type JiraIssue } from '../../apps/center/src/domain/intake.js';
 
 let app: TestApp;
 const workers: FakeWorker[] = [];
@@ -45,7 +45,9 @@ describe('S01 1.1 Jira 轮询作业参数与去重', () => {
     const r = await app.intake.pollJira();
     expect(r.queued).toBe(true);
     const job = await app.db.one<any>(`SELECT * FROM jobs WHERE kind='jira-poll'`);
-    expect(job.args.jql).toContain('updated >= "2026-09-01T00:00:00.000Z"');
+    // Jira 只认 'yyyy-MM-dd HH:mm'，ISO 8601 会被拒（真实环境验证过）
+    expect(job.args.jql).toMatch(/updated >= "\d{4}-\d{2}-\d{2} \d{2}:\d{2}"$/);
+    expect(job.args.jql).toContain(`updated >= "${jqlDate(new Date('2026-09-01T00:00:00Z'))}"`);
     expect(job.args.jql).toContain('assignee = currentUser()');
     expect(job.required_label).toBe('vpn:jira');
   }));
