@@ -47,7 +47,9 @@
 | UT-S03-21 | session.start 的 env 含 ANTHROPIC_API_KEY 被拒 | SessionStart.env 说明、架构 2.5 | — | env 含该键 | 校验错误 FORBIDDEN_ENV |
 | UT-S03-22 | 同一 commandId 重放不重复创建 worktree | worker-channel.yaml Envelope 幂等 | worker 已执行 cmd-1 | 再收 cmd-1 | 回放上次 worktree.ready，不再执行 git |
 | UT-S03-23 | 同任务重试复用已有 worktree | S03 Step 11 | worktrees 有 ready 行 | worktree.create reuseIfExists | worktree.ready.reused = true |
-| UT-S03-24 | worker 写入 .foreman/context.md、task.json 与 .claude/settings.json 钩子 | S03 Step 11 | 临时 git 仓库 | 执行 create | 三个文件存在，settings.json 含 Notification 钩子 |
+| UT-S03-24 | worker 写入 .foreman/context.md、task.json，并把 buildEnv 写进 custom_env.sh | S03 Step 11 | 临时 git 仓库 | 执行 create，buildEnv = {DORIS_THIRDPARTY} | context.md、task.json 存在；custom_env.sh 含 `export DORIS_THIRDPARTY="…"`；未传 hooks 时不写 .claude/settings.json |
+| UT-S03-30 | claude --bg 启动参数与会话 id 解析 | S03 Step 15；claude 2.1.26x 实测 | fake claude：`--bg` 输出 `backgrounded · 3f171235 · T-231-implement`，`agents --json --all` 返回该短 id 与完整 sessionId | session.start | 参数含 `--permission-mode auto`、`--strict-mcp-config`、`--mcp-config=<json>`（带 =，json 含 MCP url 与 Bearer token），prompt 是最后一个参数；agentSessionId 为完整 UUID，shortId 为 3f171235 |
+| UT-S03-31 | codex 启动带 workspace-write 沙箱，续接不带 -C | S03 Step 15；codex exec resume --help | — | codexStartArgs / codexResumeArgs | 启动含 `-C <cwd>` 与 `sandbox_mode="workspace-write"`；续接以 `exec resume` 开头、不含 `-C`、含 MCP 配置，最后两个参数为 threadId 与文本 |
 
 ### 1.5 产物与子任务（来源：mcp.yaml → DeliverInput；schema.sql → artifacts、tasks 子任务 key）
 

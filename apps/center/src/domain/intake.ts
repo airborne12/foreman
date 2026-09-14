@@ -187,7 +187,6 @@ export class Intake {
     const env = this.hub.send(runtimeName, 'worktree.create', {
       taskKey: t.key, repo, baseBranch, branchName: `foreman/${t.key}`, reuseIfExists: true, fetchFirst,
       contextMarkdown: md, taskJson: { key: t.key, kind: t.kind, path: t.path, repo, purpose },
-      hooks: { Notification: [{ matcher: 'agent_needs_input|agent_completed', hooks: [{ type: 'command', command: 'foreman-hook notify' }] }] },
     });
     await this.db.query(`INSERT INTO jobs (kind, status, args, scheduled_at, dispatched_at, created_at) VALUES ('dispatch','dispatched',$1,$2,$2,$2)`, [JSON.stringify({ commandId: env.id, type: 'worktree.create', taskId, purpose, runtime: runtimeName, repo, fetchFirst }), this.clock.now()]);
     return env.id;

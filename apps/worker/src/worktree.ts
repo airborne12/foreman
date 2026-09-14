@@ -48,15 +48,23 @@ export function createWorktree(input: WorktreeCreateInput, repo: { main: string;
 }
 
 /** 上下文文件（每次都刷新，保证 context.md 为最新版本） */
-export function writeContextFiles(path: string, input: Pick<WorktreeCreateInput, 'contextMarkdown' | 'taskJson' | 'hooks' | 'taskKey'>) {
+export function writeContextFiles(path: string, input: Pick<WorktreeCreateInput, 'contextMarkdown' | 'taskJson' | 'hooks' | 'taskKey' | 'buildEnv'>) {
   mkdirSync(resolve(path, '.foreman'), { recursive: true });
   writeFileSync(resolve(path, '.foreman/context.md'), input.contextMarkdown ?? `# ${input.taskKey}\n`);
   writeFileSync(resolve(path, '.foreman/task.json'), JSON.stringify(input.taskJson ?? { key: input.taskKey }, null, 2));
+  // 编译环境：Doris 的 env.sh 会 source 仓库根的 custom_env.sh（已被 .gitignore 忽略）；thirdparty/installed 不随 worktree 带过去
+  if (input.buildEnv && Object.keys(input.buildEnv).length) {
+    const envPath = resolve(path, 'custom_env.sh');
+    const keys = Object.keys(input.buildEnv);
+    const keep = existsSync(envPath) ? readFileSync(envPath, 'utf8').split('\n').filter((l) => l && !keys.some((k) => l.startsWith(`export ${k}=`))) : [];
+    writeFileSync(envPath, [...keep, ...Object.entries(input.buildEnv).map(([k, v]) => `export ${k}=${JSON.stringify(v)}`)].join('\n') + '\n');
+  }
+  // 需要输入改由 worker 轮询 claude state=blocked 发现；只有显式传入 hooks 才写 .claude/settings.json
+  if (!input.hooks) return;
   mkdirSync(resolve(path, '.claude'), { recursive: true });
   const settingsPath = resolve(path, '.claude/settings.json');
   let settings: Record<string, unknown> = {};
   if (existsSync(settingsPath)) { try { settings = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch { settings = {}; } }
-  const hooks = input.hooks ?? { Notification: [{ matcher: 'agent_needs_input|agent_completed', hooks: [{ type: 'command', command: 'foreman-hook notify' }] }] };
-  settings.hooks = { ...((settings.hooks as Record<string, unknown>) ?? {}), ...hooks };
+  settings.hooks = { ...((settings.hooks as Record<string, unknown>) ?? {}), ...input.hooks };
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
 }

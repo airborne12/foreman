@@ -14,7 +14,7 @@ import { runGc, diskUsedRatio } from './gc.js';
 import { foremanHome } from './config.js';
 import { createWorktree, WorktreeError, type GitRunner } from './worktree.js';
 import { JiraClient, loadJiraConfig, runJiraJob } from './jira.js';
-import { ADAPTERS, SessionStartError, tail, type TrackedSession, type AgentAdapter } from './sessions.js';
+import { ADAPTERS, SessionStartError, tail, type TrackedSession, type AgentAdapter, type AdapterOptions } from './sessions.js';
 
 export const WORKER_VERSION = '0.1.0';
 const AUTH_BACKOFF = [60_000, 120_000, 300_000];
@@ -169,7 +169,7 @@ export class Worker {
           const adapter = (this.opts.adapters ?? ADAPTERS)[input.agent];
           if (!bin || !adapter) { reply = makeEnvelope('error', { code: 'AGENT_START_FAILED', message: `本 runtime 未配置 agent ${input.agent}`, retryable: false }, { ref: env.id }); break; }
           try {
-            const s = await adapter.start(input, bin, (code, err) => this.onSessionExit(input.sessionId, code, err));
+            const s = await adapter.start(input, bin, (code, err) => this.onSessionExit(input.sessionId, code, err), this.adapterOpts(input.agent, input.sessionId));
             this.sessions.set(input.sessionId, s);
             this.state.sessions[input.agent] = (this.state.sessions[input.agent] ?? 0) + 1; this.setState({});
             reply = makeEnvelope('session.started', { sessionId: input.sessionId, agentSessionId: s.agentSessionId, startedAt: new Date().toISOString(), pid: s.pid }, { ref: env.id });
@@ -184,22 +184,25 @@ export class Worker {
           const adapter = s ? (this.opts.adapters ?? ADAPTERS)[s.agent] : null;
           const bin = s ? this.opts.config.agents[s.agent]?.bin : null;
           if (!s || !adapter || !bin) { reply = makeEnvelope('error', { code: 'RESUME_FAILED', message: `会话 ${input.sessionId} 不在本 runtime`, retryable: false }, { ref: env.id }); break; }
-          try { await adapter.resume(s, input.text, bin, (code, err) => this.onSessionExit(input.sessionId, code, err)); reply = makeEnvelope('session.state', { sessionId: s.sessionId, state: 'running', source: 'poll', observedAt: new Date().toISOString() }, { ref: env.id }); }
+          try { await adapter.resume(s, input.text, bin, (code, err) => this.onSessionExit(input.sessionId, code, err), this.adapterOpts(s.agent, s.sessionId)); reply = makeEnvelope('session.state', { sessionId: s.sessionId, state: 'running', source: 'poll', observedAt: new Date().toISOString() }, { ref: env.id }); }
           catch (e) { reply = makeEnvelope('error', { code: 'RESUME_FAILED', message: String((e as Error).message).slice(0, 500), retryable: false }, { ref: env.id }); }
           break;
         }
         case 'session.stop': {
           const input = CENTER_TO_WORKER['session.stop'].parse(env.payload);
           const s = this.sessions.get(input.sessionId);
-          if (s) { await ((this.opts.adapters ?? ADAPTERS)[s.agent]?.stop(s)); this.decSession(s.agent); }
+          if (s) { await ((this.opts.adapters ?? ADAPTERS)[s.agent]?.stop(s, this.opts.config.agents[s.agent]?.bin)); this.decSession(s.agent); }
           reply = makeEnvelope('session.state', { sessionId: input.sessionId, state: 'stopped', source: 'poll', observedAt: new Date().toISOString() }, { ref: env.id });
           break;
         }
         case 'session.logs': {
           const input = CENTER_TO_WORKER['session.logs'].parse(env.payload);
           const s = this.sessions.get(input.sessionId);
-          const all = s && existsSync(s.logFile) ? readFileSync(s.logFile, 'utf8').split('\n') : [];
-          reply = makeEnvelope('session.logs.result', { sessionId: input.sessionId, lines: all.slice(-input.limit), truncated: all.length > input.limit }, { ref: env.id });
+          const adapter = s ? (this.opts.adapters ?? ADAPTERS)[s.agent] : null;
+          const bin = s ? this.opts.config.agents[s.agent]?.bin : null;
+          // claude 的输出在后台会话里，取 `claude logs`；其余读本地日志文件
+          const lines = s && adapter?.logs && bin ? await adapter.logs(s, input.limit + 1, bin) : (s && existsSync(s.logFile) ? readFileSync(s.logFile, 'utf8').split('\n') : []);
+          reply = makeEnvelope('session.logs.result', { sessionId: input.sessionId, lines: lines.slice(-input.limit), truncated: lines.length > input.limit }, { ref: env.id });
           break;
         }
         default: {
@@ -230,6 +233,17 @@ export class Worker {
   }
 
   private decSession(agent: string) { this.state.sessions[agent] = Math.max(0, (this.state.sessions[agent] ?? 0) - 1); this.setState({}); }
+
+  private adapterOpts(agent: string, sessionId: string): AdapterOptions {
+    const a = this.opts.config.agents[agent];
+    return { permissionMode: a?.permissionMode, sandbox: a?.sandbox, onWaiting: () => this.onSessionWaiting(sessionId) };
+  }
+
+  /** 轮询发现会话在等输入/权限 → session.state waiting_input（source=poll，中心按 EX-19.1 推断问题） */
+  private onSessionWaiting(sessionId: string) {
+    if (!this.sessions.has(sessionId)) return;
+    this.send('session.state', { sessionId, state: 'waiting_input', waitingFor: 'input', source: 'poll', observedAt: new Date().toISOString() });
+  }
 
   /** 进程退出 → session.state（source=exit，S03 Step 31） */
   private onSessionExit(sessionId: string, code: number | null, err: string) {

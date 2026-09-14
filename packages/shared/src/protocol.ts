@@ -24,6 +24,10 @@ export const AgentConfig = z.object({
   bin: z.string(),
   version: z.string().nullable().optional(),
   maxConcurrent: z.number().int().min(1),
+  /** claude --permission-mode（缺省 auto） */
+  permissionMode: z.string().optional(),
+  /** codex sandbox_mode（缺省 workspace-write） */
+  sandbox: z.string().optional(),
 });
 
 export const RepoConfig = z.object({

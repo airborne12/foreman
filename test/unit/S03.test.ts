@@ -1,9 +1,10 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-29（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-31（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import { mkdtempSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { claudeAdapter, codexStartArgs, codexResumeArgs } from '../../apps/worker/src/sessions.js';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -234,14 +235,47 @@ describe('S03 1.4 worktree 与会话指令', () => {
     const b = createWorktree({ taskKey: 'T-231', repo: 'x/y', baseBranch: 'master', reuseIfExists: true }, repo);
     expect(a.reused).toBe(false); expect(b.reused).toBe(true); expect(b.path).toBe(a.path);
   }));
-  it('UT-S03-24: worker 写入 .foreman/context.md、task.json 与 .claude/settings.json 钩子', () => withReport('UT-S03-24', () => {
+  it('UT-S03-24: worker 写入 .foreman/context.md、task.json，并把 buildEnv 写进 custom_env.sh', () => withReport('UT-S03-24', () => {
     const repo = gitRepo();
-    const out = createWorktree({ taskKey: 'T-231', repo: 'x/y', baseBranch: 'master', contextMarkdown: '# T-231 上下文', taskJson: { key: 'T-231', kind: 'code' } }, repo);
+    const tp = '/mnt/disk6/common/doris-thirdparties/doris-thirdparty-3.0';
+    const out = createWorktree({ taskKey: 'T-231', repo: 'x/y', baseBranch: 'master', contextMarkdown: '# T-231 上下文', taskJson: { key: 'T-231', kind: 'code' }, buildEnv: { DORIS_THIRDPARTY: tp } }, repo);
     expect(existsSync(resolve(out.path, '.foreman/context.md'))).toBe(true);
     expect(readFileSync(resolve(out.path, '.foreman/context.md'), 'utf8')).toContain('T-231');
     expect(JSON.parse(readFileSync(resolve(out.path, '.foreman/task.json'), 'utf8')).key).toBe('T-231');
-    const settings = JSON.parse(readFileSync(resolve(out.path, '.claude/settings.json'), 'utf8'));
-    expect(settings.hooks.Notification).toBeTruthy();
+    expect(readFileSync(resolve(out.path, 'custom_env.sh'), 'utf8')).toContain(`export DORIS_THIRDPARTY="${tp}"`);
+    expect(existsSync(resolve(out.path, '.claude/settings.json'))).toBe(false);
+  }));
+  it('UT-S03-30: claude --bg 启动参数与会话 id 解析', () => withReport('UT-S03-30', async () => {
+    const dir = mkdtempSync(resolve(tmpdir(), 'fclaude-'));
+    const bin = resolve(dir, 'claude'); const log = resolve(dir, 'args.log');
+    const uuid = '3f171235-0ea7-40ae-b928-49c2b4445518';
+    writeFileSync(bin, [
+      '#!/bin/sh',
+      `if [ "$1" = "--bg" ]; then for a in "$@"; do printf '%s\\n' "$a"; done > "${log}"; echo "backgrounded · 3f171235 · T-231-implement"; fi`,
+      `if [ "$1" = "agents" ]; then echo '[{"id":"3f171235","sessionId":"${uuid}","name":"T-231-implement","kind":"background","state":"working"}]'; fi`, '',
+    ].join('\n')); chmodSync(bin, 0o755);
+    const s = await claudeAdapter.start({ sessionId: crypto.randomUUID(), taskKey: 'T-231', kind: 'implement', agent: 'claude', prompt: '实现 T-231', cwd: dir, name: 'T-231-implement', mcp: { url: 'http://127.0.0.1:7801/mcp', token: 'tok-1' } }, bin, () => undefined, { pollMs: 3_600_000 });
+    s.state = 'stopped';
+    const args = readFileSync(log, 'utf8').trimEnd().split('\n');
+    expect(args.slice(0, 5)).toEqual(['--bg', '--name', 'T-231-implement', '--permission-mode', 'auto']);
+    expect(args).toContain('--strict-mcp-config');
+    const mcp = args.find((a) => a.startsWith('--mcp-config='))!;
+    expect(JSON.parse(mcp.slice('--mcp-config='.length)).mcpServers.foreman).toMatchObject({ type: 'http', url: 'http://127.0.0.1:7801/mcp', headers: { Authorization: 'Bearer tok-1' } });
+    expect(args[args.length - 1]).toBe('实现 T-231');
+    expect(s.agentSessionId).toBe(uuid); expect(s.shortId).toBe('3f171235');
+  }));
+  it('UT-S03-31: codex 启动带 workspace-write 沙箱，续接不带 -C', () => withReport('UT-S03-31', () => {
+    const input = { sessionId: crypto.randomUUID(), taskKey: 'T-231', kind: 'implement', agent: 'codex', prompt: '实现', cwd: '/tmp/fx/wt/T-231', mcp: { url: 'http://127.0.0.1:7801/mcp', token: 'tok-2' } };
+    const start = codexStartArgs(input);
+    expect(start.slice(0, 3)).toEqual(['exec', '-C', '/tmp/fx/wt/T-231']);
+    expect(start).toContain('sandbox_mode="workspace-write"');
+    expect(start).toContain('mcp_servers.foreman.http_headers.Authorization="Bearer tok-2"');
+    const s = { sessionId: input.sessionId, agent: 'codex', agentSessionId: 'th-1', pid: 1, cwd: input.cwd, logFile: '/dev/null', state: 'done' as const, mcp: input.mcp };
+    const resume = codexResumeArgs(s, 'th-1', '继续');
+    expect(resume.slice(0, 2)).toEqual(['exec', 'resume']);
+    expect(resume).not.toContain('-C');
+    expect(resume).toContain('mcp_servers.foreman.url="http://127.0.0.1:7801/mcp"');
+    expect(resume.slice(-2)).toEqual(['th-1', '继续']);
   }));
 });
 

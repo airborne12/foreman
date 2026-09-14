@@ -196,3 +196,37 @@ scripts/build.sh          先构建面板再打三个单文件 bundle
 | 设置页 | 可改来源频道、路由默认值、并发、表情、Jira 映射 | 只读展示 | 中心尚无写配置的端点，改配置仍是编辑 center.yaml 后重启 |
 | 草案卡 | 已确认的草案不应再显示按钮 | 历史消息里的草案卡按钮仍在，点了会 409 | 消息 payload 没带草案状态；错误会以红条提示 |
 | 字体 | Fira Sans / Fira Code | 用同名字体，未安装时退回系统字体栈 | 内网环境不从公网加载字体 |
+
+## 批次 6：agent 适配器按真机 CLI 修正（2026-09-14）
+
+### 起因
+
+生产环境部署后一直没有真正跑过 agent 会话（sessions 表为 0 行）。在开发机上对 claude 2.1.270、codex-cli 0.153.4 实际探测后发现，M1 适配器是按设计文档猜的命令行，测试用的 fake CLI 又不校验参数，所以 268 个用例全绿也没暴露问题。
+
+### 真机探测结论与修正
+
+| 问题 | 探测到的实际行为 | 修正 |
+|------|----------------|------|
+| claude 启动即 failed | `--mcp-config <configs...>` 是变长参数，空格写法会把 prompt 吞成配置，会话显示 "idle — send a prompt to start" 后失败 | 改为 `--mcp-config=<json>`，并加 `--strict-mcp-config`；不再往 worktree 写 `.mcp.json` |
+| 后台会话卡在权限确认 | 不指定权限模式时，需要确认的工具调用让会话进入 `state=blocked, status=waiting`，没人点 | 默认 `--permission-mode auto`，可在 worker.yaml 的 `agents.claude.permissionMode` 覆盖 |
+| 会话 id 对不上 | `--bg` 输出 `backgrounded · <8 位短 id> · <name>`；`agents --json` 里 `id` 是短 id、`sessionId` 是完整 UUID；不带 `--all` 时已结束的会话会消失 | 解析短 id，查 `agents --json --all` 换成完整 UUID 存为 agentSessionId，另存 shortId |
+| 续接开成副本 | 一轮结束后 `state=done` 但进程仍在（`status=idle`）；此时 `--resume` 会 "started a copy"；短 id 传给 `--resume` 也会开副本 | 续接前先 `claude stop <短 id>`，再 `--bg --resume <完整 UUID>`，会话沿用原参数在同一 id 下唤醒；输出含 "started a copy" 视为 RESUME_FAILED |
+| 停止命令不存在 | 没有 `claude agents kill`，实际是 `claude stop <短 id>`（不认 UUID） | 改用 `stop <短 id>`；轮询到 done 时也先 stop 释放空闲进程 |
+| 日志为空 | `--bg` 本身只打印一行；会话输出要 `claude logs <短 id>` 取，内容是终端画面流 | session.logs 走 `claude logs`，光标移动当换行、去掉颜色码和状态栏 |
+| Notification 钩子不可用 | worktree 里写的 `foreman-hook notify` 在开发机上不存在 | 不再写钩子；worker 轮询到 blocked 时上报 `waiting_input`（source=poll），中心对 poll 与 hook 同样按 EX-19.1 从日志推断问题 |
+| codex 改不了代码 | `codex exec` 默认只读沙箱 | 启动与续接都带 `sandbox_mode="workspace-write"` 且放开网络，可在 `agents.codex.sandbox` 覆盖 |
+| codex 续接参数错误 | `codex exec resume` 不支持 `-C` / `-s` | 续接去掉 `-C`（靠 spawn 的 cwd），沙箱与 MCP 用 `-c` 重新带上 |
+| worktree 没有编译环境 | `thirdparty/installed` 被 .gitignore 忽略，不会出现在 worktree；`buildEnv` 参数传了但没用 | 把 worker.yaml `build_env.<repo>.default` 写进 worktree 根目录的 `custom_env.sh`（Doris env.sh 会 source，且已被忽略） |
+| worker 找不到 agent | systemd 的 PATH 只有 `/usr/local/bin:/usr/bin…`，不含 `~/.local/bin` | 部署配置改为绝对路径（配置项，不是代码） |
+
+### 用例变更
+
+- 修改：UT-S03-24（custom_env.sh，未传 hooks 不写 settings.json）、UT-S07-22（先 stop 再按 UUID 续接，副本视为失败）
+- 新增：UT-S03-30（claude 启动参数与 id 解析）、UT-S03-31（codex 沙箱与续接参数）、UT-S07-29（blocked → waiting_input、done → stop、中心对 poll 推断问题）
+
+### 与规格的偏离（需要知晓）
+
+| 项 | 规格 | 实现 | 原因 |
+|----|------|------|------|
+| 需要输入的发现方式 | S07 Step 19：Notification 钩子回调 worker | worker 每 20 秒轮询 `claude agents --json --all`，blocked 时上报 | 钩子需要在开发机装 `foreman-hook`，轮询已能拿到同样的状态；ST-S07-15 [manual] 相应改为观察轮询 |
+| thirdparty 选择 | ST-S03-19 期望 worktree 里有 `thirdparty/installed` 软链 | 主仓库软链到 `doris-thirdparty-3.0`，worktree 通过 `custom_env.sh` 的 `DORIS_THIRDPARTY` 指向同一套 | 3.0 与 selectdb-cloud-4.0 的 vars.sh 版本一致；机器上另一份 selectdb-core 检出也用 3.0 |

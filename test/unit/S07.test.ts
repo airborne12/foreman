@@ -1,5 +1,5 @@
 /**
- * S07 单元测试：UT-S07-01 ~ UT-S07-28（来源：logos/resources/test/core-S07-test-cases.md）
+ * S07 单元测试：UT-S07-01 ~ UT-S07-29（来源：logos/resources/test/core-S07-test-cases.md）
  * 进展回写与日志、需要输入与回答、完成/续接/停止/无进展。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -222,14 +222,47 @@ describe('S07 1.3 完成、续接、停止、无进展', () => {
     expect((await app.tasks.byKey('T-231')).state).toBe('delivered');
     expect(await app.db.one(`SELECT 1 FROM events WHERE type='task.updated' AND task_id=$1`, [taskId])).not.toBeNull();
   }));
-  it('UT-S07-22: 续接用同一 sessionId 且 worker 调 --bg --resume <agentSessionId>', () => withReport('UT-S07-22', async () => {
+  it('UT-S07-22: 续接先 stop <短 id> 再 --bg --resume <完整 UUID>', () => withReport('UT-S07-22', async () => {
     const dir = mkdtempSync(resolve(tmpdir(), 'fclaude-'));
     const bin = resolve(dir, 'claude'); const log = resolve(dir, 'args.log');
-    writeFileSync(bin, `#!/bin/sh\necho "$@" >> "${log}"\nif [ "$1" = "agents" ]; then echo '[]'; fi\n`); chmodSync(bin, 0o755);
-    const s = { sessionId: crypto.randomUUID(), agent: 'claude', agentSessionId: 'cl-231', pid: null, cwd: dir, logFile: resolve(dir, 'session.log'), state: 'done' as const };
-    await claudeAdapter.resume(s, '顺便改一下', bin, () => undefined);
-    expect(readFileSync(log, 'utf8')).toContain('--bg --resume cl-231 顺便改一下');
+    writeFileSync(bin, `#!/bin/sh\necho "$@" >> "${log}"\nif [ "$1" = "agents" ]; then echo '[]'; fi\nif [ "$1" = "--bg" ]; then echo "backgrounded · 3f171235"; fi\n`); chmodSync(bin, 0o755);
+    const uuid = '3f171235-0ea7-40ae-b928-49c2b4445518';
+    const s = { sessionId: crypto.randomUUID(), agent: 'claude', agentSessionId: uuid, shortId: '3f171235', pid: null, cwd: dir, logFile: resolve(dir, 'session.log'), state: 'done' as 'done' | 'running' | 'failed' | 'stopped' };
+    await claudeAdapter.resume(s, '顺便改一下', bin, () => undefined, { pollMs: 3_600_000 });
+    const calls = readFileSync(log, 'utf8').split('\n');
+    expect(calls.indexOf('stop 3f171235')).toBeGreaterThanOrEqual(0);
+    expect(calls.indexOf(`--bg --resume ${uuid} 顺便改一下`)).toBeGreaterThan(calls.indexOf('stop 3f171235'));
     expect(s.state).toBe('running');
+    s.state = 'stopped';
+    // 空闲进程没停掉时 claude 会开副本 → 视为续接失败
+    writeFileSync(bin, `#!/bin/sh\nif [ "$1" = "--bg" ]; then echo "note: session 3f171235 is already running in the background, so this started a copy as 73969ae8."; fi\n`);
+    await expect(claudeAdapter.resume({ ...s, state: 'done' }, '再改', bin, () => undefined, { pollMs: 3_600_000 })).rejects.toThrow(/副本/);
+  }));
+  it('UT-S07-29: 轮询 blocked 上报一次需要输入，done 时先 stop 再报完成；中心对 source=poll 同样推断问题', () => withReport('UT-S07-29', async () => {
+    const dir = mkdtempSync(resolve(tmpdir(), 'fclaude-'));
+    const bin = resolve(dir, 'claude'); const log = resolve(dir, 'args.log'); const n = resolve(dir, 'n');
+    const uuid = '3f171235-0ea7-40ae-b928-49c2b4445518';
+    writeFileSync(bin, [
+      '#!/bin/sh', `echo "$@" >> "${log}"`,
+      'case "$1" in',
+      '  --bg) echo "backgrounded · 3f171235 · T-231-implement";;',
+      `  agents) c=$(cat "${n}" 2>/dev/null || echo 0); c=$((c+1)); echo $c > "${n}"; if [ $c -le 3 ]; then echo '[{"id":"3f171235","sessionId":"${uuid}","state":"blocked","status":"waiting"}]'; else echo '[{"id":"3f171235","sessionId":"${uuid}","state":"done","status":"idle"}]'; fi;;`,
+      'esac', '',
+    ].join('\n')); chmodSync(bin, 0o755);
+    let waits = 0;
+    const exited = new Promise<number | null>((res) => {
+      void claudeAdapter.start({ sessionId: crypto.randomUUID(), taskKey: 'T-231', kind: 'implement', agent: 'claude', prompt: 'p', cwd: dir, name: 'T-231-implement', mcp: { url: 'http://127.0.0.1:7801/mcp', token: 't' } }, bin, (code) => res(code), { pollMs: 50, onWaiting: () => { waits += 1; } });
+    });
+    expect(await exited).toBe(0);
+    expect(waits).toBe(1);
+    expect(readFileSync(log, 'utf8').split('\n')).toContain('stop 3f171235');
+    // 中心：source=poll 的 waiting_input 也按 EX-19.1 从日志推断问题
+    const w = await fw();
+    const { sid, taskId } = await running({ online: true });
+    void w.expect((e: Envelope) => e.type === 'session.logs').then((env) => w.send('session.logs.result', { sessionId: sid, lines: ['要保留旧接口吗？(y/n)'], truncated: false }, env.id));
+    w.send('session.state', { sessionId: sid, state: 'waiting_input', waitingFor: 'input', source: 'poll', observedAt: app.clock.now().toISOString() });
+    for (let i = 0; i < 30; i++) { if (await app.db.one('SELECT 1 FROM questions WHERE task_id=$1', [taskId])) break; await new Promise((r) => setTimeout(r, 100)); }
+    expect((await app.db.one<any>('SELECT * FROM questions WHERE task_id=$1', [taskId]))?.text).toContain('旧接口');
   }));
   it('UT-S07-23: 续接失败 RESUME_FAILED → 收件箱三选一（fresh_session）', () => withReport('UT-S07-23', async () => {
     const w = await fw();

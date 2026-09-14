@@ -40,7 +40,8 @@
 | ID | 描述 | 来源 | 前置条件 | 输入 | 预期输出 |
 |----|------|------|---------|------|---------|
 | UT-S07-21 | session.state done 更新 sessions 与 tasks，写事件 | Step 32–33 | running | state done source=hook | sessions done ended_at；tasks delivered（有产物）或 running→done 规则；events |
-| UT-S07-22 | 续接用同一 sessionId 且 worker 调 `--bg --resume <agentSessionId>` | Step 40 | fake claude 记录参数 | session.resume | fake 收到 `--bg --resume <id> "<text>"`；sessions.state running |
+| UT-S07-22 | 续接用同一 sessionId：worker 先 `stop <短 id>` 再 `--bg --resume <完整 UUID>` | Step 40；claude 2.1.26x 实测（空闲进程仍在时直接 resume 会开副本） | fake claude 记录参数 | session.resume | fake 依次收到 `stop <短 id>` 与 `--bg --resume <UUID> "<text>"`；sessions.state running；输出含 "started a copy" 时报 RESUME 失败 |
+| UT-S07-29 | 轮询到 claude state=blocked 上报需要输入，done 时先 stop 再报完成 | Step 19、31；EX-19.1 | fake claude `agents --json --all` 先返回 blocked 再返回 done | 轮询 | blocked 只触发一次 onWaiting；done 时 fake 收到 `stop <短 id>` 且 onExit(0)；中心收到 source=poll 的 waiting_input 时同样按 EX-19.1 推断问题 |
 | UT-S07-23 | 续接失败 RESUME_FAILED → 收件箱三选一（fresh_session） | EX-40.1 | fake claude resume 非零 | session.resume | error RESUME_FAILED；tasks failed；retry mode=fresh_session 创建新会话同 worktree 且 prompt 含线程摘要 |
 | UT-S07-24 | stopSession 幂等 | tasks.yaml → stopSession | 已 stopped | POST stop | 200 |
 | UT-S07-25 | stopSession 使任务 paused 并保留 worktree | Step 44–46 | running | POST stop | sessions stopped；tasks paused；worktrees.state ready |

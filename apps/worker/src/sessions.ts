@@ -2,23 +2,41 @@
  * agent 会话适配器（S03 Step 13–19、31–33；core-03 §2 决策 Q10/Q11）
  * - 只走订阅版 CLI：claude --bg / claude --bg --resume；codex exec / codex exec resume
  * - 绝不注入 API key（FORBIDDEN_ENV_KEYS 从环境剔除）
- * - MCP 通过 cwd/.mcp.json（claude）或 -c mcp_servers（codex）指向中心 /mcp，token 为任务级
- * - 状态：进程退出即 done/failed（source=exit）；claude --bg 另通过 `claude agents --json` 轮询（source=poll）
+ * - MCP：claude 用 --mcp-config=<json>（必须带 =，该参数是变长的，空格写法会吞掉 prompt）；codex 用 -c mcp_servers.*
+ * - 状态：codex 进程退出即 done/failed（source=exit）；claude --bg 通过 `claude agents --json --all` 轮询（source=poll）
+ *
+ * claude 2.1.26x 实测行为（2026-09-14，开发机）：
+ * - `claude --bg` 输出 `backgrounded · <8 位短 id> · <name>`；`agents --json` 里 id 是短 id、sessionId 是完整 UUID
+ * - 一轮结束后 state=done 但进程仍在（status=idle）；此时 --resume 会开副本，所以续接前先 `claude stop <短 id>`
+ * - `--resume` 要完整 UUID，短 id 也会开副本；stop / logs 只认短 id
+ * - 权限等待时 state=blocked、status=waiting
  */
 import { spawn, execFile } from 'node:child_process';
-import { writeFileSync, mkdirSync, openSync, closeSync, readFileSync, existsSync } from 'node:fs';
+import { writeFileSync, appendFileSync, mkdirSync, openSync, closeSync, readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { FORBIDDEN_ENV_KEYS } from '@foreman/shared';
 
 export interface SessionStartInput { sessionId: string; taskKey: string | null; kind: string; agent: string; model?: string | null; prompt: string; cwd: string; name?: string; mcp: { url: string; token: string }; env?: Record<string, string>; timeoutMinutes?: number | null }
-export interface TrackedSession { sessionId: string; agent: string; agentSessionId: string; pid: number | null; cwd: string; logFile: string; state: 'running' | 'done' | 'failed' | 'stopped'; exitCode?: number | null }
+export interface TrackedSession { sessionId: string; agent: string; agentSessionId: string; shortId?: string | null; pid: number | null; cwd: string; logFile: string; state: 'running' | 'done' | 'failed' | 'stopped'; exitCode?: number | null; mcp?: { url: string; token: string } }
+export interface AdapterOptions {
+  /** claude --permission-mode，缺省 auto（后台会话没人点确认，manual 会卡在 blocked） */
+  permissionMode?: string | null;
+  /** codex 沙箱，缺省 workspace-write（exec 缺省只读，改不了代码） */
+  sandbox?: string | null;
+  /** 观察到会话在等输入/权限（claude state=blocked） */
+  onWaiting?: () => void;
+  /** 测试用：轮询间隔 */
+  pollMs?: number;
+}
 
 export class SessionStartError extends Error { constructor(message: string, public retryable = true) { super(message); } }
 
+type OnExit = (code: number | null, err: string) => void;
 export interface AgentAdapter {
-  start(input: SessionStartInput, bin: string, onExit: (code: number | null, err: string) => void): Promise<TrackedSession>;
-  resume(s: TrackedSession, text: string, bin: string, onExit: (code: number | null, err: string) => void): Promise<void>;
-  stop(s: TrackedSession): Promise<void>;
+  start(input: SessionStartInput, bin: string, onExit: OnExit, opts?: AdapterOptions): Promise<TrackedSession>;
+  resume(s: TrackedSession, text: string, bin: string, onExit: OnExit, opts?: AdapterOptions): Promise<void>;
+  stop(s: TrackedSession, bin?: string): Promise<void>;
+  logs?(s: TrackedSession, limit: number, bin: string): Promise<string[]>;
 }
 
 export function cleanEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
@@ -29,7 +47,7 @@ export function cleanEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
 
 function logPath(cwd: string, sessionId: string) { const dir = resolve(cwd, '.foreman/logs'); mkdirSync(dir, { recursive: true }); return resolve(dir, `${sessionId}.log`); }
 
-function spawnDetached(bin: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, log: string, onExit: (code: number | null, err: string) => void) {
+function spawnDetached(bin: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, log: string, onExit: OnExit) {
   const fd = openSync(log, 'a');
   const p = spawn(bin, args, { cwd, env, detached: true, stdio: ['ignore', fd, fd] });
   closeSync(fd);
@@ -42,63 +60,123 @@ function spawnDetached(bin: string, args: string[], cwd: string, env: NodeJS.Pro
 
 export function tail(file: string, lines = 20) { try { return readFileSync(file, 'utf8').split('\n').slice(-lines).join('\n'); } catch { return ''; } }
 
-/** claude --bg（订阅版后台代理） */
-export const claudeAdapter: AgentAdapter = {
-  async start(input, bin, onExit) {
-    // MCP 服务器写入 cwd/.mcp.json（项目级配置）
-    writeFileSync(resolve(input.cwd, '.mcp.json'), JSON.stringify({ mcpServers: { foreman: { type: 'http', url: input.mcp.url, headers: { Authorization: `Bearer ${input.mcp.token}` } } } }, null, 2));
-    const log = logPath(input.cwd, input.sessionId);
-    const name = input.name ?? `foreman-${input.sessionId.slice(0, 8)}`;
-    const args = ['--bg', '--name', name, ...(input.model ? ['--model', input.model] : []), input.prompt];
-    const out = await run(bin, args, input.cwd, cleanEnv(input.env), 60_000).catch((e) => { throw new SessionStartError(`claude --bg 失败：${String(e.message).slice(0, 300)}`); });
-    const id = (out.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0]) ?? (await findClaudeAgentByName(bin, name, input.cwd)) ?? name;
-    writeFileSync(log, out);
-    const s: TrackedSession = { sessionId: input.sessionId, agent: 'claude', agentSessionId: id, pid: null, cwd: input.cwd, logFile: log, state: 'running' };
-    pollClaude(bin, s, onExit);
-    return s;
-  },
-  async resume(s, text, bin, onExit) {
-    await run(bin, ['--bg', '--resume', s.agentSessionId, text], s.cwd, cleanEnv(), 60_000).catch((e) => { throw new SessionStartError(`claude --bg --resume 失败：${String(e.message).slice(0, 300)}`, false); });
-    s.state = 'running'; pollClaude(bin, s, onExit);
-  },
-  async stop(s) { try { await run('claude', ['agents', 'kill', s.agentSessionId], s.cwd, cleanEnv(), 15_000); } catch { /* ignore */ } s.state = 'stopped'; },
-};
+// ---------------- claude --bg ----------------
 
-async function findClaudeAgentByName(bin: string, name: string, cwd: string) {
-  try { const list = JSON.parse(await run(bin, ['agents', '--json'], cwd, cleanEnv(), 15_000)); const a = (Array.isArray(list) ? list : list.agents ?? []).find((x: any) => x.name === name); return a?.id ?? a?.sessionId ?? null; } catch { return null; }
+export function claudeStartArgs(input: SessionStartInput, permissionMode?: string | null) {
+  const name = input.name ?? `foreman-${input.sessionId.slice(0, 8)}`;
+  const mcp = JSON.stringify({ mcpServers: { foreman: { type: 'http', url: input.mcp.url, headers: { Authorization: `Bearer ${input.mcp.token}` } } } });
+  return ['--bg', '--name', name, '--permission-mode', permissionMode ?? 'auto', '--strict-mcp-config', `--mcp-config=${mcp}`, ...(input.model ? ['--model', input.model] : []), input.prompt];
 }
 
-function pollClaude(bin: string, s: TrackedSession, onExit: (code: number | null, err: string) => void) {
+/** 从 `claude --bg` 输出取短 id */
+export function parseClaudeBgId(out: string): string | null {
+  return out.match(/backgrounded\s*·\s*([0-9a-f]{8})\b/i)?.[1]?.toLowerCase() ?? out.match(/\b([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i)?.[1]?.toLowerCase() ?? null;
+}
+
+const CLAUDE_CHROME = [/auto mode on/i, /esc to interrupt/i, /weekly limit/i, /shift\+tab/i, /\/effort/i, /^[─━\s]+$/, /for agents/i, /^❯\s*$/];
+/** `claude logs` 是终端画面流：光标移动当换行，去掉颜色码、转圈字符和状态栏 */
+export function cleanClaudeLogs(raw: string): string[] {
+  const text = raw
+    .replace(/\x1b\[[0-9;?]*[HfBEJ]/g, '\n')
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b[()][A-Za-z0-9]/g, '')
+    .replace(/\r/g, '\n');
+  const out: string[] = [];
+  for (const l of text.split('\n').map((x) => x.trim())) {
+    if (l.length < 3 || CLAUDE_CHROME.some((re) => re.test(l))) continue;
+    if (out[out.length - 1] !== l) out.push(l);
+  }
+  return out;
+}
+
+type ClaudeAgent = { id?: string; sessionId?: string; name?: string; state?: string; status?: string; pid?: number; error?: string };
+async function listClaudeAgents(bin: string, cwd: string): Promise<ClaudeAgent[] | null> {
+  try { const j = JSON.parse(await run(bin, ['agents', '--json', '--all'], cwd, cleanEnv(), 15_000)); return Array.isArray(j) ? j : (j.agents ?? []); } catch { return null; }
+}
+const shortOf = (s: TrackedSession) => s.shortId ?? s.agentSessionId.slice(0, 8);
+
+export const claudeAdapter: AgentAdapter = {
+  async start(input, bin, onExit, opts = {}) {
+    const log = logPath(input.cwd, input.sessionId);
+    const args = claudeStartArgs(input, opts.permissionMode);
+    const name = args[2]!;
+    const out = await run(bin, args, input.cwd, cleanEnv(input.env), 60_000).catch((e) => { throw new SessionStartError(`claude --bg 失败：${String(e.message).slice(0, 300)}`); });
+    writeFileSync(log, out);
+    const list = await listClaudeAgents(bin, input.cwd);
+    const shortId = parseClaudeBgId(out) ?? list?.find((a) => a.name === name)?.id ?? null;
+    if (!shortId) throw new SessionStartError(`claude --bg 没有返回会话 id：${out.slice(0, 200)}`);
+    const a = list?.find((x) => x.id === shortId);
+    const s: TrackedSession = { sessionId: input.sessionId, agent: 'claude', agentSessionId: a?.sessionId ?? shortId, shortId, pid: a?.pid ?? null, cwd: input.cwd, logFile: log, state: 'running', mcp: input.mcp };
+    pollClaude(bin, s, onExit, opts);
+    return s;
+  },
+  async resume(s, text, bin, onExit, opts = {}) {
+    // 一轮结束后进程仍在，直接 --resume 会开副本：先停再按完整 UUID 唤醒（沿用原 --mcp-config / --permission-mode）
+    await run(bin, ['stop', shortOf(s)], s.cwd, cleanEnv(), 15_000).catch(() => '');
+    const out = await run(bin, ['--bg', '--resume', s.agentSessionId, text], s.cwd, cleanEnv(), 60_000).catch((e) => { throw new SessionStartError(`claude --bg --resume 失败：${String(e.message).slice(0, 300)}`, false); });
+    if (/started a copy/i.test(out)) throw new SessionStartError(`claude 续接变成了副本：${out.slice(0, 200)}`, false);
+    try { appendFileSync(s.logFile, out); } catch { /* ignore */ }
+    s.state = 'running'; pollClaude(bin, s, onExit, opts);
+  },
+  async stop(s, bin = 'claude') { await run(bin, ['stop', shortOf(s)], s.cwd, cleanEnv(), 15_000).catch(() => ''); s.state = 'stopped'; },
+  async logs(s, limit, bin) {
+    try { return cleanClaudeLogs(await run(bin, ['logs', shortOf(s)], s.cwd, cleanEnv(), 15_000)).slice(-limit); }
+    catch { return existsSync(s.logFile) ? readFileSync(s.logFile, 'utf8').split('\n').slice(-limit) : []; }
+  },
+};
+
+function pollClaude(bin: string, s: TrackedSession, onExit: OnExit, opts: AdapterOptions) {
+  let waiting = false;
   const t = setInterval(async () => {
     if (s.state !== 'running') { clearInterval(t); return; }
-    try {
-      const list = JSON.parse(await run(bin, ['agents', '--json'], s.cwd, cleanEnv(), 15_000));
-      const a = (Array.isArray(list) ? list : list.agents ?? []).find((x: any) => x.id === s.agentSessionId || x.sessionId === s.agentSessionId || x.name === s.agentSessionId);
-      const st = String(a?.status ?? a?.state ?? '').toLowerCase();
-      if (!a || ['completed', 'done', 'finished', 'exited'].includes(st)) { clearInterval(t); s.state = 'done'; onExit(0, ''); }
-      else if (['failed', 'error', 'crashed'].includes(st)) { clearInterval(t); s.state = 'failed'; onExit(1, String(a?.error ?? st)); }
-    } catch { /* 轮询失败不改状态 */ }
-  }, 20_000);
+    const list = await listClaudeAgents(bin, s.cwd);
+    if (!list || s.state !== 'running') return; // 轮询失败不改状态
+    const a = list.find((x) => x.sessionId === s.agentSessionId || x.id === s.shortId);
+    const st = String(a?.state ?? '').toLowerCase();
+    if (!a || ['done', 'completed', 'finished', 'exited'].includes(st)) {
+      clearInterval(t); s.state = 'done';
+      await run(bin, ['stop', shortOf(s)], s.cwd, cleanEnv(), 15_000).catch(() => ''); // 释放空闲进程，便于之后按同一 id 续接
+      onExit(0, '');
+    } else if (['failed', 'error', 'crashed'].includes(st)) {
+      clearInterval(t); s.state = 'failed'; onExit(1, String(a.error ?? 'claude 后台会话失败'));
+    } else if (st === 'blocked' || String(a.status ?? '').toLowerCase() === 'waiting') {
+      if (!waiting) { waiting = true; opts.onWaiting?.(); }
+    } else waiting = false;
+  }, opts.pollMs ?? 20_000);
   t.unref();
 }
 
-/** codex exec（订阅版，非交互） */
+// ---------------- codex exec ----------------
+
+function codexCommon(mcp: { url: string; token: string } | undefined, sandbox?: string | null) {
+  return [
+    '--json', '--skip-git-repo-check',
+    '-c', `sandbox_mode="${sandbox ?? 'workspace-write'}"`, '-c', 'sandbox_workspace_write.network_access=true',
+    ...(mcp ? ['-c', `mcp_servers.foreman.url="${mcp.url}"`, '-c', `mcp_servers.foreman.http_headers.Authorization="Bearer ${mcp.token}"`] : []),
+  ];
+}
+export function codexStartArgs(input: SessionStartInput, sandbox?: string | null) {
+  return ['exec', '-C', input.cwd, ...codexCommon(input.mcp, sandbox), ...(input.model ? ['-m', input.model] : []), input.prompt];
+}
+/** `codex exec resume` 不支持 -C / -s：工作目录靠 spawn cwd，沙箱靠 -c sandbox_mode */
+export function codexResumeArgs(s: TrackedSession, threadId: string, text: string, sandbox?: string | null) {
+  return ['exec', 'resume', ...codexCommon(s.mcp, sandbox), threadId, text];
+}
+
 export const codexAdapter: AgentAdapter = {
-  async start(input, bin, onExit) {
+  async start(input, bin, onExit, opts = {}) {
     const log = logPath(input.cwd, input.sessionId);
-    const mcpUrl = input.mcp.url;
-    const args = ['exec', '--json', '-C', input.cwd, '--skip-git-repo-check', '-c', `mcp_servers.foreman.url="${mcpUrl}"`, '-c', `mcp_servers.foreman.http_headers.Authorization="Bearer ${input.mcp.token}"`, ...(input.model ? ['-m', input.model] : []), input.prompt];
-    const p = spawnDetached(bin, args, input.cwd, cleanEnv(input.env), log, (code, err) => { s.state = code === 0 ? 'done' : 'failed'; s.exitCode = code; onExit(code, err); });
+    const p = spawnDetached(bin, codexStartArgs(input, opts.sandbox), input.cwd, cleanEnv(input.env), log, (code, err) => { s.state = code === 0 ? 'done' : 'failed'; s.exitCode = code; onExit(code, err); });
     if (!p.pid) throw new SessionStartError('codex exec 未能启动');
     await new Promise((r) => setTimeout(r, 1500));
     if (p.exitCode !== null && p.exitCode !== 0) throw new SessionStartError(`codex exec 启动即退出（${p.exitCode}）：${tail(log, 5)}`);
-    const s: TrackedSession = { sessionId: input.sessionId, agent: 'codex', agentSessionId: readCodexThreadId(log) ?? `pid-${p.pid}`, pid: p.pid, cwd: input.cwd, logFile: log, state: 'running' };
+    const s: TrackedSession = { sessionId: input.sessionId, agent: 'codex', agentSessionId: readCodexThreadId(log) ?? `pid-${p.pid}`, pid: p.pid, cwd: input.cwd, logFile: log, state: 'running', mcp: input.mcp };
     return s;
   },
-  async resume(s, text, bin, onExit) {
+  async resume(s, text, bin, onExit, opts = {}) {
     const id = s.agentSessionId.startsWith('pid-') ? readCodexThreadId(s.logFile) : s.agentSessionId;
     if (!id) throw new SessionStartError('找不到 codex 线程 id，无法续接', false);
-    const p = spawnDetached(bin, ['exec', 'resume', '--json', '-C', s.cwd, id, text], s.cwd, cleanEnv(), s.logFile, (code, err) => { s.state = code === 0 ? 'done' : 'failed'; s.exitCode = code; onExit(code, err); });
+    const p = spawnDetached(bin, codexResumeArgs(s, id, text, opts.sandbox), s.cwd, cleanEnv(), s.logFile, (code, err) => { s.state = code === 0 ? 'done' : 'failed'; s.exitCode = code; onExit(code, err); });
     s.pid = p.pid ?? null; s.state = 'running';
   },
   async stop(s) { if (s.pid) { try { process.kill(-s.pid, 'SIGTERM'); } catch { try { process.kill(s.pid, 'SIGTERM'); } catch { /* ignore */ } } } s.state = 'stopped'; },

@@ -246,8 +246,8 @@ export class Dispatch {
     }
     if (p.state === 'waiting_input') {
       await this.db.query(`UPDATE sessions SET state='waiting_input', updated_at=$2 WHERE id=$1 AND state IN ('planned','running','waiting_input')`, [s.id, now]);
-      // EX-19.1：钩子说需要输入但没有 ask_user 问题 → 从日志推断
-      if (p.source === 'hook' && this.questions) await this.questions.inferFromHook(s, runtimeName);
+      // EX-19.1：钩子或轮询（claude state=blocked）说需要输入但没有 ask_user 问题 → 从日志推断
+      if ((p.source === 'hook' || p.source === 'poll') && this.questions) await this.questions.inferFromHook(s, runtimeName);
       return;
     }
     if (p.state === 'running') { await this.db.query(`UPDATE sessions SET state='running', last_activity_at=$2, updated_at=$2 WHERE id=$1 AND state NOT IN ('failed')`, [s.id, now]); }

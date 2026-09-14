@@ -156,12 +156,12 @@ components:
         buildEnv:
           type: object
           additionalProperties: { type: string }
-          description: "按分支族的构建环境（thirdparty、jdk 等），worker 据此建软链与 env 文件"
+          description: "按分支族的构建环境（thirdparty、jdk 等）。worker 以 export K=\"V\" 写入 worktree 根目录的 custom_env.sh（Doris env.sh 会 source）；中心不传时 worker 用本机 worker.yaml 的 build_env.<repo>.default"
         contextMarkdown: { type: string, description: "写入 .foreman/context.md 的上下文包" }
         taskJson: { type: object, additionalProperties: true, description: "写入 .foreman/task.json" }
         hooks:
           type: object
-          description: "写入 worktree 内 .claude/settings.json 的钩子配置（Notification 回调 worker 本地端口）"
+          description: "可选。传入时写入 worktree 内 .claude/settings.json；中心默认不传——需要输入由 worker 轮询 claude state=blocked 发现并上报 session.state waiting_input（source=poll）"
           additionalProperties: true
         reuseIfExists: { type: boolean, default: true }
     WorktreeReady:
