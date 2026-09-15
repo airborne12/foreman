@@ -168,15 +168,57 @@ export class Intake {
     await this.startCodeLocate(taskId, null, rt.name);
   }
 
-  /** 创建 worktree → 由 dispatch 在 worktree.ready 后启动 code_locate 会话 */
-  async startCodeLocate(taskId: string, jobId: string | null, runtimeName?: string) {
-    const rt = runtimeName ? await this.db.one<{ id: string; name: string }>('SELECT id, name FROM runtimes WHERE name=$1', [runtimeName]) : await this.findRuntime('build:doris');
-    if (!rt) return;
-    if (jobId) await this.db.query(`UPDATE jobs SET status='dispatched', runtime_id=$2, dispatched_at=$3 WHERE id=$1`, [jobId, rt.id, this.clock.now()]);
+  /**
+   * 先占名额再建 worktree → 由 dispatch 在 worktree.ready 后启动 code_locate 会话。
+   * 代码定位同样受「每家 agent 每 runtime 并发上限」约束（架构 §额度保护）：
+   * planned 会话在发 worktree.create 前就写入，保证连续补派时计数立即生效；没有名额则作业留在队列，名额释放后由 drainCodeLocate 补派。
+   * 返回是否已派出（或该任务已在定位中）。
+   */
+  async startCodeLocate(taskId: string, jobId: string | null, runtimeName?: string): Promise<boolean> {
+    const found = runtimeName ? await this.db.one<{ id: string }>('SELECT id FROM runtimes WHERE name=$1', [runtimeName]) : await this.findRuntime('build:doris');
+    const rt = found ? await this.db.one<{ id: string; name: string; agents: Record<string, { maxConcurrent?: number }> | null }>('SELECT id, name, agents FROM runtimes WHERE id=$1', [found.id]) : null;
+    if (!rt) return false;
+    const now = this.clock.now();
+    const active = await this.db.one(`SELECT 1 FROM sessions WHERE task_id=$1 AND kind='code_locate' AND state IN ('planned','running','waiting_input')`, [taskId]);
+    if (active) { if (jobId) await this.db.query(`UPDATE jobs SET status='dispatched', runtime_id=$2, dispatched_at=$3 WHERE id=$1`, [jobId, rt.id, now]); return true; }
+    const agent = await this.freeAgent(rt);
+    if (!agent) {
+      if (!jobId && !(await this.db.one(`SELECT 1 FROM jobs WHERE kind='code-locate' AND status='queued' AND args->>'taskId'=$1`, [taskId]))) {
+        await this.db.query(`INSERT INTO jobs (kind, status, required_label, args, dedupe_key, scheduled_at, created_at) VALUES ('code-locate','queued','build:doris',$1,$2,$3,$3)`, [JSON.stringify({ taskId }), `code-locate:${taskId}`, now]);
+      }
+      if (!(await this.db.one('SELECT 1 FROM triage_cards WHERE task_id=$1', [taskId]))) await this.emitTriage(taskId, null, { degraded: true, degradedReason: `代码定位排队中：${rt.name} 上 agent 并发已满` });
+      return false;
+    }
+    if (jobId) await this.db.query(`UPDATE jobs SET status='dispatched', runtime_id=$2, dispatched_at=$3 WHERE id=$1`, [jobId, rt.id, now]);
     const t = await this.db.one<any>('SELECT * FROM tasks WHERE id=$1', [taskId]);
     const repo = t.repo_name ?? (Object.values(this.cfg.sources.jira.project_repo_map)[0] as string | undefined) ?? 'apache/doris';
-    await this.db.query(`UPDATE tasks SET runtime_name=$2, updated_at=$3 WHERE id=$1`, [taskId, rt.name, this.clock.now()]);
+    await this.db.query(`INSERT INTO sessions (task_id, runtime_id, agent, kind, state, prompt, created_at, updated_at) VALUES ($1,$2,$3,'code_locate','planned','',$4,$4)`, [taskId, rt.id, agent, now]);
+    await this.db.query(`UPDATE tasks SET runtime_name=$2, updated_at=$3 WHERE id=$1`, [taskId, rt.name, now]);
     await this.sendWorktreeCreate(taskId, rt.name, repo, 'code_locate');
+    return true;
+  }
+
+  /** 有空闲名额的 agent：先按轮换顺序，再换另一家；口径与 dispatch.pickFreeAgent 一致 */
+  private async freeAgent(rt: { id: string; agents: Record<string, { maxConcurrent?: number }> | null }): Promise<AgentName | null> {
+    const first = await this.nextAgent();
+    for (const agent of [first, ...AGENTS.filter((a) => a !== 'opencode' && a !== first)] as AgentName[]) {
+      const cap = rt.agents?.[agent]?.maxConcurrent ?? this.cfg.agent_concurrency[agent];
+      if (cap == null) continue;
+      const n = Number((await this.db.one<{ n: string }>(`SELECT count(*) AS n FROM sessions WHERE runtime_id=$1 AND agent=$2 AND state IN ('planned','running','waiting_input')`, [rt.id, agent]))?.n ?? 0);
+      if (n < Number(cap)) return agent;
+    }
+    return null;
+  }
+
+  /** 名额释放后按入队顺序补派排队的代码定位（派不出去就停） */
+  async drainCodeLocate(runtimeName: string) {
+    const rt = await this.db.one<{ labels: string[] }>('SELECT labels FROM runtimes WHERE name=$1', [runtimeName]);
+    if (!rt || !this.hub.isOnline(runtimeName)) return;
+    const queued = await this.db.query<any>(`SELECT * FROM jobs WHERE status='queued' AND kind='code-locate' ORDER BY created_at`);
+    for (const j of queued.rows) {
+      if (j.required_label && !rt.labels.includes(j.required_label)) continue;
+      if (!(await this.startCodeLocate(j.args.taskId, j.id, runtimeName))) break;
+    }
   }
 
   async sendWorktreeCreate(taskId: string, runtimeName: string, repo: string, purpose: 'code_locate' | 'implement' | 'review', fetchFirst = false) {
@@ -247,12 +289,20 @@ export class Intake {
   /** progress-watch：代码定位超时（EX-22.1） */
   async watchCodeLocateTimeouts() {
     const cutoff = new Date(this.clock.now().getTime() - CODE_LOCATE_TIMEOUT_MINUTES * 60_000);
-    const stale = await this.db.query<any>(`SELECT s.id, s.task_id, r.name AS runtime FROM sessions s JOIN runtimes r ON r.id=s.runtime_id WHERE s.kind='code_locate' AND s.state IN ('running','planned') AND s.started_at <= $1`, [cutoff]);
+    // planned 会话还没 started_at（worktree 一直没好）也按创建时间算，否则会永远占着并发名额
+    const stale = await this.db.query<any>(`SELECT s.id, s.task_id, s.state, r.name AS runtime, COALESCE((SELECT NOT c.degraded FROM triage_cards c WHERE c.task_id=s.task_id), false) AS delivered FROM sessions s JOIN runtimes r ON r.id=s.runtime_id WHERE s.kind='code_locate' AND s.state IN ('running','planned','waiting_input') AND COALESCE(s.started_at, s.created_at) <= $1`, [cutoff]);
     for (const s of stale.rows) {
-      this.hub.send(s.runtime, 'session.stop', { sessionId: s.id, reason: 'timeout' });
+      if (s.state !== 'planned') this.hub.send(s.runtime, 'session.stop', { sessionId: s.id, reason: 'timeout' });
+      if (s.delivered) {
+        // 已交付分流卡、只是会话没收尾（例如一轮结束被当成等输入）：按完成处理，不能用降级卡覆盖已有结果
+        await this.db.query(`UPDATE sessions SET state='done', ended_at=$2, updated_at=$2 WHERE id=$1`, [s.id, this.clock.now()]);
+        await this.db.query(`UPDATE questions SET status='timeout' WHERE session_id=$1 AND status='open' AND origin='hook'`, [s.id]);
+        continue;
+      }
       await this.db.query(`UPDATE sessions SET state='stopped', failure_reason='code-locate timeout', ended_at=$2, updated_at=$2 WHERE id=$1`, [s.id, this.clock.now()]);
       await this.emitTriage(s.task_id, s.id, { degraded: true, degradedReason: '代码定位失败：超时 15 分钟' });
     }
+    for (const name of new Set(stale.rows.map((s) => s.runtime as string))) await this.drainCodeLocate(name);
     return { stopped: stale.rows.length };
   }
 

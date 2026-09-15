@@ -230,3 +230,15 @@ scripts/build.sh          先构建面板再打三个单文件 bundle
 |----|------|------|------|
 | 需要输入的发现方式 | S07 Step 19：Notification 钩子回调 worker | worker 每 20 秒轮询 `claude agents --json --all`，blocked 时上报 | 钩子需要在开发机装 `foreman-hook`，轮询已能拿到同样的状态；ST-S07-15 [manual] 相应改为观察轮询 |
 | thirdparty 选择 | ST-S03-19 期望 worktree 里有 `thirdparty/installed` 软链 | 主仓库软链到 `doris-thirdparty-3.0`，worktree 通过 `custom_env.sh` 的 `DORIS_THIRDPARTY` 指向同一套 | 3.0 与 selectdb-cloud-4.0 的 vars.sh 版本一致；机器上另一份 selectdb-core 检出也用 3.0 |
+
+### 生产首轮代码定位暴露的问题（2026-09-15）
+
+批次 6 发布后，dev 上线补跑了 T-1～T-6 六个排队的代码定位，六张分流卡都拿到了真实代码位置（各 8 处），同时暴露三个问题：
+
+| 问题 | 现象 | 修正 |
+|------|------|------|
+| 代码定位绕过并发上限 | worker.yaml 里 claude 上限 1，上线瞬间起了 6 个 claude 会话 | code_locate 会话原本在 worktree.ready 时才创建，计数永远是 0。改为 `startCodeLocate` 先按 `maxConcurrent` 挑有空位的 agent 并写入 planned 会话，再发 worktree.create；没名额则作业留在 queued，任何会话结束（`drainQueue`）或超时后由 `drainCodeLocate` 补派 |
+| 一轮结束被当成需要输入 | 实测一轮结束后是 `state=blocked, status=idle`（最后一句话在等人回复），不只是 `done`；worker 上报 waiting_input，中心从日志尾巴推断出 "✻Brewed for 3m 31s · done 10:27 AM" 这种假问题，会话一直占名额 | `status=idle` 即视为本轮结束（先见过 busy 或启动超过 60 秒，避免刚启动误判）；只有 `status=waiting` 才上报需要输入；日志清洗去掉以转圈字符开头的状态行 |
+| 超时检查会覆盖真实分流卡 | `watchCodeLocateTimeouts` 对超时会话一律发降级卡，降级卡按 task_id upsert 会清空已交付的代码位置；planned 会话 started_at 为空永远不超时 | 超时按 `COALESCE(started_at, created_at)`，并纳入 waiting_input；已有非降级分流卡的会话按 done 收尾、关闭 origin=hook 的问题，不再降级 |
+
+用例：新增 UT-S01-21（并发闸门与补派）、UT-S01-22（planned 超时、已交付不降级）；UT-S07-29 的 fake 改为真实的 `blocked + idle` 收尾。

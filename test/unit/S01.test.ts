@@ -1,5 +1,5 @@
 /**
- * S01 单元测试：UT-S01-01 ~ UT-S01-20（来源：logos/resources/test/core-S01-test-cases.md）
+ * S01 单元测试：UT-S01-01 ~ UT-S01-22（来源：logos/resources/test/core-S01-test-cases.md）
  * 直接驱动进程内 center 的领域对象（Intake / Approvals / Notifications / Tasks），Jira 与 agent 不参与。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -227,5 +227,45 @@ describe('S01 1.4 降级与通知', () => {
     await app.fakeClock.advance(10 * 60_000);
     const n4 = await app.db.one<any>('SELECT attempts FROM notifications WHERE id=$1', [r.id]);
     expect(Number(n4.attempts)).toBe(3);
+  }));
+
+  it('UT-S01-21: 代码定位受 agent 并发上限约束，名额释放后补派', () => withReport('UT-S01-21', async () => {
+    for (const key of ['T-701', 'T-702', 'T-703']) {
+      const id = await seedTask(app.db, { key, state: 'triaging' });
+      await app.db.query(`INSERT INTO jobs (kind, status, required_label, args, dedupe_key, scheduled_at, created_at) VALUES ('code-locate','queued','build:doris',$1,$2,$3,$3)`, [JSON.stringify({ taskId: id }), `code-locate:${id}`, app.clock.now()]);
+    }
+    const creates: string[] = [];
+    const w = new FakeWorker(app.ws, TEST_TOKEN); await w.connect(); workers.push(w);
+    w.onAny((e) => { if (e.type === 'worktree.create') creates.push(String(e.payload.taskKey)); });
+    await w.register({ name: 'dev', labels: ['build:doris', 'agent:claude', 'agent:codex'], agents: { claude: { bin: 'fake-claude', maxConcurrent: 1 }, codex: { bin: 'fake-codex', maxConcurrent: 1 } } });
+    for (let i = 0; i < 30 && creates.length < 2; i++) await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(creates).toHaveLength(2);
+    const planned = await app.db.query<any>(`SELECT id, agent FROM sessions WHERE kind='code_locate' AND state='planned' ORDER BY agent`);
+    expect(planned.rows.map((r) => r.agent)).toEqual(['claude', 'codex']);
+    expect(Number((await app.db.one<any>(`SELECT count(*) AS n FROM jobs WHERE kind='code-locate' AND status='queued'`)).n)).toBe(1);
+    await app.dispatch.onSessionState('dev', { sessionId: planned.rows[0].id, state: 'failed', exitCode: 1, failureReason: 'x', source: 'exit' });
+    for (let i = 0; i < 30 && creates.length < 3; i++) await new Promise((r) => setTimeout(r, 100));
+    expect(creates).toHaveLength(3);
+    expect(new Set(creates).size).toBe(3);
+  }));
+
+  it('UT-S01-22: 一直停在 planned 的代码定位也按 15 分钟超时', () => withReport('UT-S01-22', async () => {
+    await seedRuntime(app.db, { name: 'dev', labels: ['build:doris', 'agent:claude'] });
+    const taskId = await seedTask(app.db, { key: 'T-704', state: 'triaging', runtime: 'dev' });
+    const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'claude', kind: 'code_locate', state: 'planned', startedAt: null });
+    await app.db.query(`UPDATE sessions SET created_at=$2, started_at=NULL WHERE id=$1`, [sid, new Date(app.clock.now().getTime() - 16 * 60_000)]);
+    // 已交付分流卡但停在 waiting_input：按完成处理，不降级已有卡，关掉钩子推断的问题
+    const t2 = await seedTask(app.db, { key: 'T-705', state: 'triaging', runtime: 'dev' });
+    const s2 = await seedSession(app.db, { taskId: t2, runtime: 'dev', agent: 'claude', kind: 'code_locate', state: 'waiting_input', startedAt: new Date(app.clock.now().getTime() - 16 * 60_000) });
+    await app.intake.emitTriage(t2, s2, { tier: 'fix', effort: 'small', codeLocations: [{ path: 'be/src/olap/a.cpp', line: 10, symbol: 'f', why: 'x' }] });
+    await app.db.query(`INSERT INTO questions (task_id, session_id, text, origin, status, asked_at, expires_at) VALUES ($1,$2,'✻Brewed for 3m · done','hook','open',$3,$4)`, [t2, s2, app.clock.now(), new Date(app.clock.now().getTime() + 30 * 60_000)]);
+    await app.intake.watchCodeLocateTimeouts();
+    expect((await app.db.one<any>('SELECT state FROM sessions WHERE id=$1', [sid])).state).toBe('stopped');
+    expect((await app.db.one<any>('SELECT degraded_reason FROM triage_cards WHERE task_id=$1', [taskId])).degraded_reason).toContain('超时');
+    expect((await app.db.one<any>('SELECT state FROM sessions WHERE id=$1', [s2])).state).toBe('done');
+    const card2 = await app.db.one<any>('SELECT degraded, code_locations FROM triage_cards WHERE task_id=$1', [t2]);
+    expect(card2.degraded).toBe(false); expect(card2.code_locations).toHaveLength(1);
+    expect((await app.db.one<any>('SELECT status FROM questions WHERE session_id=$1', [s2])).status).toBe('timeout');
   }));
 });

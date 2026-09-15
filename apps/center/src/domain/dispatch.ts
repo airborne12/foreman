@@ -103,6 +103,7 @@ export class Dispatch {
 
   /** 会话结束后释放名额：按队列顺序补派同 runtime 同 agent 的排队任务（EX-7.2） */
   private async drainQueue(runtimeName: string, agent: string) {
+    await this.intake.drainCodeLocate(runtimeName);
     const next = await this.db.one<{ id: string }>(`SELECT id FROM tasks WHERE state='queued' AND runtime_name=$1 AND agent=$2 AND queue_reason LIKE '排队%' ORDER BY updated_at LIMIT 1`, [runtimeName, agent]);
     if (next) await this.dispatchTask(next.id, { agent: agent as AgentName });
   }

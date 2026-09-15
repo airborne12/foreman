@@ -246,7 +246,7 @@ describe('S07 1.3 完成、续接、停止、无进展', () => {
       '#!/bin/sh', `echo "$@" >> "${log}"`,
       'case "$1" in',
       '  --bg) echo "backgrounded · 3f171235 · T-231-implement";;',
-      `  agents) c=$(cat "${n}" 2>/dev/null || echo 0); c=$((c+1)); echo $c > "${n}"; if [ $c -le 3 ]; then echo '[{"id":"3f171235","sessionId":"${uuid}","state":"blocked","status":"waiting"}]'; else echo '[{"id":"3f171235","sessionId":"${uuid}","state":"done","status":"idle"}]'; fi;;`,
+      `  agents) c=$(cat "${n}" 2>/dev/null || echo 0); c=$((c+1)); echo $c > "${n}"; if [ $c -le 3 ]; then echo '[{"id":"3f171235","sessionId":"${uuid}","state":"blocked","status":"waiting"}]'; elif [ $c -le 4 ]; then echo '[{"id":"3f171235","sessionId":"${uuid}","state":"working","status":"busy"}]'; else echo '[{"id":"3f171235","sessionId":"${uuid}","state":"blocked","status":"idle"}]'; fi;;`,
       'esac', '',
     ].join('\n')); chmodSync(bin, 0o755);
     let waits = 0;

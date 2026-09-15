@@ -50,7 +50,7 @@ REMOTE
       [ -f foreman-worker.mjs ] && mv foreman-worker.mjs foreman-worker.mjs.prev
       mv foreman-worker.mjs.new foreman-worker.mjs
       systemctl --user daemon-reload
-      systemctl --user enable --now foreman-worker >/dev/null 2>&1 || systemctl --user restart foreman-worker
+      systemctl --user enable foreman-worker >/dev/null 2>&1; systemctl --user restart foreman-worker   # enable --now 不会重启已在运行的旧进程
       sleep 3; systemctl --user is-active foreman-worker'
     ;;
   center)

@@ -73,7 +73,8 @@ export function parseClaudeBgId(out: string): string | null {
   return out.match(/backgrounded\s*·\s*([0-9a-f]{8})\b/i)?.[1]?.toLowerCase() ?? out.match(/\b([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i)?.[1]?.toLowerCase() ?? null;
 }
 
-const CLAUDE_CHROME = [/auto mode on/i, /esc to interrupt/i, /weekly limit/i, /shift\+tab/i, /\/effort/i, /^[─━\s]+$/, /for agents/i, /^❯\s*$/];
+// 状态栏、分隔线、输入框，以及以转圈字符开头的状态行（如 "✻Brewed for 3m 31s · done 10:27 AM"）
+const CLAUDE_CHROME = [/auto mode on/i, /esc to interrupt/i, /weekly limit/i, /shift\+tab/i, /\/effort/i, /^[─━\s]+$/, /for agents/i, /^❯\s*$/, /^[✻✶✢✽✳✺·*]/, /running \w+ hooks/i];
 /** `claude logs` 是终端画面流：光标移动当换行，去掉颜色码、转圈字符和状态栏 */
 export function cleanClaudeLogs(raw: string): string[] {
   const text = raw
@@ -127,13 +128,20 @@ export const claudeAdapter: AgentAdapter = {
 
 function pollClaude(bin: string, s: TrackedSession, onExit: OnExit, opts: AdapterOptions) {
   let waiting = false;
+  let sawBusy = false;
+  const since = Date.now();
   const t = setInterval(async () => {
     if (s.state !== 'running') { clearInterval(t); return; }
     const list = await listClaudeAgents(bin, s.cwd);
     if (!list || s.state !== 'running') return; // 轮询失败不改状态
     const a = list.find((x) => x.sessionId === s.agentSessionId || x.id === s.shortId);
     const st = String(a?.state ?? '').toLowerCase();
-    if (!a || ['done', 'completed', 'finished', 'exited'].includes(st)) {
+    const status = String(a?.status ?? '').toLowerCase();
+    if (status === 'busy' || st === 'working') sawBusy = true;
+    // 实测：一轮结束后 status=idle，state 可能是 done，也可能是 blocked（最后一句话在等人回复）——都算本轮完成；
+    // 刚启动还没开始干活时也可能短暂 idle，所以要先见过 busy 或已超过 60 秒
+    const turnOver = status === 'idle' && st !== 'failed' && (sawBusy || Date.now() - since > 60_000);
+    if (!a || ['done', 'completed', 'finished', 'exited'].includes(st) || turnOver) {
       clearInterval(t); s.state = 'done';
       await run(bin, ['stop', shortOf(s)], s.cwd, cleanEnv(), 15_000).catch(() => ''); // 释放空闲进程，便于之后按同一 id 续接
       onExit(0, '');
