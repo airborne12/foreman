@@ -28,6 +28,11 @@ export const AgentConfig = z.object({
   permissionMode: z.string().optional(),
   /** codex sandbox_mode（缺省 workspace-write） */
   sandbox: z.string().optional(),
+  /**
+   * claude --disallowedTools：只收紧、不放权。后台会话没人点确认框，
+   * 与其让危险命令停在确认框上把会话挂死，不如直接禁掉（如 rm、chmod -R 之类）。
+   */
+  disallowedTools: z.array(z.string()).optional(),
 });
 
 export const RepoConfig = z.object({

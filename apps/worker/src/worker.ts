@@ -236,7 +236,7 @@ export class Worker {
 
   private adapterOpts(agent: string, sessionId: string): AdapterOptions {
     const a = this.opts.config.agents[agent];
-    return { permissionMode: a?.permissionMode, sandbox: a?.sandbox, onWaiting: () => this.onSessionWaiting(sessionId) };
+    return { permissionMode: a?.permissionMode, sandbox: a?.sandbox, disallowedTools: a?.disallowedTools, onWaiting: () => this.onSessionWaiting(sessionId) };
   }
 
   /** 轮询发现会话在等输入/权限 → session.state waiting_input（source=poll，中心按 EX-19.1 推断问题） */

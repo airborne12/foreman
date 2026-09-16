@@ -23,6 +23,8 @@ export interface AdapterOptions {
   permissionMode?: string | null;
   /** codex 沙箱，缺省 workspace-write（exec 缺省只读，改不了代码） */
   sandbox?: string | null;
+  /** claude 禁用的工具（只收紧不放权）：危险命令直接禁掉，免得停在没人点的确认框上 */
+  disallowedTools?: string[] | null;
   /** 观察到会话在等输入/权限（claude state=blocked） */
   onWaiting?: () => void;
   /** 测试用：轮询间隔 */
@@ -62,10 +64,15 @@ export function tail(file: string, lines = 20) { try { return readFileSync(file,
 
 // ---------------- claude --bg ----------------
 
-export function claudeStartArgs(input: SessionStartInput, permissionMode?: string | null) {
+export function claudeStartArgs(input: SessionStartInput, permissionMode?: string | null, disallowedTools?: string[] | null) {
   const name = input.name ?? `foreman-${input.sessionId.slice(0, 8)}`;
   const mcp = JSON.stringify({ mcpServers: { foreman: { type: 'http', url: input.mcp.url, headers: { Authorization: `Bearer ${input.mcp.token}` } } } });
-  return ['--bg', '--name', name, '--permission-mode', permissionMode ?? 'auto', '--strict-mcp-config', `--mcp-config=${mcp}`, ...(input.model ? ['--model', input.model] : []), input.prompt];
+  return [
+    '--bg', '--name', name, '--permission-mode', permissionMode ?? 'auto', '--strict-mcp-config', `--mcp-config=${mcp}`,
+    // 同样用 = 写法：这些参数都是变长的，空格写法会把 prompt 当成值吞掉
+    ...(disallowedTools?.length ? [`--disallowedTools=${disallowedTools.join(',')}`] : []),
+    ...(input.model ? ['--model', input.model] : []), input.prompt,
+  ];
 }
 
 /** 从 `claude --bg` 输出取短 id */
@@ -99,7 +106,7 @@ const shortOf = (s: TrackedSession) => s.shortId ?? s.agentSessionId.slice(0, 8)
 export const claudeAdapter: AgentAdapter = {
   async start(input, bin, onExit, opts = {}) {
     const log = logPath(input.cwd, input.sessionId);
-    const args = claudeStartArgs(input, opts.permissionMode);
+    const args = claudeStartArgs(input, opts.permissionMode, opts.disallowedTools);
     const name = args[2]!;
     const out = await run(bin, args, input.cwd, cleanEnv(input.env), 60_000).catch((e) => { throw new SessionStartError(`claude --bg 失败：${String(e.message).slice(0, 300)}`); });
     writeFileSync(log, out);

@@ -258,13 +258,15 @@ describe('S03 1.4 worktree 与会话指令', () => {
       `if [ "$1" = "--bg" ]; then for a in "$@"; do printf '%s\\n' "$a"; done > "${log}"; echo "backgrounded · 3f171235 · T-231-implement"; fi`,
       `if [ "$1" = "agents" ]; then echo '[{"id":"3f171235","sessionId":"${uuid}","name":"T-231-implement","kind":"background","state":"working"}]'; fi`, '',
     ].join('\n')); chmodSync(bin, 0o755);
-    const s = await claudeAdapter.start({ sessionId: crypto.randomUUID(), taskKey: 'T-231', kind: 'implement', agent: 'claude', prompt: '实现 T-231', cwd: dir, name: 'T-231-implement', mcp: { url: 'http://127.0.0.1:7801/mcp', token: 'tok-1' } }, bin, () => undefined, { pollMs: 3_600_000 });
+    const s = await claudeAdapter.start({ sessionId: crypto.randomUUID(), taskKey: 'T-231', kind: 'implement', agent: 'claude', prompt: '实现 T-231', cwd: dir, name: 'T-231-implement', mcp: { url: 'http://127.0.0.1:7801/mcp', token: 'tok-1' } }, bin, () => undefined, { pollMs: 3_600_000, disallowedTools: ['Bash(rm:*)', 'Bash(git push:*)'] });
     s.state = 'stopped';
     const args = readFileSync(log, 'utf8').trimEnd().split('\n');
     expect(args.slice(0, 5)).toEqual(['--bg', '--name', 'T-231-implement', '--permission-mode', 'auto']);
     expect(args).toContain('--strict-mcp-config');
     const mcp = args.find((a) => a.startsWith('--mcp-config='))!;
     expect(JSON.parse(mcp.slice('--mcp-config='.length)).mcpServers.foreman).toMatchObject({ type: 'http', url: 'http://127.0.0.1:7801/mcp', headers: { Authorization: 'Bearer tok-1' } });
+    // 黑名单同样要用 = 写法，且不能挤掉最后一个位置参数 prompt
+    expect(args).toContain('--disallowedTools=Bash(rm:*),Bash(git push:*)');
     expect(args[args.length - 1]).toBe('实现 T-231');
     expect(s.agentSessionId).toBe(uuid); expect(s.shortId).toBe('3f171235');
   }));
