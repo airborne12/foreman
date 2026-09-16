@@ -244,6 +244,10 @@ describe('S03 1.4 worktree 与会话指令', () => {
     expect(JSON.parse(readFileSync(resolve(out.path, '.foreman/task.json'), 'utf8')).key).toBe('T-231');
     expect(readFileSync(resolve(out.path, 'custom_env.sh'), 'utf8')).toContain(`export DORIS_THIRDPARTY="${tp}"`);
     expect(existsSync(resolve(out.path, '.claude/settings.json'))).toBe(false);
+    // .foreman/ 是上下文包与日志，必须被 worktree 自己的 exclude 挡住，否则 agent 的 git add -A 会带进 PR
+    const excl = resolve(out.path, execFileSync('git', ['rev-parse', '--git-path', 'info/exclude'], { cwd: out.path, encoding: 'utf8' }).trim());
+    expect(readFileSync(excl, 'utf8')).toContain('.foreman/');
+    expect(execFileSync('git', ['status', '--porcelain'], { cwd: out.path, encoding: 'utf8' })).not.toContain('.foreman');
   }));
   it('UT-S03-30: claude --bg 启动参数与会话 id 解析', () => withReport('UT-S03-30', async () => {
     const dir = mkdtempSync(resolve(tmpdir(), 'fclaude-'));

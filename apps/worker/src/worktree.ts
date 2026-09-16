@@ -6,7 +6,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
 
 export interface WorktreeCreateInput {
   taskKey: string; repo: string; baseBranch: string; branchName?: string; buildEnv?: Record<string, string>;
@@ -43,8 +43,24 @@ export function createWorktree(input: WorktreeCreateInput, repo: { main: string;
       throw new WorktreeError(msg.slice(0, 500), !input.fetchFirst);
     }
   }
+  excludeForemanDir(path, git);
   writeContextFiles(path, input);
   return { taskKey: input.taskKey, path, branchName, reused };
+}
+
+/**
+ * `.foreman/` 放的是上下文包与会话日志，不该被 agent 的 `git add -A` 带进 PR。
+ * 写 worktree 自己的 info/exclude（`git rev-parse --git-path` 在 worktree 里指向 .git/worktrees/<name>/info/exclude），
+ * 而不是改仓库的 .gitignore —— 后者本身就是一处要提交的改动。
+ */
+export function excludeForemanDir(path: string, git: GitRunner = realGit) {
+  try {
+    const p = resolve(path, git(['rev-parse', '--git-path', 'info/exclude'], path).trim());
+    mkdirSync(dirname(p), { recursive: true });
+    const cur = existsSync(p) ? readFileSync(p, 'utf8') : '';
+    if (cur.split('\n').some((l) => l.trim() === '.foreman/')) return;
+    writeFileSync(p, `${cur}${cur && !cur.endsWith('\n') ? '\n' : ''}.foreman/\n`);
+  } catch { /* 写不了不影响会话，最多是 PR 里多出 .foreman/ */ }
 }
 
 /** 上下文文件（每次都刷新，保证 context.md 为最新版本） */
