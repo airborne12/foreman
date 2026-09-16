@@ -218,12 +218,15 @@ describe('S05 1.3 离线判定与对账', () => {
     const s2 = await seedSession(app.db, { taskId: t, runtime: 'dev', agent: 'claude' });
     const s3 = await seedSession(app.db, { taskId: t, runtime: 'dev', agent: 'codex' });
     await app.db.query('UPDATE sessions SET reachable=false');
+    // 丢失的会话推断出来的问题应当一起关掉，否则永远挂在收件箱里没人能回答
+    await app.db.query(`INSERT INTO questions (task_id, session_id, text, origin, status, asked_at, expires_at) VALUES ($1,$2,'✻Brewed for 3m · done','hook','open',$3,$4)`, [t, s3, app.clock.now(), new Date(app.clock.now().getTime() + 30 * 60_000)]);
     w.send('session.list', { sessions: [{ sessionId: s1, state: 'running' }, { sessionId: s2, state: 'waiting_input' }] });
     await new Promise((r) => setTimeout(r, 150));
     const rows = Object.fromEntries((await app.db.query<any>('SELECT id, state, reachable FROM sessions')).rows.map((r) => [r.id, r]));
     expect(rows[s1].state).toBe('running'); expect(rows[s1].reachable).toBe(true);
     expect(rows[s2].state).toBe('waiting_input');
     expect(rows[s3].state).toBe('lost');
+    expect((await app.db.one<any>('SELECT status FROM questions WHERE session_id=$1', [s3])).status).toBe('timeout');
   }));
 
   it('UT-S05-21: 离线期间指令写入 pendingCommands 并在 ack 时按序回放', () => withReport('UT-S05-21', async () => {

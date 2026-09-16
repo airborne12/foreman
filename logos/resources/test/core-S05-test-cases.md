@@ -38,7 +38,7 @@
 |----|------|------|---------|------|---------|
 | UT-S05-18 | last_seen 超过 90 秒标离线并把其会话 reachable=false | Step 22–23 | dev 有 2 个 running 会话 | tick(heartbeat-check) at +91s | runtimes.online false；sessions.reachable false；tasks.state 不变 |
 | UT-S05-19 | 89 秒不判离线 | Step 22 | — | tick at +89s | online 仍 true |
-| UT-S05-20 | session.list 对账：本机不存在的会话标 lost | Step 16–17 | DB 有 3 个 running，worker 报 2 个 | session.list | 缺失那个 state=lost，其余 reachable=true |
+| UT-S05-20 | session.list 对账：本机不存在的会话标 lost，并关掉它推断出的问题 | Step 16–17；EX-19.1 | DB 有 3 个 running，worker 报 2 个；缺失那个带一条 origin=hook 的 open 问题 | session.list | 缺失那个 state=lost，其余 reachable=true；该会话的 hook 问题 status=timeout（会话没了，没人能回答） |
 | UT-S05-21 | 离线期间指令写入 pendingCommands 并在 ack 时按序回放 | Step 13、EX-23.1 | dev 离线，排队 2 条指令 | 注册 | ack.pendingCommands 长度 2 且顺序一致 |
 | UT-S05-22 | 连续离线 5 分钟只推一次飞书告警 | Step 24 | 注入时钟 | 离线 5 分钟、10 分钟 | notifications alert 1 条 |
 

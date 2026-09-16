@@ -108,6 +108,11 @@ export class Dispatch {
     if (next) await this.dispatchTask(next.id, { agent: agent as AgentName });
   }
 
+  /** 会话终结时关掉它推断出来的问题（EX-19.1 的 origin=hook）：会话没了，这类问题没人能回答 */
+  private async closeInferredQuestions(sessionId: string) {
+    await this.db.query(`UPDATE questions SET status='timeout' WHERE session_id=$1 AND status='open' AND origin='hook'`, [sessionId]);
+  }
+
   private async runningCount(runtimeId: string, agent: string) {
     return Number((await this.db.one<{ n: string }>(`SELECT count(*) AS n FROM sessions WHERE runtime_id=$1 AND agent=$2 AND state IN ('planned','running','waiting_input')`, [runtimeId, agent]))?.n ?? 0);
   }
@@ -230,6 +235,7 @@ export class Dispatch {
     if (p.state === 'failed') {
       if (['done', 'failed', 'stopped'].includes(s.state)) return;
       await this.db.query(`UPDATE sessions SET state='failed', exit_code=$2, failure_reason=$3, ended_at=$4, updated_at=$4 WHERE id=$1`, [s.id, p.exitCode ?? null, p.failureReason ?? null, now]);
+      await this.closeInferredQuestions(s.id);
       if (s.kind === 'code_locate') await this.intake.emitTriage(s.task_id, s.id, { degraded: true, degradedReason: `代码定位失败：${p.failureReason ?? 'exit ' + p.exitCode}` });
       else await this.failTask(s.task_id, `会话失败：${p.failureReason ?? 'exit ' + p.exitCode}`, ['retry', 'switch_agent', 'abandon']);
       await this.drainQueue(runtimeName, s.agent);
@@ -237,6 +243,7 @@ export class Dispatch {
     }
     if (p.state === 'stopped') {
       const r = await this.db.query(`UPDATE sessions SET state='stopped', ended_at=$2, updated_at=$2 WHERE id=$1 AND state NOT IN ('done','failed','stopped')`, [s.id, now]);
+      await this.closeInferredQuestions(s.id);
       if (r.rowCount && s.kind !== 'code_locate') {
         // S07 Step 46：人工停止 → 任务 paused，worktree 保留
         await this.db.query(`UPDATE tasks SET state='paused', state_before_pause=state, updated_at=$2 WHERE id=$1 AND state IN ('running','waiting_input','queued')`, [s.task_id, now]);
