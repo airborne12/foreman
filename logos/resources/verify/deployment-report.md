@@ -89,4 +89,7 @@
 
 6. **设计缺口：基线分支是仓库级写死的，应当由分流卡给出**（2026-09-16 跑 T-6 时暴露）。`center.yaml` 的 `repo_base_branch` 只按仓库配一个值（`selectdb/selectdb-core` → `selectdb-cloud-4.0`），worktree 一律从它拉。但每个单要改的分支各不相同：T-6 的 search 降级代码在 `branch-selectdb-doris-4.1`，T-5 的 SNII 只在 `branch-hotfix-selectdb-cloud-4.1.7-minimax-rows`，T-1 是 cloud-26.1.3。结果是 agent 在 worktree 里根本找不到目标代码，只能自己去别的分支上看。分流卡已经能判断目标分支（T-5 的定位结论里就写了），缺的是把它作为 `baseBranch` 传给 `worktree.create`、并允许在拍板时覆盖。建议按 OpenLogos 走变更提案：`TriageArtifact` 增加 `targetBranch`，分流卡与 `decideApproval.overrides` 同步增加该字段。
 
+8. **worker 的 systemd 环境没有代理，codex 一律 403**（2026-09-16 暴露）。开发机访问 `chatgpt.com` 必须走 `http://127.0.0.1:10809`，代理写在 `~/.bashrc` 里，只有交互式 shell 读得到；worker 由 `systemd --user` 拉起，不读 profile，于是 worker 派出去的 `codex exec` 连 `wss://chatgpt.com/backend-api/codex/responses` 直接 403 Forbidden，15 秒内失败。T-7（CORE-6140）、T-8（CIR-21828）的代码定位轮换到 codex，两次都因此失败并出降级卡（claude 名额当时被 T-6 占着）。claude 不受影响，说明其域名在该机可直连。
+   已把 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 追加到 `~/.foreman/env`（worker 单元本来就有 `EnvironmentFile=%h/.foreman/env`），原文件备份为 `env.bak-20260916`；**要等正在跑的 T-6 结束后重启 worker 才生效**，重启会丢掉 worker 内存里的会话跟踪。待办：`deploy-worker.sh` 首次生成 env 时应一并写入代理，否则换机重装会再踩一次。
+
 7. **设计缺口：`POST /api/tasks` 建的任务不会自动派发**。跑冒烟时核实：只有 Jira 入库、飞书入库、频道草案确认三条入口会调 `scheduleCodeLocate`；通过 REST（也就是 `foreman task new`）建的任务停在 `triaging`，不会起会话。所有场景文档（S01/S02/S04）都只描述了那三条入口，createTask 之后该做什么没有任何场景定义，所以这既是实现缺口也是设计缺口。M1 的 268 个用例都不覆盖这一点，全绿并不矛盾。建议按 OpenLogos 走一个变更提案补上，而不是在部署期临时改代码。核心链路冒烟（10/11/15）因此也没自动化。

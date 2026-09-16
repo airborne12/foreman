@@ -14,10 +14,21 @@ case "$RT" in
     # 首次部署：同步 token 与 worker.yaml（已存在则保留）
     TOKEN="$(ssh "$CENTER_SSH" 'sed -n "s/^FOREMAN_TOKEN=//p" ~/.foreman/env')"
     [ -n "$TOKEN" ] || { echo "读不到中心的 FOREMAN_TOKEN"; exit 1; }
-    ssh "$DEV_SSH" "bash -s '$TOKEN'" <<'REMOTE'
+    # agent 走订阅版 CLI 要出网，而 systemd --user 不读 ~/.bashrc：代理必须进 EnvironmentFile，
+    # 否则 codex 连 chatgpt.com 直接 403（缺省沿用中心 center.yaml 的 proxy，可用 WORKER_PROXY 覆盖）
+    PROXY="${WORKER_PROXY:-$(ssh "$CENTER_SSH" 'sed -n "s/^proxy: *//p" ~/.foreman/center.yaml' | head -1)}"
+    ssh "$DEV_SSH" "bash -s '$TOKEN' '$PROXY'" <<'REMOTE'
 set -euo pipefail
 TOKEN="$1"
-if [ ! -f ~/.foreman/env ]; then printf 'FOREMAN_TOKEN=%s\n' "$TOKEN" > ~/.foreman/env; chmod 600 ~/.foreman/env; echo "~/.foreman/env 已生成"; else echo "~/.foreman/env 已存在，保留"; fi
+PROXY="${2:-}"
+if [ ! -f ~/.foreman/env ]; then
+  printf 'FOREMAN_TOKEN=%s\n' "$TOKEN" > ~/.foreman/env
+  [ -n "$PROXY" ] && printf 'HTTP_PROXY=%s\nHTTPS_PROXY=%s\nNO_PROXY=127.0.0.1,localhost\n' "$PROXY" "$PROXY" >> ~/.foreman/env
+  chmod 600 ~/.foreman/env; echo "~/.foreman/env 已生成"
+else
+  echo "~/.foreman/env 已存在，保留"
+  grep -q '^HTTPS_PROXY=' ~/.foreman/env || echo "  提醒：env 里没有代理，codex 可能连不上外网（见部署报告第 8 条）"
+fi
 if [ ! -f ~/.foreman/worker.yaml ]; then
   cat > ~/.foreman/worker.yaml <<'YAML'
 name: dev
