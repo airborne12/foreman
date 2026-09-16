@@ -70,9 +70,7 @@
 ## 六、未解决风险与下一步
 
 1. **飞书通道关闭**：`~/bin/lark-cli` 已装好，`~/.lark-cli/config.json` 里已有应用 `cli_a94d111224385cb3`，但 app secret 不在 keychain（`keychain entry not found`）。需要你在中心机的交互式终端里补上 secret 并 `lark-cli auth login`，再把 `~/.foreman/center.yaml` 的 `feishu.enabled` 改 true、填 `owner_open_id` 与 `bot_open_id` 并重启中心。
-2. **代码类任务还不会路由到 dev**：selectdb-core 已克隆到 `/mnt/disk15/jiangkai/selectdb-core`（分支 selectdb-cloud-4.0，2.0G），worktree 根目录 `/mnt/disk15/jiangkai/foreman-wt` 已建，`repo:selectdb/selectdb-core` 标签已加。还差 `build:doris`：`/mnt/disk6/common/doris-thirdparties/` 下有 2.1、3.0、3.1、master、automation-20260825 等 6 套预编译 thirdparty，选错会导致编译失败，需要你指定用哪一套，然后
-   `ln -s /mnt/disk6/common/doris-thirdparties/<你选的>/installed /mnt/disk15/jiangkai/selectdb-core/thirdparty/installed`
-   并在 `~/.foreman/worker.yaml` 的 labels 里加 `build:doris`、重启 `foreman-worker`。
+2. ~~**代码类任务还不会路由到 dev**~~ **已解决（2026-09-15）**：thirdparty 选定 `doris-thirdparty-3.0`（selectdb-cloud-4.0 的 `vars.sh` 要求 arrow 17.0.0 / azure-core 1.16.0 / jindofs 6.8.2，与 3.0 一致；3.1 只多出 selectdb-core 未引用的 hadoop_hdfs_3_4 与 libevent_openssl；机器上另一份 selectdb-core 检出也用 3.0），已软链到主仓库 `thirdparty/installed`，worktree 通过 `custom_env.sh` 的 `DORIS_THIRDPARTY` 指向同一套。`~/.foreman/worker.yaml` 已加 `build:doris`、agent 改绝对路径（systemd 的 PATH 不含 `~/.local/bin`）。dev 上线后补跑了 T-1～T-6 六个排队的代码定位，六张分流卡都拿到真实代码位置（各 8 处）。过程中发现并修掉的问题见实现清单「批次 6」与「生产首轮代码定位暴露的问题」。
 3. **/mnt/disk15 已用 84%**：接近 worker 的 0.85 高水位，worktree 回收会比较频繁。
 4. **Jira 轮询已开启（2026-09-11 18:42）**：`sources.jira.enabled: true`，按 `assignee = currentUser() AND resolution = Unresolved` 每 5 分钟轮询一次，作业派到开发机执行。
    开启前用只读查询数过：符合该 JQL 的未解决单有 **112 个**。水位线原本为空，首轮会把这 112 个全部入库并各生成一张降级分流卡，还会排 112 个 code-locate 作业——等 dev 拿到 `build:doris` 上线时会一次性创建 112 个 worktree，而 `/mnt/disk15` 已用 84%。
@@ -87,6 +85,8 @@
 | 01 健康检查 / 02 launchd / 03 配置与密钥 / 04 代理 / 05 迁移 / 06 面板 / 07 认证 / 09 隧道 / 13 Jira / 14 来源健康 / 16 日志与备份 | ✅ | 13 查的是最近一次 jira-poll 作业成功（设计里的 `POST /api/system/smoke/jira-lookup` 未实现） |
 | 08 runtime 链路 | ❌ | dev 在线但缺 `build:doris`（同第 2 条） |
 | 12 飞书 | ❌ | lark-cli 已装未登录（同第 1 条） |
-| 10 / 11 / 15 核心链路 | ⏭️ | 未自动化，见第 6 条 |
+| 10 / 11 / 15 核心链路 | ⏭️ | 未自动化，见第 7 条 |
 
-6. **设计缺口：`POST /api/tasks` 建的任务不会自动派发**。跑冒烟时核实：只有 Jira 入库、飞书入库、频道草案确认三条入口会调 `scheduleCodeLocate`；通过 REST（也就是 `foreman task new`）建的任务停在 `triaging`，不会起会话。所有场景文档（S01/S02/S04）都只描述了那三条入口，createTask 之后该做什么没有任何场景定义，所以这既是实现缺口也是设计缺口。M1 的 268 个用例都不覆盖这一点，全绿并不矛盾。建议按 OpenLogos 走一个变更提案补上，而不是在部署期临时改代码。核心链路冒烟（10/11/15）因此也没自动化。
+6. **设计缺口：基线分支是仓库级写死的，应当由分流卡给出**（2026-09-16 跑 T-6 时暴露）。`center.yaml` 的 `repo_base_branch` 只按仓库配一个值（`selectdb/selectdb-core` → `selectdb-cloud-4.0`），worktree 一律从它拉。但每个单要改的分支各不相同：T-6 的 search 降级代码在 `branch-selectdb-doris-4.1`，T-5 的 SNII 只在 `branch-hotfix-selectdb-cloud-4.1.7-minimax-rows`，T-1 是 cloud-26.1.3。结果是 agent 在 worktree 里根本找不到目标代码，只能自己去别的分支上看。分流卡已经能判断目标分支（T-5 的定位结论里就写了），缺的是把它作为 `baseBranch` 传给 `worktree.create`、并允许在拍板时覆盖。建议按 OpenLogos 走变更提案：`TriageArtifact` 增加 `targetBranch`，分流卡与 `decideApproval.overrides` 同步增加该字段。
+
+7. **设计缺口：`POST /api/tasks` 建的任务不会自动派发**。跑冒烟时核实：只有 Jira 入库、飞书入库、频道草案确认三条入口会调 `scheduleCodeLocate`；通过 REST（也就是 `foreman task new`）建的任务停在 `triaging`，不会起会话。所有场景文档（S01/S02/S04）都只描述了那三条入口，createTask 之后该做什么没有任何场景定义，所以这既是实现缺口也是设计缺口。M1 的 268 个用例都不覆盖这一点，全绿并不矛盾。建议按 OpenLogos 走一个变更提案补上，而不是在部署期临时改代码。核心链路冒烟（10/11/15）因此也没自动化。
