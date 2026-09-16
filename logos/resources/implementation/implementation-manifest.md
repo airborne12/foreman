@@ -242,3 +242,16 @@ scripts/build.sh          先构建面板再打三个单文件 bundle
 | 超时检查会覆盖真实分流卡 | `watchCodeLocateTimeouts` 对超时会话一律发降级卡，降级卡按 task_id upsert 会清空已交付的代码位置；planned 会话 started_at 为空永远不超时 | 超时按 `COALESCE(started_at, created_at)`，并纳入 waiting_input；已有非降级分流卡的会话按 done 收尾、关闭 origin=hook 的问题，不再降级 |
 
 用例：新增 UT-S01-21（并发闸门与补派）、UT-S01-22（planned 超时、已交付不降级）；UT-S07-29 的 fake 改为真实的 `blocked + idle` 收尾。
+
+### 首次跑通实现会话（T-6 / DORIS-29010，2026-09-16）
+
+第一次把一个真实 Jira 单从拍板跑到产出 PR。提问-回答、超时-续接、审批-否决-重报这三条人机交互链路都在生产上验证过了，同时暴露四个问题：
+
+| 问题 | 现象 | 处理 |
+|------|------|------|
+| 后台会话会卡死在权限确认框 | auto mode 的分类器连续拦下 3 条命令后弹确认框（日志尾部只剩 "Esc to cancel · Tab to amend"），后台没人能点，会话挂在 `blocked/waiting` | 加 `agents.<name>.disallowedTools`（只收紧不放权，`--disallowedTools=` 同样要用 = 写法）。`git push` 不进黑名单——推送已由 `request_approval` 门控，批准后要靠 agent 自己推，禁了反而断了正路。临时解法是回答问题触发续接，实测 stop + `--bg --resume <UUID>` 能把 blocked 的会话救回来 |
+| 推送目标是公司仓库 | `worker.yaml` 的 `repos.<name>.pushRemote` 没配，worktree 里只有 `origin`（selectdb/selectdb-core），agent 申请 PR 时自然就写了 origin | 本次在 dev 上加了 `fork` remote 指向个人 fork（airborne12/selectdb-core，private），否决审批并要求改推 fork、再从 fork 向上游提 PR。根治：`pushRemote` 要在部署时配上，`create_pr` 审批卡应显示推送目标 |
+| `.foreman/` 会被提交进 PR | 上下文包与会话日志不在 Doris 的 .gitignore 里，agent 一句 `git add -A` 就会带上 | 建 worktree 时写 worktree 自己的 info/exclude（不动仓库的 .gitignore） |
+| agent 自己轮询审批结果 | 审批 30 分钟超时后 agent 打算「每 15–20 分钟醒一次查审批」，白烧额度 | 告知其结束本轮进入空闲：批准后中心会通过续接把结果送回会话（EX-22.1 本就如此设计） |
+
+本地验证的现实约束：4.1 基线要 google-cloud-cpp 2.45（oauth2）与 thrift 0.24，机器上 8 套预编译 thirdparty 都没有，BE UT 跑不了（见部署报告第 7 条）。最终采用的口径是「改动 TU 的 `clang++ -fsyntax-only` + clang-format + `diff --check`」，并要求在 PR 描述里写明本地未跑 UT、需 CI 验证。
