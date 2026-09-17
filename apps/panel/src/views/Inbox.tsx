@@ -150,7 +150,26 @@ function ApprovalCard({ a, runtimes, selected, busy, act }: any) {
           )}
         </>
       ) : (
-        <textarea rows={Math.min(10, (a.body ?? '').split('\n').length + 1)} value={body} onChange={(e) => setBody(e.target.value)} style={{ marginTop: 8, fontFamily: 'var(--mono)', fontSize: 12 }} />
+        <>
+          {/* 执行摘要：拍板前要看的是「到底会对什么东西做什么」，这些字段原来只在 payload 里，面板不显示 */}
+          {(() => {
+            const rows: Array<[string, string]> = ([
+              ['仓库', p.repo], ['推送到', p.pushRemote ?? p.pushUrl], ['源分支', p.head], ['目标分支', p.base],
+              ['提交', typeof p.commit === 'string' ? p.commit.slice(0, 12) : p.commit], ['执行方式', p.executor],
+            ] as Array<[string, unknown]>).filter(([, v]) => typeof v === 'string' && v).map(([k, v]) => [k, String(v)]);
+            return rows.length ? (
+              <div className="grid2" style={{ marginTop: 8 }}>
+                {rows.map(([k, v]) => <div className="field" key={k}><label>{k}</label><input readOnly value={v} /></div>)}
+              </div>
+            ) : null;
+          })()}
+          {/* 正文默认就能读完，不要塞进输入框让人以为是待填项 */}
+          <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap', maxHeight: 360, overflowY: 'auto' }}>{body}</pre>
+          <details style={{ marginTop: 6 }}>
+            <summary>改写正文后执行</summary>
+            <textarea rows={Math.min(16, (a.body ?? '').split('\n').length + 1)} value={body} onChange={(e) => setBody(e.target.value)} style={{ marginTop: 6, fontFamily: 'var(--mono)', fontSize: 12 }} />
+          </details>
+        </>
       )}
 
       {rejecting && <input placeholder="否决原因（可空）" value={comment} onChange={(e) => setComment(e.target.value)} style={{ marginTop: 8 }} />}
