@@ -1,16 +1,19 @@
 /**
- * S06 单元测试：UT-S06-01 ~ UT-S06-29（来源：logos/resources/test/core-S06-test-cases.md）
+ * S06 单元测试：UT-S06-01 ~ UT-S06-36（来源：logos/resources/test/core-S06-test-cases.md）
  * 审批创建与信任快照、双通道决定、信任升降级、执行/作废/补偿。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { withReport } from '../helpers/reporter.js';
-import { bootTestApp, http, type TestApp } from '../helpers/testApp.js';
+import { bootTestApp, http, TEST_TOKEN, type TestApp } from '../helpers/testApp.js';
+import { FakeWorker } from '../helpers/fakeWorker.js';
 import { seedTask, seedRuntime, seedSession } from '../helpers/seed.js';
 import { sha256, REVOCABLE_ACTIONS } from '../../apps/center/src/domain/approvals.js';
 import { Intake } from '../../apps/center/src/domain/intake.js';
 
 let app: TestApp;
 let taskId: string;
+/** 需要真实在线 runtime 的用例才用（拉起调度员等）；每个用例结束后断开 */
+const workers: FakeWorker[] = [];
 const trust = (type: string, patch: Record<string, unknown>) => app.db.query(`UPDATE trust_counters SET ${Object.keys(patch).map((k, i) => `${k}=$${i + 2}`).join(', ')} WHERE action_type=$1`, [type, ...Object.values(patch)]);
 const counter = async (type: string) => app.db.one<any>('SELECT * FROM trust_counters WHERE action_type=$1', [type]);
 const request = (actionType: string, body = 'x', extra: Record<string, unknown> = {}) => app.approvals.request({ taskId, actionType: actionType as any, title: `t-${actionType}`, body, payload: { taskKey: 'T-231' }, executor: 'center', ...extra });
@@ -27,7 +30,68 @@ const mcp = (token: string, tool: string, args: Record<string, unknown>) => fetc
 
 beforeAll(async () => { app = await bootTestApp(); });
 afterAll(async () => { await new Promise((r) => setTimeout(r, 300)); await app.close(); });
-beforeEach(async () => { await http(app, 'POST', '/__test/reset'); taskId = await seedTask(app.db, { key: 'T-231', state: 'running', runtime: 'dev' }); });
+beforeEach(async () => {
+  for (const w of workers.splice(0)) w.close();
+  await new Promise((r) => setTimeout(r, 50));
+  await http(app, 'POST', '/__test/reset');
+  taskId = await seedTask(app.db, { key: 'T-231', state: 'running', runtime: 'dev' });
+});
+
+describe('S06 1.5 决定后的承接（等待者已不在）', () => {
+  const channelMsgs = async () => (await app.db.query<any>(`SELECT text, payload FROM messages WHERE channel_id IS NOT NULL AND kind='system' AND payload->>'reason'='approval_decided_no_waiter' ORDER BY created_at`)).rows;
+
+  it('UT-S06-33: 否决且没有等待者时，理由与上下文进入频道并由调度员接手', () => withReport('UT-S06-33', async () => {
+    // 必须是真实连上的 runtime：只往表里 seed 一行的话 hub 认为它不在线，拉不起调度员
+    const w = new FakeWorker(app.ws, TEST_TOKEN); await w.connect(); workers.push(w);
+    await w.register({ name: 'center', labels: ['text'], agents: { claude: { bin: 'fake-claude', maxConcurrent: 3 } } });
+    await new Promise((r) => setTimeout(r, 100));
+    const sid = await seedSession(app.db, { taskId, runtime: 'center', agent: 'claude', kind: 'implement', state: 'done' });
+    const a = await request('create_pr', '推送 foreman/T-231 并建 PR', { sessionId: sid, executor: 'agent' });
+    const r = await decide(a.key, { decision: 'reject', bodyHash: a.body_hash, comment: '推送目标应该是我自己的 fork' });
+    expect(r.status).toBe(200);
+    for (let i = 0; i < 30 && !(await channelMsgs()).length; i++) await new Promise((x) => setTimeout(x, 100));
+    const msgs = await channelMsgs();
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].text).toContain(a.key);
+    expect(msgs[0].text).toContain('推送目标应该是我自己的 fork');
+    expect(msgs[0].payload.approved).toBe(false);
+    // 频道里没有调度员 → 拉起一个来接住讨论
+    const d = await app.db.one<any>(`SELECT kind, state FROM sessions WHERE kind='dispatcher' ORDER BY created_at DESC LIMIT 1`);
+    expect(d).not.toBeNull();
+  }));
+
+  it('UT-S06-34: 批准但等待者已不在且会话不可续接时，同样进入频道', () => withReport('UT-S06-34', async () => {
+    // 只承接要 agent 接手的动作；会话已被判失联（不可续接）
+    await seedRuntime(app.db, { name: 'dev' });
+    const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'claude', kind: 'implement', state: 'lost' });
+    const a = await request('create_pr', '推送并建 PR', { sessionId: sid, executor: 'agent' });
+    const r = await decide(a.key, { decision: 'approve', bodyHash: a.body_hash });
+    expect(r.status).toBe(200);
+    for (let i = 0; i < 30 && !(await channelMsgs()).length; i++) await new Promise((x) => setTimeout(x, 100));
+    const msgs = await channelMsgs();
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].payload.approved).toBe(true);
+  }));
+
+  it('UT-S06-36: 中心执行器代跑的动作（如 jira_comment）批准后不进频道', () => withReport('UT-S06-36', async () => {
+    const a = await request('jira_comment', '回写进展');
+    await decide(a.key, { decision: 'approve', bodyHash: a.body_hash });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(await channelMsgs()).toHaveLength(0);
+  }));
+
+  it('UT-S06-35: 有等待者时保持原行为，不重复送进频道', () => withReport('UT-S06-35', async () => {
+    const { token } = await mcpToken();
+    const p = mcp(token, 'request_approval', { taskKey: 'T-231', actionType: 'create_pr', title: 't', body: 'b' });
+    await new Promise((r) => setTimeout(r, 300));
+    const a = await app.db.one<any>(`SELECT key, body_hash FROM approvals WHERE action_type='create_pr' AND status='pending' ORDER BY created_at DESC LIMIT 1`);
+    await decide(a.key, { decision: 'reject', bodyHash: a.body_hash, comment: '不用做了' });
+    const out = await p;
+    expect(out.result.structuredContent.approved).toBe(false);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(await channelMsgs()).toHaveLength(0);
+  }));
+});
 
 describe('S06 1.1 审批创建与信任快照', () => {
   it('UT-S06-01: 创建审批记录 body_hash 与 trust 快照', () => withReport('UT-S06-01', async () => {

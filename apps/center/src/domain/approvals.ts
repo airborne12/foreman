@@ -9,7 +9,7 @@ import type { EventBus } from '../events.js';
 import { ApiError, APPROVAL_WAIT_MINUTES, type ActionType, type CenterConfig } from '@foreman/shared';
 import type { Notifications } from './notifications.js';
 
-export type ApprovalDecision = { approved: boolean; via: 'panel' | 'feishu' | 'auto' | null; finalBody: string | null; reason: 'rejected' | 'timeout' | 'superseded' | null; comment: string | null; overrides?: Record<string, unknown> | null };
+export type ApprovalDecision = { approved: boolean; via: 'panel' | 'feishu' | 'auto' | null; finalBody: string | null; reason: 'rejected' | 'timeout' | 'superseded' | null; comment: string | null; overrides?: Record<string, unknown> | null; /** 决定时是否有人正阻塞等这个结果；没有的话要另找地方承接 */ hadWaiter?: boolean };
 
 export interface ApprovalRow {
   id: string; key: string; task_id: string; session_id: string | null; action_type: ActionType; status: string; title: string; body: string; body_hash: string;
@@ -43,6 +43,8 @@ export class Approvals {
   registerCompensator(type: ActionType, fn: ActionCompensator) { this.compensators.set(type, fn); }
   hasExecutor(type: ActionType) { return this.executors.has(type); }
   afterDecided(fn: (a: ApprovalRow, d: ApprovalDecision) => Promise<void>) { this.onDecided.push(fn); }
+  /** 是否有人正阻塞等这个审批结果（MCP request_approval）。没有的话，决定必须另找地方承接，否则任务僵死 */
+  hasWaiter(approvalId: string) { return this.waiters.has(approvalId); }
 
   async byKey(key: string, client?: Queryable): Promise<ApprovalRow | null> { return this.db.one<ApprovalRow>(`${APPROVAL_WITH_TASK} WHERE a.key=$1`, [key], client); }
 
@@ -144,7 +146,8 @@ export class Approvals {
       const t = input.decision === 'approve' ? (input.via === 'feishu' ? `${a.key} 已确认（信任 ${updated.trust.streak}/${this.cfg.trust.threshold}），正在执行` : `${a.key} 已在面板确认`) : `${a.key} 已否决，该类型信任计数已清零`;
       await this.notifications.send({ kind: 'reply', target: this.cfg.feishu.owner_open_id ?? 'owner', text: t, replyTo: updated.fresh.feishu_message_id, refType: 'approval', refId: a.id });
     }
-    const decision: ApprovalDecision = { approved: input.decision === 'approve', via: input.via, finalBody, reason: input.decision === 'approve' ? null : 'rejected', comment: input.comment ?? null, overrides: input.overrides ?? null };
+    // hadWaiter 必须在唤醒前取：唤醒会把等待者从表里删掉，钩子再查就永远是 false
+    const decision: ApprovalDecision = { approved: input.decision === 'approve', via: input.via, finalBody, reason: input.decision === 'approve' ? null : 'rejected', comment: input.comment ?? null, overrides: input.overrides ?? null, hadWaiter: this.waiters.has(a.id) };
     // 唤醒 MCP 等待者
     const w = this.waiters.get(a.id); if (w) { this.waiters.delete(a.id); w.cancel(); w.resolve(decision); }
     if (decision.approved) await this.execute(updated.fresh, finalBody, false);

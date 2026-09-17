@@ -86,20 +86,24 @@ export class Runtimes {
     const rt = await this.byName(name);
     if (!rt) return;
     const now = this.clock.now();
+    const lost: Array<{ id: string; task_id: string | null; kind: string }> = [];
     await this.db.tx(async (c) => {
       const reported = new Map(sessions.map((s) => [s.sessionId, s]));
-      const active = await c.query<{ id: string; state: string }>(`SELECT id, state FROM sessions WHERE runtime_id=$1 AND state IN ('planned','running','waiting_input')`, [rt.id]);
+      const active = await c.query<{ id: string; state: string; task_id: string | null; kind: string }>(`SELECT id, state, task_id, kind FROM sessions WHERE runtime_id=$1 AND state IN ('planned','running','waiting_input')`, [rt.id]);
       for (const s of active.rows) {
         const rep = reported.get(s.id);
         if (!rep) {
           await c.query(`UPDATE sessions SET state='lost', reachable=true, ended_at=$2, updated_at=$2 WHERE id=$1`, [s.id, now]);
           // 会话已经不在了，它推断出来的问题没人能回答，留在收件箱只是噪音（EX-19.1 的问题才是 origin=hook）
           await c.query(`UPDATE questions SET status='timeout' WHERE session_id=$1 AND status='open' AND origin='hook'`, [s.id]);
+          if (s.task_id) lost.push({ id: s.id, task_id: s.task_id, kind: s.kind });
         } else {
           await c.query(`UPDATE sessions SET state=$2, reachable=true, agent_session_id=COALESCE($3, agent_session_id), updated_at=$4 WHERE id=$1`, [s.id, rep.state, rep.agentSessionId ?? null, now]);
         }
       }
     });
+    // 善后要调 dispatch / intake，这里够不到；把失联清单交给调用方处理，否则任务会无声僵死
+    return lost;
   }
 
   async list() {

@@ -136,6 +136,36 @@ export class Channels {
     return { message: serializeMessage(m, null, c.slug), handling: 'dispatcher' as const };
   }
 
+  /**
+   * 把一件需要人和 agent 继续商量的事送进任务所属频道，并让调度员接住。
+   * 审批被否决、会话失联这类情况，光在任务线程写一行系统消息没人接得住——
+   * 任务会僵死在那里，讨论只能发生在平台之外。频道 + 调度员本来就是干这个的。
+   */
+  async escalateToChannel(taskId: string, text: string, payload: Record<string, unknown> = {}) {
+    const t = await this.db.one<any>(`SELECT t.id, t.key, t.channel_id FROM tasks t WHERE t.id=$1`, [taskId]);
+    if (!t) return { handled: 'no_task' as const };
+    const c = await this.db.one<any>('SELECT * FROM channels WHERE id=$1', [t.channel_id]);
+    if (!c) return { handled: 'no_channel' as const };
+    const now = this.clock.now();
+    const m = await this.db.one<any>(`INSERT INTO messages (channel_id, task_id, kind, author, text, payload, created_at) VALUES ($1,$2,'system','system',$3,$4,$5) RETURNING *`,
+      [c.id, t.id, text, JSON.stringify({ level: 'warn', taskKey: t.key, ...payload }), now]);
+    await this.events.record(this.db.pool, { type: 'message.new', channelId: c.id, payload: { channel: c.slug, message: serializeMessage(m, t.key, c.slug) } });
+    this.events.flush();
+
+    const active = await this.activeDispatcher(c.id);
+    if (active) {
+      this.hub.send(active.runtime_name, 'session.resume', { sessionId: active.id, text });
+      await this.db.query(`UPDATE sessions SET last_activity_at=$2, state=CASE WHEN state IN ('done','stopped') THEN 'running' ELSE state END, updated_at=$2 WHERE id=$1`, [active.id, now]);
+      return { handled: 'resumed' as const, channel: c.slug };
+    }
+    const r = await this.dispatch.startTextSession({ channelId: c.id, kind: 'dispatcher', prompt: `${await this.dispatcherPrompt(c)}\n\n【需要你接手的事】\n${text}` });
+    if ('error' in r) {
+      await this.channelSystem(c, `调度员不可用（${r.detail}），上面这件事需要你手动处理`, 'warn');
+      return { handled: 'dispatcher_unavailable' as const, channel: c.slug };
+    }
+    return { handled: 'started' as const, channel: c.slug };
+  }
+
   async activeDispatcher(channelId: string) {
     return this.db.one<any>(`SELECT s.*, r.name AS runtime_name FROM sessions s JOIN runtimes r ON r.id=s.runtime_id
       WHERE s.channel_id=$1 AND s.kind='dispatcher' AND s.state IN ('planned','running','waiting_input') ORDER BY s.created_at DESC LIMIT 1`, [channelId]);

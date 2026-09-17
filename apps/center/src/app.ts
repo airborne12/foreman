@@ -113,6 +113,34 @@ export async function createApp(config: CenterConfig, opts?: { clock?: Clock; fe
   workerHub.on('session.state', async (conn, env) => dispatch.onSessionState(conn.name, WORKER_TO_CENTER['session.state'].parse(env.payload)));
   workerHub.on('error', async (conn, env) => dispatch.onWorkerError(conn.name, env));
   workerHub.onRegistered(async (name, replayed) => { await intake.onRuntimeOnline(name); await dispatch.onRuntimeOnline(name, replayed); });
+  // 会话失联（worker 重启等）：没有善后的话任务会无声僵死在 triaging / running
+  workerHub.onSessionsLost(async (name, lost) => {
+    for (const s of lost) {
+      if (!s.task_id) continue;
+      const t = await db.one<{ key: string }>('SELECT key FROM tasks WHERE id=$1', [s.task_id]);
+      if (s.kind === 'code_locate') await intake.emitTriage(s.task_id, s.id, { degraded: true, degradedReason: `代码定位会话失联（${name} 上已不存在），可重试` });
+      else await dispatch.failTask(s.task_id, `会话失联：${name} 上已不存在该会话`, ['retry', 'switch_agent', 'abandon']);
+      await channels.escalateToChannel(s.task_id, `${t?.key ?? '任务'} 的${s.kind === 'code_locate' ? '代码定位' : ''}会话在 ${name} 上失联（worker 重启或进程退出），已按降级处理。需要的话在这里说一声怎么继续。`, { reason: 'session_lost', sessionKind: s.kind });
+    }
+  });
+
+  // 审批决定后：等待者已不在时，把决定连同上下文送进频道，别让任务僵死（S06 Step 20 之后的分支）
+  approvals.afterDecided(async (a, d) => {
+    if (d.via === 'auto' || !a.task_id) return;
+    if (d.hadWaiter) return; // 有人正阻塞等这个结果，原路返回即可
+    if (a.action_type === 'triage_confirm') return; // 分流卡的去向由 onApprovalDecided 处理
+    // 只承接「要 agent 接着做」的动作。jira_comment 这类由中心执行器代跑，批准后自有执行链路与失败卡，
+    // 再往频道推一条只会盖掉真正该看的失败提示（口径与 approvals.execute 一致）
+    const byAgent = (a.payload as any)?.executor === 'agent' || ((a.payload as any)?.executor !== 'center' && a.session_id);
+    if (!byAgent) return;
+    if (d.approved) {
+      const s = a.session_id ? await db.one<any>('SELECT state FROM sessions WHERE id=$1', [a.session_id]) : null;
+      if (s && ['done', 'stopped', 'failed'].includes(s.state)) return; // 可续接，dispatch 已送回「已批准」
+    }
+    const verb = d.approved ? '已批准' : '已否决';
+    const reason = d.comment ? `\n理由：${d.comment}` : '';
+    await channels.escalateToChannel(a.task_id, `审批 ${a.key}（${a.action_type}）${verb}，但关联会话已经结束，没人接得住这个结果。${reason}\n原正文摘要：${(a.final_body ?? a.body).slice(0, 500)}\n请在这里决定下一步怎么做。`, { reason: 'approval_decided_no_waiter', approvalKey: a.key, approved: d.approved });
+  });
 
   // 调度作业（S05 Step 21；通知重试）
   scheduler.register('heartbeat-check', HEARTBEAT_SECONDS * 1000, async () => ({ offline: await runtimes.checkHeartbeats() }));

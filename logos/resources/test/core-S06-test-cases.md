@@ -53,6 +53,10 @@
 | UT-S06-27 | 补偿可撤回动作成功 → actions reverted | Step 32 | fake 飞书回帖可撤回 | revoke | status reverted，compensation.status reverted |
 | UT-S06-28 | 不可撤回动作 → not_revocable 且降级仍生效 | EX-32.1 | 动作为 create_pr | revoke | compensation not_revocable；trust 已降级；收件箱人工处理项 |
 | UT-S06-29 | 审批 30 分钟过期 → MCP 返回 timeout，状态保持 pending | 跨场景约定；S03 EX-22.1 | 注入时钟 | 推进 30 分钟 | request_approval 返回 approved=false reason=timeout；approvals 仍 pending |
+| UT-S06-33 | 需 agent 接手的动作否决且没有等待者时，否决理由与上下文进入任务所属频道并由调度员接手 | S06 Step 20 分支；真实使用 T-6 连撞三次 | create_pr 审批 pending，关联会话已 done（无 MCP 等待者） | decide reject 带 comment | 频道出现系统消息，含审批编号、任务与来源、否决理由原文；已有调度员则 session.resume 送入，否则拉起调度员会话 |
+| UT-S06-34 | 批准但等待者已不在时同样承接，不静默丢弃 | S06 Step 20 分支 | 同上 | decide approve | 会话可续接则续接送入「已批准」；不可续接则同样进入频道由调度员接手 |
+| UT-S06-36 | 中心执行器代跑的动作批准后不进频道 | S06 Step 20；approvals.execute 的 executor 口径 | jira_comment 审批 pending（executor=center） | decide approve | 频道不新增消息——执行结果由执行链路与失败卡承接，避免盖掉「回写失败」提示 |
+| UT-S06-35 | 有等待者时保持原行为，不重复送进频道 | S06 Step 20 | 会话正阻塞在 request_approval | decide reject | MCP 返回 rejected；频道不新增系统消息，也不拉起调度员 |
 
 ## 二、场景测试用例
 

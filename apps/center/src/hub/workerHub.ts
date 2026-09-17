@@ -30,6 +30,8 @@ export class WorkerHub {
   readonly sentLog: Array<{ name: string; env: Envelope }> = [];
   /** runtime 注册完成后的钩子（补派排队作业等）；replayed 为随 ack 补发的离线指令 */
   private registeredHooks: Array<(name: string, replayed: Envelope[]) => Promise<void> | void> = [];
+  /** 对账发现会话失联后的钩子：本类够不到 dispatch / intake，善后交给接线层，否则任务会无声僵死 */
+  private sessionsLostHooks: Array<(name: string, lost: Array<{ id: string; task_id: string | null; kind: string }>) => Promise<void> | void> = [];
 
   constructor(
     private deps: { db: Db; clock: Clock; runtimes: Runtimes; worktrees: Worktrees; workerToken: string; log: Logger; highWatermark: number },
@@ -37,6 +39,7 @@ export class WorkerHub {
 
   on(type: string, h: CommandHandler) { this.handlers.set(type, h); }
   onRegistered(h: (name: string, replayed: Envelope[]) => Promise<void> | void) { this.registeredHooks.push(h); }
+  onSessionsLost(h: (name: string, lost: Array<{ id: string; task_id: string | null; kind: string }>) => Promise<void> | void) { this.sessionsLostHooks.push(h); }
 
   isOnline(name: string) { return this.conns.has(name); }
 
@@ -125,7 +128,8 @@ export class WorkerHub {
       }
       case 'session.list': {
         const l = WORKER_TO_CENTER['session.list'].parse(env.payload);
-        await this.deps.runtimes.reconcileSessions(conn.name, l.sessions);
+        const lost = await this.deps.runtimes.reconcileSessions(conn.name, l.sessions);
+        if (lost?.length) for (const h of this.sessionsLostHooks) await h(conn.name, lost);
         return;
       }
       case 'worktree.gc.result': {
