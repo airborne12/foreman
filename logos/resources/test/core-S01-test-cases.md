@@ -45,6 +45,7 @@
 | UT-S01-19 | 当日 approval 推送达 30 条后新通知标 deferred | S01 EX-28.2 | 当日 sent 30 条 | 新审批 | notifications.status = deferred，approvals.feishu_deferred = true |
 | UT-S01-20 | 发送失败重试最多 3 次且退避 5 分钟 | S01 EX-28.1 | fake lark-cli 返回失败 | 触发发送 | attempts 递增到 3，next_attempt_at 间隔 5 分钟，最终 failed |
 | UT-S01-21 | 代码定位受每家 agent 每 runtime 并发上限约束，名额释放后补派 | 架构 §额度保护；S01 Step 12–15 | 3 个 code-locate 作业排队；dev 注册时 claude、codex 上限各 1 | 注册 dev → 其中一个会话 failed | 注册后只下发 2 个 worktree.create，planned 会话 agent 为 claude 与 codex 各 1，1 个作业仍 queued；会话结束后补发第 3 个 worktree.create |
+| UT-S01-23 | 分流结论的目标分支落进分流卡与任务，并出现在拍板卡上 | mcp.yaml → TriageArtifact.targetBranch；0002 迁移 | 任务 triaging | deliver triage 带 targetBranch，再补一次不带该字段的降级卡 | triage_cards.base_branch 与 tasks.base_branch 均为该分支；审批 payload.baseBranch 一致且 summaryLine 含「基线 …」；补齐降级卡不冲掉已判断出的分支 |
 | UT-S01-22 | 代码定位 15 分钟超时：planned 也算；已交付分流卡的不降级 | S01 EX-22.1 | ① planned 会话 created_at = now-16min，started_at 为空；② 已交付非降级分流卡、停在 waiting_input 的会话，带一个 origin=hook 的问题 | tick(progress-watch) | ① sessions.state = stopped，降级卡原因含"超时"；② sessions.state = done，分流卡仍 degraded=false 且代码位置不变，钩子问题 status = timeout |
 
 ## 二、场景测试用例

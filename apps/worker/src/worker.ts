@@ -12,7 +12,7 @@ import { execFile } from 'node:child_process';
 import { Envelope, makeEnvelope, CENTER_TO_WORKER, type WorkerConfig } from '@foreman/shared';
 import { runGc, diskUsedRatio } from './gc.js';
 import { foremanHome } from './config.js';
-import { createWorktree, WorktreeError, type GitRunner } from './worktree.js';
+import { createWorktree, pickBuildEnv, WorktreeError, type GitRunner } from './worktree.js';
 import { JiraClient, loadJiraConfig, runJiraJob } from './jira.js';
 import { ADAPTERS, SessionStartError, tail, type TrackedSession, type AgentAdapter, type AdapterOptions } from './sessions.js';
 
@@ -150,8 +150,9 @@ export class Worker {
           const repo = this.opts.config.repos[input.repo];
           if (!repo) { reply = makeEnvelope('error', { code: 'WORKTREE_FAILED', message: `本 runtime 未配置仓库 ${input.repo}`, retryable: false }, { ref: env.id }); break; }
           try {
-            const out = createWorktree({ ...input, buildEnv: this.opts.config.build_env[input.repo]?.default }, repo, this.opts.git);
-            reply = makeEnvelope('worktree.ready', out as unknown as Record<string, unknown>, { ref: env.id });
+            const picked = pickBuildEnv(this.opts.config.build_env[input.repo], input.baseBranch);
+            const out = createWorktree({ ...input, buildEnv: input.buildEnv ?? picked.env ?? undefined }, repo, this.opts.git);
+            reply = makeEnvelope('worktree.ready', { ...out, baseBranch: input.baseBranch, buildEnvMissing: !input.buildEnv && !picked.env } as unknown as Record<string, unknown>, { ref: env.id });
           } catch (e) {
             reply = makeEnvelope('error', { code: 'WORKTREE_FAILED', message: String((e as Error).message), retryable: e instanceof WorktreeError ? e.retryable : false }, { ref: env.id });
           }

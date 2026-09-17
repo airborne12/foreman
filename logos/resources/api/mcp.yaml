@@ -218,6 +218,10 @@ components:
             confidence: { type: number }
             candidates: { type: array, items: { type: string } }
         suggestedPath: { type: string }
+        targetBranch:
+          type: string
+          nullable: true
+          description: "目标代码所在分支。与仓库级默认基线不同时必须给出（如代码只在 branch-selectdb-doris-4.1 上），worktree 将从它拉；判不出留空，由拍板时指定或回退到仓库级默认"
         codeLocations:
           type: array
           maxItems: 8

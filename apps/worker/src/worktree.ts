@@ -23,6 +23,24 @@ export const realGit: GitRunner = (args, cwd) => execFileSync('git', args, { cwd
 
 export function defaultBranchName(taskKey: string) { return `foreman/${taskKey}`; }
 
+/**
+ * 按基线分支挑构建环境（thirdparty、jdk 等）。
+ * `build_env.<repo>` 的键是分支族，挑选顺序：与分支同名 > 最长前缀匹配 > `default`。
+ * 一个都没有时返回 env=null，由 worker 在 worktree.ready 里回报 buildEnvMissing——
+ * 拿不匹配的依赖硬编译只会在链接阶段失败，不如明确降级（T-6 在 4.1 上就是这么撞的）。
+ */
+export function pickBuildEnv(byBranch: Record<string, Record<string, string>> | undefined, baseBranch?: string): { env: Record<string, string> | null; matched: string | null } {
+  if (!byBranch) return { env: null, matched: null };
+  if (baseBranch) {
+    if (byBranch[baseBranch]) return { env: byBranch[baseBranch]!, matched: baseBranch };
+    const prefix = Object.keys(byBranch)
+      .filter((k) => k !== 'default' && baseBranch.includes(k))
+      .sort((a, b) => b.length - a.length)[0];
+    if (prefix) return { env: byBranch[prefix]!, matched: prefix };
+  }
+  return byBranch.default ? { env: byBranch.default, matched: 'default' } : { env: null, matched: null };
+}
+
 export function createWorktree(input: WorktreeCreateInput, repo: { main: string; worktreeRoot: string }, git: GitRunner = realGit): WorktreeReadyOutput {
   const branchName = input.branchName ?? defaultBranchName(input.taskKey);
   const path = resolve(repo.worktreeRoot, input.taskKey);

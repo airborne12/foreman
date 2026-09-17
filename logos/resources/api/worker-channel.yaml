@@ -156,7 +156,7 @@ components:
         buildEnv:
           type: object
           additionalProperties: { type: string }
-          description: "按分支族的构建环境（thirdparty、jdk 等）。worker 以 export K=\"V\" 写入 worktree 根目录的 custom_env.sh（Doris env.sh 会 source）；中心不传时 worker 用本机 worker.yaml 的 build_env.<repo>.default"
+          description: "按分支族的构建环境（thirdparty、jdk 等）。worker 以 export K=\"V\" 写入 worktree 根目录的 custom_env.sh（Doris env.sh 会 source）。中心不传时，worker 按 baseBranch 在 build_env.<repo> 下选档位：先找与分支同名的键，再找最长前缀匹配的键（如 branch-selectdb-doris-4.1 命中 4.1），都没有才用 default；连 default 都没有则该仓库不提供构建环境，worker 在 worktree.ready 中回报 buildEnvMissing=true，由中心据此降级（不要拿不匹配的依赖硬编译）"
         contextMarkdown: { type: string, description: "写入 .foreman/context.md 的上下文包" }
         taskJson: { type: object, additionalProperties: true, description: "写入 .foreman/task.json" }
         hooks:

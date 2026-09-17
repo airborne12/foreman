@@ -48,6 +48,8 @@
 | UT-S03-22 | 同一 commandId 重放不重复创建 worktree | worker-channel.yaml Envelope 幂等 | worker 已执行 cmd-1 | 再收 cmd-1 | 回放上次 worktree.ready，不再执行 git |
 | UT-S03-23 | 同任务重试复用已有 worktree | S03 Step 11 | worktrees 有 ready 行 | worktree.create reuseIfExists | worktree.ready.reused = true |
 | UT-S03-24 | worker 写入 .foreman/context.md、task.json，把 buildEnv 写进 custom_env.sh，并把 .foreman/ 挡在提交之外 | S03 Step 11 | 临时 git 仓库 | 执行 create，buildEnv = {DORIS_THIRDPARTY} | context.md、task.json 存在；custom_env.sh 含 `export DORIS_THIRDPARTY="…"`；未传 hooks 时不写 .claude/settings.json；worktree 的 info/exclude 含 `.foreman/` 且 `git status` 不再列出它（否则 agent 的 `git add -A` 会把上下文包与日志提交进 PR） |
+| UT-S03-32 | 拍板可覆盖基线分支，落到任务与决策记录 | approvals.yaml → decideApproval.overrides.baseBranch | 分流卡待拍板 | decide approve 带 overrides.baseBranch | tasks.base_branch 与 decision.baseBranch 为该分支；modified=true（覆盖即算修改，不计入信任） |
+| UT-S03-33 | 构建环境按基线分支匹配：同名 > 最长前缀 > default > 缺失 | worker-channel.yaml → buildEnv 说明 | build_env 配同名档、前缀档与 default | pickBuildEnv 传入不同分支 | 依次命中同名档、前缀档、default；无 default 时返回缺失（由 worktree.ready 回报 buildEnvMissing，中心据此降级） |
 | UT-S03-30 | claude --bg 启动参数、工具黑名单与会话 id 解析 | S03 Step 15；claude 2.1.26x 实测 | fake claude：`--bg` 输出 `backgrounded · 3f171235 · T-231-implement`，`agents --json --all` 返回该短 id 与完整 sessionId；配置 disallowedTools | session.start | 参数含 `--permission-mode auto`、`--strict-mcp-config`、`--mcp-config=<json>`、`--disallowedTools=<逗号分隔>`（都带 =，变长参数用空格写法会吞掉 prompt），prompt 仍是最后一个参数；agentSessionId 为完整 UUID，shortId 为 3f171235 |
 | UT-S03-31 | codex 启动带 workspace-write 沙箱，续接不带 -C | S03 Step 15；codex exec resume --help | — | codexStartArgs / codexResumeArgs | 启动含 `-C <cwd>` 与 `sandbox_mode="workspace-write"`；续接以 `exec resume` 开头、不含 `-C`、含 MCP 配置，最后两个参数为 threadId 与文本 |
 

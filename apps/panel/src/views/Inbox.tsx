@@ -136,6 +136,14 @@ function ApprovalCard({ a, runtimes, selected, busy, act }: any) {
                 {repoCandidates.map((r) => <option key={r} value={r}>{r}</option>)}
               </select>
             </div>
+            {/* 基线分支：仓库级默认常常不是任务要改的那条线，拍板时必须能看见并改 */}
+            <div className="field"><label>基线分支</label>
+              <input
+                value={ov.baseBranch ?? p.baseBranch ?? ''}
+                placeholder="留空＝用仓库默认基线"
+                onChange={(e) => setOv({ ...ov, baseBranch: e.target.value })}
+              />
+            </div>
             <div className="field"><label>runtime</label>
               <select value={ov.runtime ?? p.defaultRuntime ?? ''} onChange={(e) => setOv({ ...ov, runtime: e.target.value })}>
                 <option value="">（按路由规则）</option>

@@ -14,7 +14,7 @@ import { FakeWorker } from '../helpers/fakeWorker.js';
 import { seedTask, seedRuntime, seedSession, seedWorktree, runtimeId } from '../helpers/seed.js';
 import { fixtures, type FixtureCtx } from '../orchestration/fixtures.js';
 import { WorktreeCreate, SessionStart, WorkerConfig, makeEnvelope } from '@foreman/shared';
-import { createWorktree } from '../../apps/worker/src/worktree.js';
+import { createWorktree, pickBuildEnv } from '../../apps/worker/src/worktree.js';
 import { Worker } from '../../apps/worker/src/worker.js';
 import { Intake } from '../../apps/center/src/domain/intake.js';
 
@@ -249,6 +249,25 @@ describe('S03 1.4 worktree 与会话指令', () => {
     expect(readFileSync(excl, 'utf8')).toContain('.foreman/');
     expect(execFileSync('git', ['status', '--porcelain'], { cwd: out.path, encoding: 'utf8' })).not.toContain('.foreman');
   }));
+  it('UT-S03-32: 拍板可覆盖基线分支，落到任务与决策记录', () => withReport('UT-S03-32', async () => {
+    const { taskId, key, hash } = await pending('T-232');
+    const r = await http(app, 'POST', `/api/approvals/${key}/decide`, { decision: 'approve', bodyHash: hash, overrides: { baseBranch: 'branch-selectdb-doris-4.1' } });
+    expect(r.status).toBe(200);
+    const t = await app.db.one<any>('SELECT base_branch, decision FROM tasks WHERE id=$1', [taskId]);
+    expect(t.base_branch).toBe('branch-selectdb-doris-4.1');
+    expect(t.decision.baseBranch).toBe('branch-selectdb-doris-4.1');
+    expect(t.decision.modified).toBe(true); // 覆盖了基线分支即视为修改，不计入信任
+  }));
+
+  it('UT-S03-33: 构建环境按基线分支匹配（同名 > 最长前缀 > default > 缺失）', () => withReport('UT-S03-33', () => {
+    const byBranch = { 'branch-selectdb-doris-4.1': { DORIS_THIRDPARTY: '/tp/4.1' }, '4.0': { DORIS_THIRDPARTY: '/tp/4.0' }, default: { DORIS_THIRDPARTY: '/tp/def' } };
+    expect(pickBuildEnv(byBranch, 'branch-selectdb-doris-4.1').matched).toBe('branch-selectdb-doris-4.1');
+    expect(pickBuildEnv(byBranch, 'branch-selectdb-cloud-4.0-hotfix').matched).toBe('4.0');
+    expect(pickBuildEnv(byBranch, 'branch-未知线').matched).toBe('default');
+    expect(pickBuildEnv({ '4.1': { X: '1' } }, 'master')).toEqual({ env: null, matched: null });
+    expect(pickBuildEnv(undefined, 'master')).toEqual({ env: null, matched: null });
+  }));
+
   it('UT-S03-30: claude --bg 启动参数与会话 id 解析', () => withReport('UT-S03-30', async () => {
     const dir = mkdtempSync(resolve(tmpdir(), 'fclaude-'));
     const bin = resolve(dir, 'claude'); const log = resolve(dir, 'args.log');

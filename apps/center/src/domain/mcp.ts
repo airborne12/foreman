@@ -24,6 +24,8 @@ const TriageArtifact = z.object({
   effort: z.enum(['small', 'medium', 'large']).default('small'),
   repo: z.object({ name: z.string().nullable(), confidence: z.number().min(0).max(1), candidates: z.array(z.string()).optional() }).optional(),
   suggestedPath: z.string().max(2000).optional(),
+  /** 目标代码所在分支：与仓库级默认基线不同时由定位会话给出，worktree 据此拉取 */
+  targetBranch: z.string().max(200).nullable().optional(),
   codeLocations: z.array(z.object({ file: z.string(), line: z.number().int().optional(), symbol: z.string().optional(), why: z.string().optional() })).optional(),
 });
 const CandidatesArtifact = z.object({

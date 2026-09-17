@@ -149,6 +149,7 @@ paths:
                   properties:
                     path: { $ref: 'tasks.yaml#/components/schemas/TaskPath' }
                     repo: { type: string }
+                    baseBranch: { type: string, description: "覆盖 worktree 的基线分支：分流卡给出的目标分支不对、或 agent 没判断出来时在这里指定" }
                     runtime: { type: string }
                     agent: { $ref: 'tasks.yaml#/components/schemas/AgentName' }
                 comment: { type: string, nullable: true, description: "否决原因" }

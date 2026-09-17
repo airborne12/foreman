@@ -96,6 +96,10 @@ export const WorktreeReady = z.object({
   path: z.string(),
   branchName: z.string(),
   reused: z.boolean(),
+  /** 实际拉取的基线分支（中心据此核对是否与分流结论一致） */
+  baseBranch: z.string().optional(),
+  /** 该基线分支没有匹配的构建环境：中心要据此降级，不能让 agent 拿不匹配的依赖硬编译 */
+  buildEnvMissing: z.boolean().optional(),
 });
 export const WorktreeGc = z.object({
   policy: z.enum(['retain_days', 'high_watermark']),

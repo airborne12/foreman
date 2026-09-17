@@ -229,6 +229,20 @@ describe('S01 1.4 降级与通知', () => {
     expect(Number(n4.attempts)).toBe(3);
   }));
 
+  it('UT-S01-23: 分流结论给出的目标分支落进分流卡与任务，并出现在拍板卡上', () => withReport('UT-S01-23', async () => {
+    await seedRuntime(app.db, { name: 'dev', labels: ['build:doris', 'agent:claude'] });
+    const taskId = await seedTask(app.db, { key: 'T-720', state: 'triaging', runtime: 'dev' });
+    await app.intake.emitTriage(taskId, null, { tier: 'fix', effort: 'small', targetBranch: 'branch-selectdb-doris-4.1', codeLocations: [{ file: 'be/src/exprs/vsearch.cpp', line: 193, symbol: 'f', why: 'x' }] });
+    expect((await app.db.one<any>('SELECT base_branch FROM triage_cards WHERE task_id=$1', [taskId])).base_branch).toBe('branch-selectdb-doris-4.1');
+    expect((await app.db.one<any>('SELECT base_branch FROM tasks WHERE id=$1', [taskId])).base_branch).toBe('branch-selectdb-doris-4.1');
+    const a = await app.db.one<any>(`SELECT payload FROM approvals WHERE task_id=$1 AND action_type='triage_confirm'`, [taskId]);
+    expect(a.payload.baseBranch).toBe('branch-selectdb-doris-4.1');
+    expect(a.payload.summaryLine).toContain('基线 branch-selectdb-doris-4.1');
+    // 补齐降级卡时不带 targetBranch，不能把已判断出的分支冲掉
+    await app.intake.emitTriage(taskId, null, { tier: 'fix', effort: 'small', degraded: true, degradedReason: '重跑' });
+    expect((await app.db.one<any>('SELECT base_branch FROM triage_cards WHERE task_id=$1', [taskId])).base_branch).toBe('branch-selectdb-doris-4.1');
+  }));
+
   it('UT-S01-21: 代码定位受 agent 并发上限约束，名额释放后补派', () => withReport('UT-S01-21', async () => {
     for (const key of ['T-701', 'T-702', 'T-703']) {
       const id = await seedTask(app.db, { key, state: 'triaging' });

@@ -224,7 +224,10 @@ export class Intake {
   async sendWorktreeCreate(taskId: string, runtimeName: string, repo: string, purpose: 'code_locate' | 'implement' | 'review', fetchFirst = false) {
     const t = await this.db.one<any>('SELECT * FROM tasks WHERE id=$1', [taskId]);
     const cp = await this.db.one<any>('SELECT * FROM context_packs WHERE task_id=$1', [taskId]);
-    const baseBranch = this.cfg.repo_base_branch?.[repo] ?? 'master';
+    // 基线分支三级回退：任务（拍板确定）> 分流卡（定位会话判断）> 仓库级默认。
+    // 仓库级固定值对不上任务要改的分支时，agent 在 worktree 里根本找不到目标代码。
+    const card = await this.db.one<{ base_branch: string | null }>('SELECT base_branch FROM triage_cards WHERE task_id=$1', [taskId]);
+    const baseBranch = t.base_branch ?? card?.base_branch ?? this.cfg.repo_base_branch?.[repo] ?? 'master';
     const md = `# ${t.key} 上下文包\n\n## 需求原文\n${cp?.source_text ?? ''}\n\n## 仓库\n${repo}（${t.repo_source}）\n\n## Jira\n${cp?.jira ? JSON.stringify(cp.jira, null, 2) : '-'}\n\n## 代码定位\n${JSON.stringify(cp?.code_locations ?? [], null, 2)}\n${cp?.plan_doc ? `\n## 方案\n${cp.plan_doc}\n` : ''}`;
     const env = this.hub.send(runtimeName, 'worktree.create', {
       taskKey: t.key, repo, baseBranch, branchName: `foreman/${t.key}`, reuseIfExists: true, fetchFirst,
@@ -235,7 +238,7 @@ export class Intake {
   }
 
   /** deliver(triage)：分流卡 + 审批（Step 22–26）；降级卡补齐时原位更新（EX-12.1） */
-  async emitTriage(taskId: string, sessionId: string | null, triage: { tier?: string; effort?: string; repo?: { name: string | null; confidence: number; candidates?: string[] }; suggestedPath?: string; codeLocations?: any[]; degraded?: boolean; degradedReason?: string }) {
+  async emitTriage(taskId: string, sessionId: string | null, triage: { tier?: string; effort?: string; repo?: { name: string | null; confidence: number; candidates?: string[] }; targetBranch?: string | null; suggestedPath?: string; codeLocations?: any[]; degraded?: boolean; degradedReason?: string }) {
     const now = this.clock.now();
     const t = await this.db.one<any>(`SELECT t.*, c.slug AS channel_slug FROM tasks t JOIN channels c ON c.id=t.channel_id WHERE t.id=$1`, [taskId]);
     if (!t) return;
@@ -249,15 +252,17 @@ export class Intake {
     // ContextPack.codeLocations maxItems 8（tasks.yaml）：超出截断并记事件
     const allLocations = triage.codeLocations ?? [];
     const truncated = allLocations.length > 8;
-    const payload = { taskKey: t.key, tier, effort, repo: { name: repoName, source: repoSource, confidence: triage.repo?.confidence ?? null, candidates: triage.repo?.candidates ?? [] }, suggestedPath: triage.suggestedPath ?? '', codeLocations: allLocations.slice(0, 8), defaultRuntime, defaultAgent, degraded: !!triage.degraded, degradedReason: triage.degradedReason ?? null, summaryLine: `档位 ${tier} · 预估 ${effort} · 仓库 ${repoName ?? '待确认'} · runtime ${defaultRuntime ?? '-'} · agent ${defaultAgent}` };
+    // 目标分支：定位会话判断出来的优先，其次沿用任务上已有的（补齐降级卡时不要丢掉先前的判断）
+    const targetBranch = triage.targetBranch ?? t.base_branch ?? null;
+    const payload = { taskKey: t.key, tier, effort, repo: { name: repoName, source: repoSource, confidence: triage.repo?.confidence ?? null, candidates: triage.repo?.candidates ?? [] }, baseBranch: targetBranch, suggestedPath: triage.suggestedPath ?? '', codeLocations: allLocations.slice(0, 8), defaultRuntime, defaultAgent, degraded: !!triage.degraded, degradedReason: triage.degradedReason ?? null, summaryLine: `档位 ${tier} · 预估 ${effort} · 仓库 ${repoName ?? '待确认'} · 基线 ${targetBranch ?? '仓库默认'} · runtime ${defaultRuntime ?? '-'} · agent ${defaultAgent}` };
     await this.db.tx(async (c) => {
-      await c.query(`INSERT INTO triage_cards (task_id, tier, effort, repo_name, repo_confidence, repo_candidates, suggested_path, code_locations, default_runtime, default_agent, degraded, degraded_reason, session_id, created_at, updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)
-        ON CONFLICT (task_id) DO UPDATE SET tier=EXCLUDED.tier, effort=EXCLUDED.effort, repo_name=EXCLUDED.repo_name, repo_confidence=EXCLUDED.repo_confidence, repo_candidates=EXCLUDED.repo_candidates, suggested_path=EXCLUDED.suggested_path, code_locations=EXCLUDED.code_locations, default_runtime=EXCLUDED.default_runtime, default_agent=EXCLUDED.default_agent, degraded=EXCLUDED.degraded, degraded_reason=EXCLUDED.degraded_reason, session_id=COALESCE(EXCLUDED.session_id, triage_cards.session_id), updated_at=EXCLUDED.updated_at`,
-        [taskId, tier, effort, repoName, triage.repo?.confidence ?? null, triage.repo?.candidates ?? [], payload.suggestedPath, JSON.stringify(payload.codeLocations), defaultRuntime, defaultAgent, payload.degraded, payload.degradedReason, sessionId, now]);
+      await c.query(`INSERT INTO triage_cards (task_id, tier, effort, repo_name, repo_confidence, repo_candidates, base_branch, suggested_path, code_locations, default_runtime, default_agent, degraded, degraded_reason, session_id, created_at, updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)
+        ON CONFLICT (task_id) DO UPDATE SET tier=EXCLUDED.tier, effort=EXCLUDED.effort, repo_name=EXCLUDED.repo_name, repo_confidence=EXCLUDED.repo_confidence, repo_candidates=EXCLUDED.repo_candidates, base_branch=COALESCE(EXCLUDED.base_branch, triage_cards.base_branch), suggested_path=EXCLUDED.suggested_path, code_locations=EXCLUDED.code_locations, default_runtime=EXCLUDED.default_runtime, default_agent=EXCLUDED.default_agent, degraded=EXCLUDED.degraded, degraded_reason=EXCLUDED.degraded_reason, session_id=COALESCE(EXCLUDED.session_id, triage_cards.session_id), updated_at=EXCLUDED.updated_at`,
+        [taskId, tier, effort, repoName, triage.repo?.confidence ?? null, triage.repo?.candidates ?? [], targetBranch, payload.suggestedPath, JSON.stringify(payload.codeLocations), defaultRuntime, defaultAgent, payload.degraded, payload.degradedReason, sessionId, now]);
       await c.query(`UPDATE context_packs SET code_locations=$2, updated_at=$3, version=version+1 WHERE task_id=$1`, [taskId, JSON.stringify(payload.codeLocations), now]);
       if (truncated) await this.events.record(c, { type: 'context_pack.truncated', taskId, broadcast: false, payload: { taskKey: t.key, field: 'codeLocations', from: allLocations.length, to: 8 } });
-      await c.query(`UPDATE tasks SET state='pending_decision', repo_name=$2, repo_source=$3, repo_confidence=$4, repo_candidates=$5, path=$6, updated_at=$7 WHERE id=$1`, [taskId, repoName, repoSource, triage.repo?.confidence ?? null, triage.repo?.candidates ?? [], tier, now]);
+      await c.query(`UPDATE tasks SET state='pending_decision', repo_name=$2, repo_source=$3, repo_confidence=$4, repo_candidates=$5, path=$6, base_branch=COALESCE($7, base_branch), updated_at=$8 WHERE id=$1`, [taskId, repoName, repoSource, triage.repo?.confidence ?? null, triage.repo?.candidates ?? [], tier, targetBranch, now]);
       if (existing) {
         await c.query(`UPDATE approvals SET payload=$2, updated_at=$3 WHERE id=$1`, [existing.id, JSON.stringify(payload), now]);
         await c.query(`UPDATE triage_cards SET approval_id=$2 WHERE task_id=$1`, [taskId, existing.id]);

@@ -11,7 +11,7 @@ const Decide = z.object({
   decision: z.enum(['approve', 'reject']),
   bodyHash: z.string().min(1),
   editedBody: z.string().max(20000).nullable().optional(),
-  overrides: z.object({ path: z.enum(TASK_PATHS).optional(), repo: z.string().optional(), runtime: z.string().optional(), agent: z.enum(AGENTS).optional() }).strict().nullable().optional(),
+  overrides: z.object({ path: z.enum(TASK_PATHS).optional(), repo: z.string().optional(), baseBranch: z.string().max(200).optional(), runtime: z.string().optional(), agent: z.enum(AGENTS).optional() }).strict().nullable().optional(),
   comment: z.string().max(2000).nullable().optional(),
 });
 

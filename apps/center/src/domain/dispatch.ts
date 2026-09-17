@@ -27,10 +27,13 @@ export class Dispatch {
       if (!d.approved) { await this.db.query(`UPDATE tasks SET state='paused', state_before_pause='pending_decision', terminal_at=$2, updated_at=$2 WHERE id=$1`, [a.task_id, this.clock.now()]); await this.broadcastTask(a.task_id); return; }
       const ov = (d.overrides ?? {}) as Record<string, string | undefined>;
       const t = await this.db.one<any>('SELECT * FROM tasks WHERE id=$1', [a.task_id]);
-      const decision = { path: ov.path ?? t.path ?? 'fix', repo: ov.repo ?? t.repo_name, runtime: ov.runtime ?? null, agent: ov.agent ?? null, modified: !!(ov.path || ov.repo || ov.runtime || ov.agent), decidedVia: d.via, decidedAt: this.clock.now().toISOString() };
-      await this.db.query(`UPDATE tasks SET state='queued', path=$2, repo_name=$3, repo_source=CASE WHEN $4::boolean THEN 'manual' ELSE repo_source END, decision=$5, updated_at=$6 WHERE id=$1`,
-        [a.task_id, decision.path, decision.repo, !!ov.repo, JSON.stringify(decision), this.clock.now()]);
-      await this.threadEvent(a.task_id, `已拍板（${d.via === 'feishu' ? '飞书 ✅' : d.via === 'auto' ? '自动' : '面板'}${decision.modified ? '，修改' : '，原样确认'}）· 路径 ${decision.path}`);
+      // 基线分支：拍板覆盖 > 分流卡判断出的目标分支 > 任务已有值（为空则建 worktree 时回退到仓库级默认）
+      const card = await this.db.one<{ base_branch: string | null }>('SELECT base_branch FROM triage_cards WHERE task_id=$1', [a.task_id]);
+      const baseBranch = ov.baseBranch ?? card?.base_branch ?? t.base_branch ?? null;
+      const decision = { path: ov.path ?? t.path ?? 'fix', repo: ov.repo ?? t.repo_name, baseBranch, runtime: ov.runtime ?? null, agent: ov.agent ?? null, modified: !!(ov.path || ov.repo || ov.baseBranch || ov.runtime || ov.agent), decidedVia: d.via, decidedAt: this.clock.now().toISOString() };
+      await this.db.query(`UPDATE tasks SET state='queued', path=$2, repo_name=$3, repo_source=CASE WHEN $4::boolean THEN 'manual' ELSE repo_source END, base_branch=$5, decision=$6, updated_at=$7 WHERE id=$1`,
+        [a.task_id, decision.path, decision.repo, !!ov.repo, baseBranch, JSON.stringify(decision), this.clock.now()]);
+      await this.threadEvent(a.task_id, `已拍板（${d.via === 'feishu' ? '飞书 ✅' : d.via === 'auto' ? '自动' : '面板'}${decision.modified ? '，修改' : '，原样确认'}）· 路径 ${decision.path}${baseBranch ? ` · 基线 ${baseBranch}` : ''}`);
       await this.dispatchTask(a.task_id, { runtime: ov.runtime ?? null, agent: (ov.agent as AgentName | undefined) ?? null });
       return;
     }
@@ -123,14 +126,16 @@ export class Dispatch {
   }
 
   // ---------------- worktree.ready → session.start（Step 12–17） ----------------
-  async onWorktreeReady(runtimeName: string, ready: { taskKey: string; path: string; branchName: string; reused: boolean }) {
+  async onWorktreeReady(runtimeName: string, ready: { taskKey: string; path: string; branchName: string; reused: boolean; baseBranch?: string | null; buildEnvMissing?: boolean }) {
     const t = await this.db.one<any>('SELECT * FROM tasks WHERE key=$1', [ready.taskKey]);
     const rt = await this.db.one<any>('SELECT * FROM runtimes WHERE name=$1', [runtimeName]);
     if (!t || !rt) return;
     const now = this.clock.now();
     const wt = await this.db.one<{ id: string }>(`INSERT INTO worktrees (task_id, runtime_id, repo_name, base_branch, branch_name, path, state, created_at) VALUES ($1,$2,$3,$4,$5,$6,'ready',$7) ON CONFLICT (runtime_id, path) DO UPDATE SET state='ready', branch_name=EXCLUDED.branch_name, task_id=EXCLUDED.task_id RETURNING id`,
-      [t.id, rt.id, t.repo_name ?? 'apache/doris', this.cfg.repo_base_branch?.[t.repo_name] ?? 'master', ready.branchName, ready.path, now]);
+      [t.id, rt.id, t.repo_name ?? 'apache/doris', ready.baseBranch ?? t.base_branch ?? this.cfg.repo_base_branch?.[t.repo_name] ?? 'master', ready.branchName, ready.path, now]);
     await this.db.query(`UPDATE tasks SET branch_name=$2, updated_at=$3 WHERE id=$1`, [t.id, ready.branchName, now]);
+    // 该基线分支没有匹配的构建环境：说清楚，别让 agent 拿不匹配的依赖硬编译（4.1 的代码配 4.0 的 thirdparty 只会在链接阶段失败）
+    if (ready.buildEnvMissing) await this.threadEvent(t.id, `worktree 已就绪（基线 ${ready.baseBranch ?? '仓库默认'}），但该分支没有匹配的构建环境：只做静态检查与改动，编译与单测交给 CI`, undefined);
     await this.db.query(`UPDATE jobs SET status='succeeded', finished_at=$2 WHERE kind='dispatch' AND status='dispatched' AND args->>'type'='worktree.create' AND args->>'taskId'=$1`, [t.id, now]);
     const pending = await this.db.one<{ id: string }>(`SELECT id FROM sessions WHERE task_id=$1 AND runtime_id=$2 AND state='planned' ORDER BY created_at DESC LIMIT 1`, [t.id, rt.id]);
     if (pending) { await this.db.query(`UPDATE sessions SET worktree_id=$2 WHERE id=$1`, [pending.id, wt!.id]); await this.startSession(pending.id, ready.path); return; }
