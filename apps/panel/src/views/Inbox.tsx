@@ -107,10 +107,17 @@ function ApprovalCard({ a, runtimes, selected, busy, act }: any) {
       <h3>
         <span className="tag">{a.key}</span>
         <span>{ACTION_LABEL[a.actionType] ?? a.actionType}</span>
-        {a.taskKey && <button className="ghost" style={{ fontSize: 12 }} onClick={() => navigate(`/c/${p.channel ?? 'jira'}/t/${a.taskKey}`)}>{a.taskKey}</button>}
+        {a.taskKey && <button className="ghost" style={{ fontSize: 12 }} onClick={() => navigate(`/c/${p.channel ?? 'jira'}/t/${a.taskKey}`)}>查看任务线程 {a.taskKey}</button>}
         <span className="meta" style={{ marginLeft: 'auto' }}>信任 {a.trustStreak}/5</span>
       </h3>
-      <div className="meta">{a.title}</div>
+      {/* 先说清「这是哪个单、原始问题是什么」，再说「要做什么」——否则卡片上全是执行细节，没法判断 */}
+      {(a.taskTitle || a.taskSource) && (
+        <div style={{ marginTop: 2 }}>
+          {a.taskSource && <span className="tag">{a.taskSource}</span>}
+          <span style={{ marginLeft: a.taskSource ? 6 : 0 }}>{a.taskTitle}</span>
+        </div>
+      )}
+      <div className="meta" style={{ marginTop: 4 }}>{a.title}</div>
       {p.degraded && <div className="banner" style={{ marginTop: 8 }}>{p.degradedReason ?? '代码定位待补'}</div>}
       {a.status === 'failed' && <div className="banner" style={{ marginTop: 8 }}>执行失败，可重试：{a.payload?.error ?? ''}</div>}
 

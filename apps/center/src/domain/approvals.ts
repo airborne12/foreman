@@ -15,7 +15,12 @@ export interface ApprovalRow {
   id: string; key: string; task_id: string; session_id: string | null; action_type: ActionType; status: string; title: string; body: string; body_hash: string;
   payload: Record<string, unknown>; trust_mode_snapshot: string; trust_streak_snapshot: number; feishu_message_id: string | null; feishu_deferred: boolean;
   decided_via: string | null; decided_at: Date | null; modified: boolean; final_body: string | null; comment: string | null; superseded_by: string | null; action_id: string | null; expires_at: Date | null; created_at: Date;
+  /** 下面几项由 listInbox / byKey / list 的 JOIN 带出（其他查询没有，故可选）：拍板时要先看清这是哪个单 */
+  task_key?: string; task_title?: string; task_source_type?: string; task_source_ref?: string;
 }
+
+/** 审批 + 任务上下文：审批卡只有执行细节没法判断，必须带上原始单号与标题 */
+const APPROVAL_WITH_TASK = `SELECT a.*, t.key AS task_key, t.title AS task_title, t.source_type AS task_source_type, t.source_ref AS task_source_ref FROM approvals a JOIN tasks t ON t.id=a.task_id`;
 
 export type ActionExecutor = (a: { approval: ApprovalRow; finalBody: string; payload: Record<string, unknown>; taskId: string }) => Promise<Record<string, unknown>>;
 /** 补偿器：撤回已执行的动作（S06 Step 32）；返回 false 表示不可撤回 */
@@ -39,7 +44,7 @@ export class Approvals {
   hasExecutor(type: ActionType) { return this.executors.has(type); }
   afterDecided(fn: (a: ApprovalRow, d: ApprovalDecision) => Promise<void>) { this.onDecided.push(fn); }
 
-  async byKey(key: string, client?: Queryable): Promise<ApprovalRow | null> { return this.db.one<ApprovalRow>('SELECT * FROM approvals WHERE key=$1', [key], client); }
+  async byKey(key: string, client?: Queryable): Promise<ApprovalRow | null> { return this.db.one<ApprovalRow>(`${APPROVAL_WITH_TASK} WHERE a.key=$1`, [key], client); }
 
   /** S06 Step 1–10：创建审批；auto 模式直接执行 */
   async request(input: { taskId: string; sessionId?: string | null; actionType: ActionType; title: string; body: string; payload?: Record<string, unknown>; executor?: 'agent' | 'center'; notify?: boolean }): Promise<ApprovalRow> {
@@ -315,7 +320,7 @@ export class Approvals {
 
   /** 调度器：过期的 pending 审批（等待者已超时返回，审批保留 pending，仅标记 expires_at 已过） */
   async listInbox() {
-    const rows = await this.db.query<ApprovalRow>(`SELECT * FROM approvals WHERE status IN ('pending','failed') AND (status='pending' OR payload->>'retryable'='true') ORDER BY created_at`);
+    const rows = await this.db.query<ApprovalRow>(`${APPROVAL_WITH_TASK} WHERE a.status IN ('pending','failed') AND (a.status='pending' OR a.payload->>'retryable'='true') ORDER BY a.created_at`);
     return rows.rows.map((r) => this.serialize(r));
   }
 
@@ -327,13 +332,14 @@ export class Approvals {
     const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const per = Math.min(Math.max(q.perPage ?? 20, 1), 100); const page = Math.max(q.page ?? 1, 1);
     const total = await this.db.one<{ n: string }>(`SELECT count(*) AS n FROM approvals a JOIN tasks t ON t.id=a.task_id ${w}`, params);
-    const rows = await this.db.query<ApprovalRow>(`SELECT a.* FROM approvals a JOIN tasks t ON t.id=a.task_id ${w} ORDER BY a.created_at DESC LIMIT ${per} OFFSET ${(page - 1) * per}`, params);
+    const rows = await this.db.query<ApprovalRow>(`${APPROVAL_WITH_TASK} ${w} ORDER BY a.created_at DESC LIMIT ${per} OFFSET ${(page - 1) * per}`, params);
     return { items: rows.rows.map((r) => this.serialize(r)), total: Number(total?.n ?? 0) };
   }
 
   serialize(a: ApprovalRow) {
     return {
-      key: a.key, taskKey: (a.payload as any)?.taskKey ?? null, actionType: a.action_type, status: a.status, title: a.title, body: a.body, bodyHash: a.body_hash,
+      key: a.key, taskKey: a.task_key ?? (a.payload as any)?.taskKey ?? null, taskTitle: a.task_title ?? null,
+      taskSource: a.task_source_ref ? `${a.task_source_type ?? 'src'}:${a.task_source_ref}` : null, actionType: a.action_type, status: a.status, title: a.title, body: a.body, bodyHash: a.body_hash,
       payload: a.payload, trustMode: a.trust_mode_snapshot, trustStreak: a.trust_streak_snapshot, feishuMessageId: a.feishu_message_id, feishuDeferred: a.feishu_deferred,
       decidedVia: a.decided_via, decidedAt: a.decided_at ? new Date(a.decided_at).toISOString() : null, modified: a.modified, finalBody: a.final_body, comment: a.comment,
       supersededBy: (a.payload as any)?.supersededByKey ?? a.superseded_by, actionId: a.action_id, sessionId: a.session_id, createdAt: new Date(a.created_at).toISOString(),
