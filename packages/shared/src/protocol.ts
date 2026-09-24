@@ -90,6 +90,8 @@ export const WorktreeCreate = z.object({
   hooks: z.record(z.unknown()).optional(),
   reuseIfExists: z.boolean().default(true),
   fetchFirst: z.boolean().optional(),
+  /** worktree 已存在但基线不对（代码定位阶段按仓库默认建的）→ 按新基线重建；有未提交改动或未推送提交时拒绝 */
+  resetToBase: z.boolean().optional(),
 });
 export const WorktreeReady = z.object({
   taskKey: z.string(),

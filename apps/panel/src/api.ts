@@ -1,6 +1,8 @@
 /** 面板 API 客户端：panelToken 存 localStorage，401 时回到 token 门 */
 const TOKEN_KEY = 'foreman.panelToken';
-export const getToken = () => localStorage.getItem(TOKEN_KEY) ?? '';
+/** 仅开发期：实验环境起 Vite 时注入的一次性 token，免得每次手输；生产构建不设这个变量，恒为空 */
+const DEV_TOKEN = (import.meta.env.VITE_PANEL_TOKEN as string | undefined) ?? '';
+export const getToken = () => localStorage.getItem(TOKEN_KEY) ?? DEV_TOKEN;
 export const setToken = (t: string) => localStorage.setItem(TOKEN_KEY, t.trim());
 export const clearToken = () => localStorage.removeItem(TOKEN_KEY);
 

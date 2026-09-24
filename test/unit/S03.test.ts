@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-31（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-36（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -14,7 +14,7 @@ import { FakeWorker } from '../helpers/fakeWorker.js';
 import { seedTask, seedRuntime, seedSession, seedWorktree, runtimeId } from '../helpers/seed.js';
 import { fixtures, type FixtureCtx } from '../orchestration/fixtures.js';
 import { WorktreeCreate, SessionStart, WorkerConfig, makeEnvelope } from '@foreman/shared';
-import { createWorktree, pickBuildEnv } from '../../apps/worker/src/worktree.js';
+import { createWorktree, pickBuildEnv, resolveBaseRef } from '../../apps/worker/src/worktree.js';
 import { Worker } from '../../apps/worker/src/worker.js';
 import { Intake } from '../../apps/center/src/domain/intake.js';
 
@@ -266,6 +266,45 @@ describe('S03 1.4 worktree 与会话指令', () => {
     expect(pickBuildEnv(byBranch, 'branch-未知线').matched).toBe('default');
     expect(pickBuildEnv({ '4.1': { X: '1' } }, 'master')).toEqual({ env: null, matched: null });
     expect(pickBuildEnv(undefined, 'master')).toEqual({ env: null, matched: null });
+  }));
+
+  const gitIn = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x' } });
+
+  it('UT-S03-34: 基线变了就按新基线重建 worktree；有未提交改动时拒绝', () => withReport('UT-S03-34', () => {
+    const repo = gitRepo();
+    gitIn(repo.main, 'checkout', '-q', '-b', 'rel'); writeFileSync(resolve(repo.main, 'REL'), 'r'); gitIn(repo.main, 'add', '.'); gitIn(repo.main, 'commit', '-q', '-m', 'rel'); gitIn(repo.main, 'checkout', '-q', 'master');
+    const a = createWorktree({ taskKey: 'T-240', repo: 'x/y', baseBranch: 'master' }, repo);
+    expect(existsSync(resolve(a.path, 'REL'))).toBe(false);
+    // 代码定位阶段按 master 建的；拍板把基线定成 rel → 重建
+    const b = createWorktree({ taskKey: 'T-240', repo: 'x/y', baseBranch: 'rel', resetToBase: true }, repo);
+    expect(b.reused).toBe(false);
+    expect(existsSync(resolve(b.path, 'REL'))).toBe(true);
+    // 工作区有未提交改动：拒绝重建，绝不丢改动
+    writeFileSync(resolve(b.path, 'README'), 'changed');
+    expect(() => createWorktree({ taskKey: 'T-240', repo: 'x/y', baseBranch: 'master', resetToBase: true }, repo)).toThrow(/未提交/);
+    expect(readFileSync(resolve(b.path, 'README'), 'utf8')).toBe('changed');
+  }));
+
+  it('UT-S03-35: 主仓库只有远端跟踪分支时，基线解析为 origin/<分支> 且能建出 worktree', () => withReport('UT-S03-35', () => {
+    const repo = gitRepo();
+    gitIn(repo.main, 'update-ref', 'refs/remotes/origin/branch-x', 'HEAD');
+    expect(resolveBaseRef('master', repo.main)).toBe('master');
+    expect(resolveBaseRef('branch-x', repo.main)).toBe('origin/branch-x');
+    const w = createWorktree({ taskKey: 'T-241', repo: 'x/y', baseBranch: 'branch-x' }, repo);
+    expect(existsSync(resolve(w.path, 'README'))).toBe(true);
+  }));
+
+  it('UT-S03-36: 已有 worktree 的基线与任务不一致时，派发改为按新基线重建', () => withReport('UT-S03-36', async () => {
+    const w = await fw('dev');
+    const taskId = await seedTask(app.db, { key: 'T-242', state: 'queued', runtime: 'dev' });
+    await app.db.query(`UPDATE tasks SET base_branch='branch-selectdb-doris-4.1' WHERE id=$1`, [taskId]);
+    await app.db.query(`INSERT INTO worktrees (task_id, runtime_id, repo_name, base_branch, branch_name, path, state, created_at) VALUES ($1,$2,'selectdb/selectdb-core','selectdb-cloud-4.0','foreman/T-242','/tmp/fx/wt/T-242','ready',now())`, [taskId, await runtimeId(app.db, 'dev')]);
+    await app.dispatch.dispatchTask(taskId);
+    const env = await w.expect((e) => e.type === 'worktree.create');
+    expect(env.payload.baseBranch).toBe('branch-selectdb-doris-4.1');
+    expect(env.payload.resetToBase).toBe(true);
+    const ev = await app.db.one<any>(`SELECT text FROM messages WHERE task_id=$1 AND text LIKE '%按新基线重建%'`, [taskId]);
+    expect(ev?.text).toContain('selectdb-cloud-4.0');
   }));
 
   it('UT-S03-30: claude --bg 启动参数与会话 id 解析', () => withReport('UT-S03-30', async () => {

@@ -105,5 +105,8 @@ for i in $(seq 1 30); do
 done
 curl -fsS --max-time 5 "http://172.17.2.13:7801/healthz" || { echo "healthz 未通过，见中心机 ~/foreman/logs/center.err.log"; exit 1; }
 echo
-ssh "$CENTER_SSH" "echo \"DEPLOY $TS\" >> ~/foreman/deploy.log; ls -dt ~/foreman/releases/* | tail -n +6 | xargs -r rm -rf"
+# 保留最近 5 个 release：按目录名（时间戳）排序，且永远不删 current 指向的那个。
+# 不能用 ls -t：rsync -a 会把目录 mtime 同步成笔记本仓库根目录的时间，刚发布的这一版反而最旧，
+# 2026-09-17 就因此把正在运行的 release 删了，中心随后读 public/index.html 报 ENOENT。
+ssh "$CENTER_SSH" "echo \"DEPLOY $TS\" >> ~/foreman/deploy.log; cd ~/foreman/releases && keep=\$(basename \"\$(readlink ~/foreman/current)\") && ls -1d 20* | sort -r | tail -n +6 | grep -vx \"\$keep\" | xargs -r rm -rf"
 echo "发布完成：$TS"

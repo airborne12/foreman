@@ -84,12 +84,17 @@ export class Dispatch {
       }
     }
     const now = this.clock.now();
-    const wt = await this.db.one<any>(`SELECT * FROM worktrees WHERE task_id=$1 AND runtime_id=$2 AND state='ready'`, [taskId, rt.id]);
+    let wt = await this.db.one<any>(`SELECT * FROM worktrees WHERE task_id=$1 AND runtime_id=$2 AND state='ready'`, [taskId, rt.id]);
+    // 代码定位阶段建 worktree 时还没判断出目标分支，用的是仓库默认基线；拍板定了别的基线后不能直接复用，
+    // 否则 agent 会在错误的分支上改（2026-09-24 实验环境 T-1：worktree 基于 4.0，任务基线是 4.1）
+    const wantBase = await this.intake.baseBranchFor(taskId, t.repo_name);
+    const rebase = !!wt && wt.base_branch !== wantBase;
+    if (rebase) { await this.threadEvent(taskId, `基线已定为 ${wantBase}，现有工作区基于 ${wt.base_branch}（代码定位阶段所建），按新基线重建`); wt = null; }
     const session = await this.db.one<{ id: string }>(`INSERT INTO sessions (task_id, runtime_id, agent, kind, state, prompt, attempt, worktree_id, created_at, updated_at) VALUES ($1,$2,$3,$4,'planned',$8,$5,$6,$7,$7) RETURNING id`, [taskId, rt.id, agent, kind, opts?.attempt ?? 1, wt?.id ?? null, now, opts?.promptSuffix ?? '']);
     await this.db.query(`UPDATE tasks SET state='queued', runtime_name=$2, agent=$3, queue_reason=NULL, author_agent=CASE WHEN $4='implement' THEN $3 ELSE author_agent END, updated_at=$5 WHERE id=$1`, [taskId, rt.name, agent, kind, now]);
     await this.broadcastTask(taskId);
     if (wt) await this.startSession(session!.id, wt.path);
-    else await this.intake.sendWorktreeCreate(taskId, rt.name, t.repo_name ?? 'apache/doris', kind === 'review' ? 'review' : 'implement');
+    else await this.intake.sendWorktreeCreate(taskId, rt.name, t.repo_name ?? 'apache/doris', kind === 'review' ? 'review' : 'implement', false, rebase);
   }
 
   /** runtime 上线（S03 EX-7.1 / S05 EX-23.1）：补派等待该 runtime 或等待标签的排队任务；补发的离线指令标记已送达 */
@@ -131,7 +136,7 @@ export class Dispatch {
     const rt = await this.db.one<any>('SELECT * FROM runtimes WHERE name=$1', [runtimeName]);
     if (!t || !rt) return;
     const now = this.clock.now();
-    const wt = await this.db.one<{ id: string }>(`INSERT INTO worktrees (task_id, runtime_id, repo_name, base_branch, branch_name, path, state, created_at) VALUES ($1,$2,$3,$4,$5,$6,'ready',$7) ON CONFLICT (runtime_id, path) DO UPDATE SET state='ready', branch_name=EXCLUDED.branch_name, task_id=EXCLUDED.task_id RETURNING id`,
+    const wt = await this.db.one<{ id: string }>(`INSERT INTO worktrees (task_id, runtime_id, repo_name, base_branch, branch_name, path, state, created_at) VALUES ($1,$2,$3,$4,$5,$6,'ready',$7) ON CONFLICT (runtime_id, path) DO UPDATE SET state='ready', branch_name=EXCLUDED.branch_name, task_id=EXCLUDED.task_id, base_branch=EXCLUDED.base_branch RETURNING id`,
       [t.id, rt.id, t.repo_name ?? 'apache/doris', ready.baseBranch ?? t.base_branch ?? this.cfg.repo_base_branch?.[t.repo_name] ?? 'master', ready.branchName, ready.path, now]);
     await this.db.query(`UPDATE tasks SET branch_name=$2, updated_at=$3 WHERE id=$1`, [t.id, ready.branchName, now]);
     // 该基线分支没有匹配的构建环境：说清楚，别让 agent 拿不匹配的依赖硬编译（4.1 的代码配 4.0 的 thirdparty 只会在链接阶段失败）
@@ -278,7 +283,7 @@ export class Dispatch {
     if (args.type === 'worktree.create' && code === 'WORKTREE_FAILED') {
       if (!args.fetchFirst && env.payload.retryable !== false) {
         await this.threadEvent(args.taskId, `worktree 创建失败：${String(env.payload.message ?? '').slice(0, 200)} · 先 fetch 再重试一次`);
-        await this.intake.sendWorktreeCreate(args.taskId, args.runtime, args.repo, args.purpose, true); return;
+        await this.intake.sendWorktreeCreate(args.taskId, args.runtime, args.repo, args.purpose, true, !!args.resetToBase); return;
       }
       await this.db.query(`UPDATE sessions SET state='failed', failure_reason=$2, ended_at=$3, updated_at=$3 WHERE task_id=$1 AND state='planned'`, [args.taskId, 'worktree failed', now]);
       if (args.purpose === 'code_locate') { await this.intake.emitTriage(args.taskId, null, { degraded: true, degradedReason: `代码定位失败：worktree 创建失败（${env.payload.message ?? ''}）` }); return; }

@@ -26,7 +26,8 @@ const TriageArtifact = z.object({
   suggestedPath: z.string().max(2000).optional(),
   /** 目标代码所在分支：与仓库级默认基线不同时由定位会话给出，worktree 据此拉取 */
   targetBranch: z.string().max(200).nullable().optional(),
-  codeLocations: z.array(z.object({ file: z.string(), line: z.number().int().optional(), symbol: z.string().optional(), why: z.string().optional() })).optional(),
+  // mcp.yaml 里 line / symbol 是 nullable：agent 定位到文件但说不出行号时会传 null，不能因此整张分流卡作废
+  codeLocations: z.array(z.object({ file: z.string(), line: z.number().int().nullable().optional(), symbol: z.string().nullable().optional(), why: z.string().nullable().optional() })).optional(),
 });
 const CandidatesArtifact = z.object({
   kind: z.literal('candidates'),

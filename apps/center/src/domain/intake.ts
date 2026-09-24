@@ -221,19 +221,27 @@ export class Intake {
     }
   }
 
-  async sendWorktreeCreate(taskId: string, runtimeName: string, repo: string, purpose: 'code_locate' | 'implement' | 'review', fetchFirst = false) {
+  /**
+   * 基线分支三级回退：任务（拍板确定）> 分流卡（定位会话判断）> 仓库级默认。
+   * 仓库级固定值对不上任务要改的分支时，agent 在 worktree 里根本找不到目标代码。
+   */
+  async baseBranchFor(taskId: string, repo?: string | null): Promise<string> {
+    const t = await this.db.one<any>('SELECT base_branch, repo_name FROM tasks WHERE id=$1', [taskId]);
+    const card = await this.db.one<{ base_branch: string | null }>('SELECT base_branch FROM triage_cards WHERE task_id=$1', [taskId]);
+    const r = repo ?? t?.repo_name ?? null;
+    return t?.base_branch ?? card?.base_branch ?? (r ? this.cfg.repo_base_branch?.[r] : undefined) ?? 'master';
+  }
+
+  async sendWorktreeCreate(taskId: string, runtimeName: string, repo: string, purpose: 'code_locate' | 'implement' | 'review', fetchFirst = false, resetToBase = false) {
     const t = await this.db.one<any>('SELECT * FROM tasks WHERE id=$1', [taskId]);
     const cp = await this.db.one<any>('SELECT * FROM context_packs WHERE task_id=$1', [taskId]);
-    // 基线分支三级回退：任务（拍板确定）> 分流卡（定位会话判断）> 仓库级默认。
-    // 仓库级固定值对不上任务要改的分支时，agent 在 worktree 里根本找不到目标代码。
-    const card = await this.db.one<{ base_branch: string | null }>('SELECT base_branch FROM triage_cards WHERE task_id=$1', [taskId]);
-    const baseBranch = t.base_branch ?? card?.base_branch ?? this.cfg.repo_base_branch?.[repo] ?? 'master';
+    const baseBranch = await this.baseBranchFor(taskId, repo);
     const md = `# ${t.key} 上下文包\n\n## 需求原文\n${cp?.source_text ?? ''}\n\n## 仓库\n${repo}（${t.repo_source}）\n\n## Jira\n${cp?.jira ? JSON.stringify(cp.jira, null, 2) : '-'}\n\n## 代码定位\n${JSON.stringify(cp?.code_locations ?? [], null, 2)}\n${cp?.plan_doc ? `\n## 方案\n${cp.plan_doc}\n` : ''}`;
     const env = this.hub.send(runtimeName, 'worktree.create', {
-      taskKey: t.key, repo, baseBranch, branchName: `foreman/${t.key}`, reuseIfExists: true, fetchFirst,
+      taskKey: t.key, repo, baseBranch, branchName: `foreman/${t.key}`, reuseIfExists: true, fetchFirst, ...(resetToBase ? { resetToBase: true } : {}),
       contextMarkdown: md, taskJson: { key: t.key, kind: t.kind, path: t.path, repo, purpose },
     });
-    await this.db.query(`INSERT INTO jobs (kind, status, args, scheduled_at, dispatched_at, created_at) VALUES ('dispatch','dispatched',$1,$2,$2,$2)`, [JSON.stringify({ commandId: env.id, type: 'worktree.create', taskId, purpose, runtime: runtimeName, repo, fetchFirst }), this.clock.now()]);
+    await this.db.query(`INSERT INTO jobs (kind, status, args, scheduled_at, dispatched_at, created_at) VALUES ('dispatch','dispatched',$1,$2,$2,$2)`, [JSON.stringify({ commandId: env.id, type: 'worktree.create', taskId, purpose, runtime: runtimeName, repo, fetchFirst, resetToBase }), this.clock.now()]);
     return env.id;
   }
 

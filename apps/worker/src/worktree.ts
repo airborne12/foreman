@@ -11,6 +11,8 @@ import { resolve, dirname } from 'node:path';
 export interface WorktreeCreateInput {
   taskKey: string; repo: string; baseBranch: string; branchName?: string; buildEnv?: Record<string, string>;
   contextMarkdown?: string; taskJson?: Record<string, unknown>; hooks?: Record<string, unknown>; reuseIfExists?: boolean; fetchFirst?: boolean;
+  /** 已存在但基线不对时按新基线重建（见 dropForRebase 的安全检查） */
+  resetToBase?: boolean;
 }
 export interface WorktreeReadyOutput { taskKey: string; path: string; branchName: string; reused: boolean }
 
@@ -22,6 +24,30 @@ export type GitRunner = (args: string[], cwd: string) => string;
 export const realGit: GitRunner = (args, cwd) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
 export function defaultBranchName(taskKey: string) { return `foreman/${taskKey}`; }
+
+/**
+ * 基线引用：本地分支优先；主仓库里只有远端跟踪分支时（开发机上的 origin/branch-selectdb-doris-4.1 就是这样）用远端的。
+ * 直接拿分支名去 `git worktree add` 会报 invalid reference——T-6 的 agent 当时只能自己 fetch + checkout -B 绕过去。
+ */
+export function resolveBaseRef(base: string, main: string, git: GitRunner = realGit): string {
+  const has = (ref: string) => { try { git(['rev-parse', '--verify', '--quiet', ref], main); return true; } catch { return false; } };
+  if (has(`refs/heads/${base}`)) return base;
+  if (has(`refs/remotes/origin/${base}`)) return `origin/${base}`;
+  return base; // 可能是 tag 或提交号，交给 git 判断
+}
+
+/**
+ * 按新基线重建前的安全检查：有未提交改动、或有不在任何其他分支 / 远端上的提交，就拒绝——绝不丢别人的改动。
+ * 代码定位阶段不改代码，正常情况下两项都为空。
+ */
+function dropForRebase(path: string, branchName: string, main: string, git: GitRunner) {
+  const dirty = git(['status', '--porcelain', '--untracked-files=no'], path).trim();
+  if (dirty) throw new WorktreeError(`worktree 有未提交的改动，不能切换基线：${dirty.split('\n').slice(0, 3).join('；')}`, false);
+  const unique = Number(git(['rev-list', '--count', 'HEAD', '--not', `--exclude=${branchName}`, '--branches', '--remotes'], path).trim() || '0');
+  if (unique > 0) throw new WorktreeError(`worktree 上有 ${unique} 个只在 ${branchName} 上的提交，不能切换基线（请先推送或手动处理）`, false);
+  git(['worktree', 'remove', '--force', path], main);
+  try { git(['branch', '-D', branchName], main); } catch { /* 分支可能不存在 */ }
+}
 
 /**
  * 按基线分支挑构建环境（thirdparty、jdk 等）。
@@ -45,18 +71,21 @@ export function createWorktree(input: WorktreeCreateInput, repo: { main: string;
   const branchName = input.branchName ?? defaultBranchName(input.taskKey);
   const path = resolve(repo.worktreeRoot, input.taskKey);
   let reused = false;
-  if (existsSync(path) && (input.reuseIfExists ?? true)) {
+  const exists = existsSync(path);
+  if (exists && (input.reuseIfExists ?? true) && !input.resetToBase) {
     reused = true;
   } else {
     try {
       if (!existsSync(repo.main)) throw new Error(`主仓库不存在：${repo.main}`);
       if (input.fetchFirst) git(['fetch', '--all', '--prune'], repo.main);
+      if (exists && input.resetToBase) dropForRebase(path, branchName, repo.main, git);
       mkdirSync(repo.worktreeRoot, { recursive: true });
       let branchExists = false;
       try { git(['rev-parse', '--verify', '--quiet', `refs/heads/${branchName}`], repo.main); branchExists = true; } catch { branchExists = false; }
       if (branchExists) git(['worktree', 'add', path, branchName], repo.main);
-      else git(['worktree', 'add', '-b', branchName, path, input.baseBranch], repo.main);
+      else git(['worktree', 'add', '-b', branchName, path, resolveBaseRef(input.baseBranch, repo.main, git)], repo.main);
     } catch (e) {
+      if (e instanceof WorktreeError) throw e;
       const msg = String((e as any)?.stderr ?? (e as Error).message ?? e).trim();
       throw new WorktreeError(msg.slice(0, 500), !input.fetchFirst);
     }
