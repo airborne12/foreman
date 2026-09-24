@@ -21,21 +21,21 @@ export class Tasks {
     return r!;
   }
 
-  async routeFor(kind: string, override?: string | null) {
+  async routeFor(kind: string, override?: string | null, repo?: string | null) {
     const rts = await this.db.query<any>('SELECT * FROM runtimes');
     const candidates = [];
     for (const r of rts.rows) {
       const running = await this.runtimes.runningByAgent(r.id);
-      candidates.push({ name: r.name, online: r.online, labels: r.labels as string[], runningSessions: Object.values(running).reduce((a: number, b: any) => a + Number(b), 0) });
+      candidates.push({ name: r.name, online: r.online, labels: r.labels as string[], runningSessions: Object.values(running).reduce((a: number, b: any) => a + Number(b), 0), repos: r.repos && Object.keys(r.repos).length ? Object.keys(r.repos) : undefined });
     }
-    return routeTask({ kind: routingCategory(kind), rules: this.cfg.routing, runtimes: candidates, override });
+    return routeTask({ kind: routingCategory(kind), rules: this.cfg.routing, runtimes: candidates, override, repo });
   }
 
   /** POST /api/tasks（CLI / 斜杠命令直出）。创建后进入 triaging，并计算默认路由写入线程。 */
   async create(input: { source: string; repo?: string; path: 'fix' | 'plan' | 'proto'; kind?: string; channel?: string; runtime?: string; agent?: string; pickTargets?: string[] }) {
     const kind = input.kind ?? (input.path === 'plan' && !input.repo ? 'text' : 'code');
     const now = this.clock.now();
-    const route = await this.routeFor(kind, input.runtime ?? null);
+    const route = await this.routeFor(kind, input.runtime ?? null, input.repo ?? null);
     const created = await this.db.tx(async (c) => {
       const chSlug = input.channel ?? this.cfg.source_channels.cli ?? 'inbox';
       const ch = input.channel
@@ -69,7 +69,7 @@ export class Tasks {
   /** 恢复到暂停前状态 */
   async resume(taskId: string) {
     const now = this.clock.now();
-    await this.db.query(`UPDATE tasks SET state=COALESCE(state_before_pause,'queued'), state_before_pause=NULL, terminal_at=NULL, updated_at=$2 WHERE id=$1 AND state='paused'`, [taskId, now]);
+    await this.db.query(`UPDATE tasks SET state=COALESCE(state_before_pause,'queued'), state_before_pause=NULL, terminal_at=NULL, queue_reason=CASE WHEN queue_reason LIKE '人工处理：会话结束%' THEN NULL ELSE queue_reason END, updated_at=$2 WHERE id=$1 AND state='paused'`, [taskId, now]);
     await this.events.record(this.db.pool, { type: 'task.updated', taskId, payload: { changed: ['state'] } });
     this.events.flush();
   }
@@ -118,6 +118,7 @@ export class Tasks {
       runtime: t.runtime_name,
       agent: t.agent,
       queueReason: t.queue_reason,
+      priority: t.source_type === 'jira' ? (await this.db.one<{ p: string | null }>(`SELECT jira->>'priority' AS p FROM context_packs WHERE task_id=$1`, [t.id]))?.p ?? null : null,
       unreadCount: 0,
       createdAt: new Date(t.created_at).toISOString(),
       updatedAt: new Date(t.updated_at).toISOString(),

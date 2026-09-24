@@ -12,6 +12,7 @@
  * 用法：LAB_CENTER=http://127.0.0.1:7899 node --import tsx scripts/lab/sim-worker.ts
  */
 import WebSocket from 'ws';
+import { request as httpRequest } from 'node:http';
 import { makeEnvelope, type Envelope } from '../../packages/shared/src/protocol.js';
 
 const CENTER = process.env.LAB_CENTER ?? 'http://127.0.0.1:7899';
@@ -63,14 +64,24 @@ type Sess = {
 };
 const sessions = new Map<string, Sess>();
 
+/**
+ * 用 node:http 而不是 fetch：ask_user / request_approval 会阻塞到人回应（最长 30 分钟），
+ * fetch（undici）默认 5 分钟等不到响应头就断开，会被误报成「会话失败：fetch failed」。
+ */
+function postJson(url: string, token: string, body: unknown): Promise<any> {
+  return new Promise((resolveP, reject) => {
+    const data = JSON.stringify(body);
+    const req = httpRequest(url, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data), authorization: `Bearer ${token}` } }, (res) => {
+      let buf = ''; res.setEncoding('utf8'); res.on('data', (c) => { buf += c; });
+      res.on('end', () => { try { resolveP(JSON.parse(buf)); } catch { reject(new Error(`MCP 返回非 JSON：${buf.slice(0, 120)}`)); } });
+    });
+    req.setTimeout(0); req.on('error', reject); req.end(data);
+  });
+}
+
 async function mcp(s: Sess, tool: string, args: Record<string, unknown>): Promise<any> {
   s.logs.push(`> ${tool} ${JSON.stringify(args).slice(0, 160)}`);
-  const r = await fetch(s.mcp.url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${s.mcp.token}` },
-    body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method: 'tools/call', params: { name: tool, arguments: args } }),
-  });
-  const j: any = await r.json();
+  const j: any = await postJson(s.mcp.url, s.mcp.token, { jsonrpc: '2.0', id: Date.now(), method: 'tools/call', params: { name: tool, arguments: args } });
   if (j.error) throw new Error(`${tool}: ${j.error.message ?? JSON.stringify(j.error)}`);
   const out = j.result?.structuredContent ?? j.result;
   s.logs.push(`< ${JSON.stringify(out).slice(0, 160)}`);

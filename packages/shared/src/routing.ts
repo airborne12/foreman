@@ -1,12 +1,15 @@
 /**
  * 路由规则（来源：core-S05 Step 20；core-03 §4 S05.3）
  * 1. require 标签全部命中才是候选；2. 多候选取 prefer；3. 否则取运行中会话最少者；手动覆盖优先于规则。
+ * 4. 代码类任务给了仓库时，只考虑登记了该仓库的 runtime（repos 未上报的 runtime 视为不限仓库）。
  */
 export interface RuntimeCandidate {
   name: string;
   online: boolean;
   labels: string[];
   runningSessions: number;
+  /** runtime 注册时上报的仓库；undefined 表示未上报，不做仓库过滤 */
+  repos?: string[];
 }
 export interface RoutingRule { require: string[]; prefer?: string }
 export interface RoutingDecision {
@@ -20,16 +23,23 @@ export function routeTask(params: {
   rules: Record<string, RoutingRule>;
   runtimes: RuntimeCandidate[];
   override?: string | null;
+  repo?: string | null;
 }): RoutingDecision {
-  const { kind, rules, runtimes, override } = params;
+  const { kind, rules, runtimes, override, repo } = params;
+  const hasRepo = (r: RuntimeCandidate) => !repo || kind !== 'code' || r.repos === undefined || r.repos.includes(repo);
   if (override) {
     const rt = runtimes.find((r) => r.name === override);
+    if (rt && !hasRepo(rt)) return { runtime: null, reason: `手动指定的 ${override} 没有登记仓库 ${repo}`, missingLabels: [`repo:${repo}`] };
     if (rt && rt.online) return { runtime: override, reason: `手动覆盖 runtime=${override}` };
     return { runtime: override, reason: `手动覆盖 runtime=${override}（当前离线，排队等待）` };
   }
   const rule = rules[kind] ?? { require: [] };
   const online = runtimes.filter((r) => r.online);
-  const candidates = online.filter((r) => rule.require.every((l) => r.labels.includes(l)));
+  const labeled = online.filter((r) => rule.require.every((l) => r.labels.includes(l)));
+  const candidates = labeled.filter(hasRepo);
+  if (labeled.length > 0 && candidates.length === 0) {
+    return { runtime: null, reason: `routing: ${kind} → 在线 runtime 都没有登记仓库 ${repo}`, missingLabels: [`repo:${repo}`] };
+  }
   if (candidates.length === 0) {
     const need = rule.require.length ? ` require ${rule.require.join(',')}` : '';
     return { runtime: null, reason: `routing: ${kind} →${need} → 无在线候选`, missingLabels: rule.require };

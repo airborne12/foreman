@@ -3,7 +3,7 @@
  */
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { TASK_STATES, TASK_KINDS, TASK_PATHS, AGENTS } from '@foreman/shared';
+import { ApiError, TASK_STATES, TASK_KINDS, TASK_PATHS, AGENTS } from '@foreman/shared';
 import type { AppContext } from '../app.js';
 import { parseBody, parseQuery } from './common.js';
 
@@ -78,8 +78,25 @@ export function taskRoutes(app: AppContext) {
   r.post('/api/tasks/:key/resume', async (c) => {
     const t = await app.tasks.byKey(c.req.param('key'));
     await app.tasks.resume(t.id);
+    // 恢复到 running / waiting_input 但会话已结束（人工停止、会话无产物）：拉起原会话继续，否则任务会空转
+    const back = await app.tasks.byKey(t.key);
+    const live = await app.db.one(`SELECT 1 FROM sessions WHERE task_id=$1 AND state IN ('planned','running','waiting_input')`, [t.id]);
+    if (['running', 'waiting_input'].includes(back.state) && !live) await app.dispatch.resumeSession(t.id, '继续之前的工作（任务已从暂停恢复）');
     const fresh = await app.tasks.byKey(t.key);
     return c.json(await app.tasks.serialize(fresh, fresh.channel_slug));
+  });
+
+  // 重新代码定位：分流卡降级（定位失败 / 开发机离线）时从面板手动重跑，结果原地更新待拍板的分流卡
+  r.post('/api/tasks/:key/relocate', async (c) => {
+    const t = await app.tasks.byKey(c.req.param('key'));
+    if (!['triaging', 'pending_decision'].includes(t.state)) throw new ApiError(409, 'INVALID_STATE', `任务 ${t.key} 已拍板，不能重新定位`);
+    const active = await app.db.one(`SELECT 1 FROM sessions WHERE task_id=$1 AND kind='code_locate' AND state IN ('planned','running','waiting_input')`, [t.id]);
+    if (!active) {
+      await app.db.query(`INSERT INTO messages (channel_id, task_id, kind, author, text, created_at) VALUES ($1,$2,'system','system',$3,$4)`, [t.channel_id, t.id, '已从面板发起重新定位', app.clock.now()]);
+      await app.intake.scheduleCodeLocate(t.id);
+    }
+    const fresh = await app.tasks.byKey(t.key);
+    return c.json(await app.tasks.serialize(fresh, fresh.channel_slug), 202);
   });
 
   // implementFromPlan（S03 Step 30）

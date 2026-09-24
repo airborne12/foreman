@@ -254,7 +254,7 @@ export class Intake {
     // 降级卡（还没跑过代码定位）不下调来源：入库时标的 llm/mapping 保留，等补齐后再定
     const repoSource = t.repo_source === 'mapping' || t.repo_source === 'manual' ? t.repo_source : repoName ? 'llm' : triage.degraded ? t.repo_source : 'unresolved';
     const tier = triage.tier ?? (t.path ?? 'fix'); const effort = triage.effort ?? (triage.degraded ? 'medium' : 'small');
-    const defaultRuntime = (await this.tasks.routeFor(t.kind ?? 'code', null)).runtime;
+    const defaultRuntime = (await this.tasks.routeFor(t.kind ?? 'code', null, repoName)).runtime;
     const defaultAgent = await this.nextAgent();
     const existing = await this.db.one<any>(`SELECT a.* FROM approvals a WHERE a.task_id=$1 AND a.action_type='triage_confirm' AND a.status='pending'`, [taskId]);
     // ContextPack.codeLocations maxItems 8（tasks.yaml）：超出截断并记事件

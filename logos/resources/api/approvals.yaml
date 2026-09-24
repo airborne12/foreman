@@ -24,6 +24,9 @@ x-error-codes:
   APPROVAL_BODY_CHANGED: "正文已变更，原审批作废（S06 EX-18.2）"
   APPROVAL_NOT_PENDING: "审批不在 pending 状态"
   REPO_REQUIRED: "目标仓库待确认，需先选择（S03 EX-6.1）"
+  REPO_UNAVAILABLE: "拍板改选的仓库没有任何 runtime 登记（core-02 §5.1 #4）"
+  DUPLICATE_SOURCE: "同一来源已有未完结任务（core-02 §5.1 #13）"
+  INVALID_STATE: "任务当前状态不允许该操作"
   DRAFT_NOT_OPEN: "草案已取消或过期（S04 EX-34.1）"
   TASK_NOT_FAILED: "任务不在 failed 状态"
   NO_PLAN_ARTIFACT: "任务没有方案类产物"
@@ -171,7 +174,7 @@ paths:
             application/json:
               schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
         '422':
-          description: "REPO_REQUIRED（分流卡仓库待确认）或校验失败"
+          description: "REPO_REQUIRED（分流卡仓库待确认）、REPO_UNAVAILABLE（改选的仓库没有 runtime 登记）或校验失败"
           content:
             application/json:
               schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
@@ -337,6 +340,8 @@ components:
       properties:
         key: { type: string, example: A-88 }
         taskKey: { type: string, example: T-231.1 }
+        taskSourceUrl: { type: string, nullable: true, description: "来源单链接（Jira）" }
+        priority: { type: string, nullable: true, description: "所属任务的 Jira 优先级原值" }
         actionType: { $ref: '#/components/schemas/ActionType' }
         status: { $ref: '#/components/schemas/ApprovalStatus' }
         title: { type: string, description: "一行标题，如「回复 review 意见 · apache/doris#67657」" }

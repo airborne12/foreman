@@ -57,9 +57,11 @@ export class Dispatch {
     const t = await this.db.one<any>('SELECT * FROM tasks WHERE id=$1', [taskId]);
     if (!t) return;
     const override = opts?.runtime ?? (t.decision?.runtime as string | null) ?? null;
-    const route = await this.tasks.routeFor(t.kind ?? 'code', override);
+    const route = await this.tasks.routeFor(t.kind ?? 'code', override, t.repo_name);
     if (!route.runtime || !this.hub.isOnline(route.runtime)) {
-      const reason = override ? `等待 ${override} 上线` : `等待带 ${(route.missingLabels ?? []).join(',') || '所需标签'} 的 runtime（如 dev）上线`;
+      const repoMissing = (route.missingLabels ?? []).find((l) => l.startsWith('repo:'));
+      const reason = repoMissing ? `人工处理：没有 runtime 登记仓库 ${repoMissing.slice(5)}，在 runtime 配置里加上该仓库，或改选仓库后重新拍板`
+        : override ? `等待 ${override} 上线` : `等待带 ${(route.missingLabels ?? []).join(',') || '所需标签'} 的 runtime（如 dev）上线`;
       await this.db.query(`UPDATE tasks SET state='queued', runtime_name=$2, queue_reason=$3, updated_at=$4 WHERE id=$1`, [taskId, route.runtime, reason, this.clock.now()]);
       if (t.queue_reason !== reason) await this.threadEvent(taskId, `${route.reason} · ${reason}`);
       await this.broadcastTask(taskId); return;
@@ -87,8 +89,10 @@ export class Dispatch {
     let wt = await this.db.one<any>(`SELECT * FROM worktrees WHERE task_id=$1 AND runtime_id=$2 AND state='ready'`, [taskId, rt.id]);
     // 代码定位阶段建 worktree 时还没判断出目标分支，用的是仓库默认基线；拍板定了别的基线后不能直接复用，
     // 否则 agent 会在错误的分支上改（2026-09-24 实验环境 T-1：worktree 基于 4.0，任务基线是 4.1）
+    // 只重建「代码定位建的、还没有实现类会话用过」的 worktree：重试 / 新会话继续时里面已经有 agent 的改动，不能丢
     const wantBase = await this.intake.baseBranchFor(taskId, t.repo_name);
-    const rebase = !!wt && wt.base_branch !== wantBase;
+    const worked = wt ? await this.db.one(`SELECT 1 FROM sessions WHERE worktree_id=$1 AND kind<>'code_locate' LIMIT 1`, [wt.id]) : null;
+    const rebase = !!wt && !worked && wt.base_branch !== wantBase;
     if (rebase) { await this.threadEvent(taskId, `基线已定为 ${wantBase}，现有工作区基于 ${wt.base_branch}（代码定位阶段所建），按新基线重建`); wt = null; }
     const session = await this.db.one<{ id: string }>(`INSERT INTO sessions (task_id, runtime_id, agent, kind, state, prompt, attempt, worktree_id, created_at, updated_at) VALUES ($1,$2,$3,$4,'planned',$8,$5,$6,$7,$7) RETURNING id`, [taskId, rt.id, agent, kind, opts?.attempt ?? 1, wt?.id ?? null, now, opts?.promptSuffix ?? '']);
     await this.db.query(`UPDATE tasks SET state='queued', runtime_name=$2, agent=$3, queue_reason=NULL, author_agent=CASE WHEN $4='implement' THEN $3 ELSE author_agent END, updated_at=$5 WHERE id=$1`, [taskId, rt.name, agent, kind, now]);
@@ -234,9 +238,18 @@ export class Dispatch {
         await this.db.query(`UPDATE tasks SET state='done', terminal_at=$2, updated_at=$2 WHERE id=$1`, [t.id, now]);
         await this.threadEvent(t.id, `review 完成（${s.agent}）`);
       } else {
-        if (t.state === 'running') await this.db.query(`UPDATE tasks SET state='delivered', updated_at=$2 WHERE id=$1`, [t.id, now]);
-        await this.threadEvent(t.id, `会话完成（${s.agent}）`);
-        if (t.state !== 'waiting_approval') await this.afterDelivered(t.id);
+        // 本会话没交付任何产物（如建 PR 被否决后 agent 停下）：不算交付，暂停并进收件箱等人接手
+        const produced = await this.db.one('SELECT 1 FROM artifacts WHERE session_id=$1 LIMIT 1', [s.id]);
+        if (!produced && t.state === 'running') {
+          const last = await this.db.one<{ text: string }>(`SELECT text FROM messages WHERE task_id=$1 AND kind='progress' ORDER BY created_at DESC, seq DESC LIMIT 1`, [t.id]);
+          const reason = `人工处理：会话结束但没有产物${last ? `（最后进展：${last.text.slice(0, 80)}）` : ''}，在线程里回复即可让 agent 接着做`;
+          await this.db.query(`UPDATE tasks SET state='paused', state_before_pause='running', queue_reason=$2, updated_at=$3 WHERE id=$1`, [t.id, reason, now]);
+          await this.threadEvent(t.id, `会话结束（${s.agent}），没有交付产物 · 任务已暂停，回复即在原会话继续`);
+        } else {
+          if (t.state === 'running') await this.db.query(`UPDATE tasks SET state='delivered', updated_at=$2 WHERE id=$1`, [t.id, now]);
+          await this.threadEvent(t.id, `会话完成（${s.agent}）`);
+          if (t.state !== 'waiting_approval') await this.afterDelivered(t.id);
+        }
       }
       await this.broadcastTask(s.task_id);
       await this.drainQueue(runtimeName, s.agent);
@@ -478,7 +491,7 @@ export class Dispatch {
     if (online) {
       if (['done', 'stopped'].includes(s.state)) {
         await this.db.query(`UPDATE sessions SET state='running', last_activity_at=$2, updated_at=$2 WHERE id=$1`, [s.id, now]);
-        await this.db.query(`UPDATE tasks SET state='running', state_before_pause=NULL, updated_at=$2 WHERE id=$1 AND state IN ('delivered','paused','waiting_input')`, [taskId, now]);
+        await this.db.query(`UPDATE tasks SET state='running', state_before_pause=NULL, queue_reason=CASE WHEN queue_reason LIKE '人工处理：会话结束%' THEN NULL ELSE queue_reason END, updated_at=$2 WHERE id=$1 AND state IN ('delivered','paused','waiting_input')`, [taskId, now]);
         await this.threadEvent(taskId, `已恢复会话 ${s.agent_session_id ?? s.id.slice(0, 8)}（${s.agent}），消息已送入`);
         await this.broadcastTask(taskId);
       }

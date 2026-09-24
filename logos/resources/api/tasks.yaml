@@ -205,7 +205,7 @@ paths:
       operationId: resumeTask
       tags: [tasks]
       summary: "恢复任务到暂停前的状态"
-      description: "来源：S04 EX-10.1（/task resume）、CLI task resume。幂等。"
+      description: "来源：S04 EX-10.1（/task resume）、CLI task resume。幂等。恢复到 running / waiting_input 而没有活会话时（人工停止、会话无产物），续接最近的会话（core-02 §5.1）。"
       responses:
         '200':
           description: "已恢复"
@@ -243,6 +243,27 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: "任务不在 failed 状态（TASK_NOT_FAILED）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/tasks/{taskKey}/relocate:
+    parameters:
+      - $ref: '#/components/parameters/taskKey'
+    post:
+      operationId: relocateTask
+      tags: [tasks]
+      summary: "重新代码定位"
+      description: "来源：core-02 §5.1 #6。分流卡降级（定位失败 / 开发机离线）时从面板重跑代码定位，结果原地更新待拍板的分流卡。已有定位会话在跑时不重复派。"
+      responses:
+        '202':
+          description: "已发起（或已在定位中）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: "任务已拍板（INVALID_STATE）"
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -297,6 +318,9 @@ paths:
                     pickTargets:
                       type: array
                       items: { type: string }
+                force:
+                  type: boolean
+                  description: "同一来源已有未完结的根任务时仍要新建（core-02 §5.1 #13）"
       responses:
         '201':
           description: "任务已创建"
@@ -305,7 +329,7 @@ paths:
               schema: { $ref: '#/components/schemas/Task' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: "草案已取消或过期（DRAFT_NOT_OPEN，S04 EX-34.1）"
+          description: "草案已取消或过期（DRAFT_NOT_OPEN，S04 EX-34.1）；或同一来源已有未完结任务且未带 force（DUPLICATE_SOURCE）"
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -498,7 +522,8 @@ components:
         repo: { $ref: '#/components/schemas/RepoRef' }
         runtime: { type: string, nullable: true }
         agent: { $ref: '#/components/schemas/AgentName' }
-        queueReason: { type: string, nullable: true }
+        queueReason: { type: string, nullable: true, description: "排队 / 等待原因；以「人工处理：」开头的会进收件箱" }
+        priority: { type: string, nullable: true, description: "Jira 来源任务的优先级原值（P0 / High …），其他来源为 null" }
         unreadCount: { type: integer }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }

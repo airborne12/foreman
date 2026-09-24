@@ -127,6 +127,7 @@ export class Runtimes {
       online: rt.online,
       transport: rt.transport,
       labels: rt.labels,
+      repos: Object.keys(rt.repos ?? {}),
       agents,
       sessions,
       maxSessions,

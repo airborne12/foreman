@@ -45,6 +45,15 @@ export function approvalRoutes(app: AppContext) {
     const key = c.req.param('key');
     if (!/^A-\d+$/.test(key)) throw new ApiError(404, 'NOT_FOUND', `审批 ${key} 不存在`);
     const body = await parseBody(c, Decide);
+    // 拍板时改选的仓库必须至少有一个 runtime 登记过，否则拍完才在派发时卡住（2026-09-24 实验环境 T-3）
+    const repo = body.decision === 'approve' ? (body.overrides as Record<string, unknown> | null | undefined)?.repo : undefined;
+    if (typeof repo === 'string' && repo) {
+      const rts = await app.db.query<{ name: string; repos: Record<string, unknown> | null }>('SELECT name, repos FROM runtimes');
+      const reported = rts.rows.filter((r) => r.repos && Object.keys(r.repos).length);
+      if (reported.length && !reported.some((r) => repo in r.repos!)) {
+        throw new ApiError(422, 'REPO_UNAVAILABLE', `没有 runtime 登记仓库 ${repo}（已登记：${reported.map((r) => `${r.name}: ${Object.keys(r.repos!).join('、')}`).join('；')}）`);
+      }
+    }
     const result = await app.approvals.decide(key, { decision: body.decision, bodyHash: body.bodyHash, editedBody: body.editedBody ?? null, overrides: body.overrides ?? null, comment: body.comment ?? null, via: 'panel' });
     return c.json(result);
   });

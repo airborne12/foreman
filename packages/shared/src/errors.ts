@@ -26,6 +26,9 @@ export const ERROR_CODES = {
   RESUME_FAILED: '会话续接失败',
   UNKNOWN_COMMAND: '未知指令',
   FORBIDDEN_ENV: '禁止的环境变量',
+  DUPLICATE_SOURCE: '同一来源已有进行中的任务',
+  REPO_UNAVAILABLE: '没有 runtime 登记该仓库',
+  INVALID_STATE: '任务当前状态不允许该操作',
   INTERNAL: '内部错误',
 } as const;
 export type ErrorCode = keyof typeof ERROR_CODES;

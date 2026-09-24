@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-36（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-43（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -13,7 +13,7 @@ import { bootTestApp, http, TEST_TOKEN, type TestApp } from '../helpers/testApp.
 import { FakeWorker } from '../helpers/fakeWorker.js';
 import { seedTask, seedRuntime, seedSession, seedWorktree, runtimeId } from '../helpers/seed.js';
 import { fixtures, type FixtureCtx } from '../orchestration/fixtures.js';
-import { WorktreeCreate, SessionStart, WorkerConfig, makeEnvelope } from '@foreman/shared';
+import { WorktreeCreate, SessionStart, WorkerConfig, makeEnvelope, routeTask } from '@foreman/shared';
 import { createWorktree, pickBuildEnv, resolveBaseRef } from '../../apps/worker/src/worktree.js';
 import { Worker } from '../../apps/worker/src/worker.js';
 import { Intake } from '../../apps/center/src/domain/intake.js';
@@ -385,5 +385,111 @@ describe('S03 1.5 产物与子任务', () => {
     await seedTask(app.db, { key: 'T-231', state: 'running' });
     const r = await http(app, 'POST', '/api/tasks/T-231/retry', { mode: 'same_agent' });
     expect(r.status).toBe(409); expect(r.body.code).toBe('TASK_NOT_FAILED');
+  }));
+});
+
+describe('S03 1.6 实验环境回归（2026-09-24）', () => {
+  it('UT-S03-37: 会话结束但本会话没有产物 → 任务暂停进收件箱，回复续接后原因清除', () => withReport('UT-S03-37', async () => {
+    const w = await fw('dev');
+    const taskId = await seedTask(app.db, { key: 'T-243', state: 'running', runtime: 'dev', agent: 'claude' });
+    const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'claude', kind: 'implement' });
+    await app.db.query(`INSERT INTO messages (channel_id, task_id, kind, author, text) SELECT channel_id, id, 'progress', 'claude', '建 PR 没被批准，本轮停在这里' FROM tasks WHERE id=$1`, [taskId]);
+    await app.dispatch.onSessionState('dev', { sessionId: sid, state: 'done', source: 'hook' });
+    const t = await app.tasks.byKey('T-243');
+    expect(t.state).toBe('paused');
+    expect(t.queue_reason).toMatch(/^人工处理：会话结束但没有产物/);
+    expect(t.queue_reason).toContain('建 PR 没被批准');
+    const inbox = await http(app, 'GET', '/api/inbox');
+    expect(inbox.body.failures.map((f: any) => f.key)).toContain('T-243');
+    const r = await http(app, 'POST', '/api/tasks/T-243/messages', { text: '补上描述再提' });
+    expect(r.status).toBe(202);
+    const env = await w.expect((e) => e.type === 'session.resume');
+    expect(env.payload.sessionId).toBe(sid);
+    const after = await app.tasks.byKey('T-243');
+    expect(after.state).toBe('running'); expect(after.queue_reason).toBeNull();
+  }));
+  it('UT-S03-38: 代码任务只派给登记了该仓库的 runtime；都没有时进收件箱说明原因', () => withReport('UT-S03-38', async () => {
+    const rules = { code: { require: ['build:doris'], prefer: 'dev' }, text: { require: [] } };
+    const rts = [
+      { name: 'dev', online: true, labels: ['build:doris'], runningSessions: 0, repos: ['selectdb/selectdb-core'] },
+      { name: 'dev2', online: true, labels: ['build:doris'], runningSessions: 0, repos: ['apache/doris'] },
+    ];
+    expect(routeTask({ kind: 'code', rules, runtimes: rts, repo: 'apache/doris' }).runtime).toBe('dev2');
+    expect(routeTask({ kind: 'code', rules, runtimes: rts, repo: 'x/y' })).toMatchObject({ runtime: null, missingLabels: ['repo:x/y'] });
+    expect(routeTask({ kind: 'code', rules, runtimes: rts, repo: 'x/y', override: 'dev' }).runtime).toBeNull();
+    expect(routeTask({ kind: 'text', rules, runtimes: rts, repo: 'x/y' }).runtime).not.toBeNull();
+    // 没上报仓库的 runtime（旧 worker）不做仓库过滤
+    expect(routeTask({ kind: 'code', rules, runtimes: [{ name: 'old', online: true, labels: ['build:doris'], runningSessions: 0 }], repo: 'x/y' }).runtime).toBe('old');
+
+    const w = await fw('dev');
+    const taskId = await seedTask(app.db, { key: 'T-244', state: 'queued', repo: 'apache/doris' });
+    await app.dispatch.dispatchTask(taskId);
+    const t = await app.tasks.byKey('T-244');
+    expect(t.state).toBe('queued');
+    expect(t.queue_reason).toBe('人工处理：没有 runtime 登记仓库 apache/doris，在 runtime 配置里加上该仓库，或改选仓库后重新拍板');
+    await expect(w.expect((e) => e.type === 'worktree.create', 400)).rejects.toThrow();
+    const inbox = await http(app, 'GET', '/api/inbox');
+    expect(inbox.body.failures.map((f: any) => f.key)).toContain('T-244');
+  }));
+  it('UT-S03-39: 拍板改选没有 runtime 登记的仓库 → 422 REPO_UNAVAILABLE，审批保持 pending', () => withReport('UT-S03-39', async () => {
+    await fw('dev');
+    const { key, hash } = await pending('T-245', { repo: null });
+    const bad = await http(app, 'POST', `/api/approvals/${key}/decide`, { decision: 'approve', bodyHash: hash, overrides: { repo: 'apache/doris' } });
+    expect(bad.status).toBe(422); expect(bad.body.code).toBe('REPO_UNAVAILABLE');
+    expect(bad.body.message).toContain('dev: selectdb/selectdb-core');
+    expect((await app.db.one<any>('SELECT status FROM approvals WHERE key=$1', [key])).status).toBe('pending');
+    // 改选已登记的仓库正常通过
+    const ok = await http(app, 'POST', `/api/approvals/${key}/decide`, { decision: 'approve', bodyHash: hash, overrides: { repo: 'selectdb/selectdb-core' } });
+    expect(ok.status).toBe(200);
+  }));
+  it('UT-S03-40: 降级分流卡可从面板重新定位；已拍板的任务返回 409', () => withReport('UT-S03-40', async () => {
+    const w = await fw('dev');
+    const { taskId } = await pending('T-246');
+    await app.db.query(`UPDATE triage_cards SET degraded=true, degraded_reason='开发机离线，代码定位待补' WHERE task_id=$1`, [taskId]);
+    const r = await http(app, 'POST', '/api/tasks/T-246/relocate');
+    expect(r.status).toBe(202);
+    const env = await w.expect((e) => e.type === 'worktree.create');
+    expect(env.payload.taskKey).toBe('T-246');
+    expect(await app.db.one(`SELECT 1 FROM sessions WHERE task_id=$1 AND kind='code_locate' AND state='planned'`, [taskId])).not.toBeNull();
+    expect(await app.db.one(`SELECT 1 FROM messages WHERE task_id=$1 AND text='已从面板发起重新定位'`, [taskId])).not.toBeNull();
+    // 重复点击不重复派
+    await http(app, 'POST', '/api/tasks/T-246/relocate');
+    expect(Number((await app.db.one<any>(`SELECT count(*) AS n FROM sessions WHERE task_id=$1 AND kind='code_locate'`, [taskId])).n)).toBe(1);
+    await seedTask(app.db, { key: 'T-247', state: 'running', runtime: 'dev' });
+    const bad = await http(app, 'POST', '/api/tasks/T-247/relocate');
+    expect(bad.status).toBe(409); expect(bad.body.code).toBe('INVALID_STATE');
+  }));
+  it('UT-S03-41: 停止会话后从暂停恢复，续接原会话而不是只改状态', () => withReport('UT-S03-41', async () => {
+    const w = await fw('dev');
+    const taskId = await seedTask(app.db, { key: 'T-248', state: 'running', runtime: 'dev', agent: 'codex' });
+    const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'codex', kind: 'implement' });
+    await app.dispatch.onSessionState('dev', { sessionId: sid, state: 'stopped', source: 'worker' });
+    expect((await app.tasks.byKey('T-248')).state).toBe('paused');
+    const r = await http(app, 'POST', '/api/tasks/T-248/resume');
+    expect(r.status).toBe(200); expect(r.body.state).toBe('running');
+    const env = await w.expect((e) => e.type === 'session.resume');
+    expect(env.payload.sessionId).toBe(sid);
+    expect((await app.db.one<any>('SELECT state FROM sessions WHERE id=$1', [sid])).state).toBe('running');
+  }));
+  it('UT-S03-43: worktree 已被实现会话用过时，基线不同也原样复用（重试不丢改动）', () => withReport('UT-S03-43', async () => {
+    const w = await fw('dev');
+    const taskId = await seedTask(app.db, { key: 'T-251', state: 'queued', runtime: 'dev' });
+    await app.db.query(`UPDATE tasks SET base_branch='branch-selectdb-doris-4.1' WHERE id=$1`, [taskId]);
+    const wt = await seedWorktree(app.db, { taskId, runtime: 'dev', path: '/tmp/fx/wt/T-251' });
+    await seedSession(app.db, { taskId, runtime: 'dev', agent: 'claude', kind: 'implement', state: 'failed' }).then((sid) => app.db.query('UPDATE sessions SET worktree_id=$2 WHERE id=$1', [sid, wt]));
+    await app.dispatch.dispatchTask(taskId, { attempt: 2 });
+    const env = await w.expect((e) => e.type === 'session.start' || e.type === 'worktree.create');
+    expect(env.type).toBe('session.start');
+    expect(await app.db.one(`SELECT 1 FROM messages WHERE task_id=$1 AND text LIKE '%按新基线重建%'`, [taskId])).toBeNull();
+  }));
+  it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
+    await fw('dev');
+    const { taskId } = await pending('T-249');
+    await app.db.query(`UPDATE context_packs SET jira='{"key":"CIR-20001","priority":"P0"}'::jsonb WHERE task_id=$1`, [taskId]);
+    const inbox = await http(app, 'GET', '/api/inbox');
+    expect(inbox.body.approvals.find((a: any) => a.taskKey === 'T-249').priority).toBe('P0');
+    expect((await http(app, 'GET', '/api/tasks/T-249')).body.priority).toBe('P0');
+    const rts = await http(app, 'GET', '/api/runtimes');
+    expect(rts.body.items.find((r: any) => r.name === 'dev').repos).toEqual(['selectdb/selectdb-core']);
   }));
 });

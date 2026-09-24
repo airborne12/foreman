@@ -50,6 +50,8 @@
 | UT-S04-24 | ask_clarification candidates 超过 5 个被拒 | AskClarificationInput.candidates maxItems 5 | — | 6 个 | 校验错误 |
 | UT-S04-25 | lookup_jira 转系统作业并等待结果 | Step 18–26 | dev 在线 vpn:jira；fake Jira 返回单 | 调用 | jobs kind=jira-lookup 完成；MCP 返回 found=true 与 issue 摘要；耗时 < 60 秒 |
 | UT-S04-26 | lookup_jira 无 vpn:jira runtime 返回 SOURCE_UNAVAILABLE | EX-20.1 | 无此标签 runtime | 调用 | MCP 返回 error SOURCE_UNAVAILABLE，无 jobs 排队 |
+| UT-S04-27 | 同一来源已有未完结任务 → 草案标出已有任务，确认默认 409，force 才新建 | channels.yaml → confirmDraft.force；core-02 §5.1 #13；实验环境实测（CIR-30103 重复建出 T-6） | 已有 pending_decision 任务 source=CIR-19418 | /task new 同来源；confirm；confirm force；已有任务 done 后再建 | 草案卡 payload.existing 指向已有任务；confirm 409 DUPLICATE_SOURCE 且草案仍 open；force 201；已完成的任务不算重复 |
+| UT-S04-28 | 草案确认 / 取消后，草案卡消息回写状态 | core-02 §5.1 #13 | 两份 open 草案 | 一份 confirm，一份 cancel | 草案卡 payload.status 分别为 confirmed（带 taskKey）与 cancelled；写 message.updated 事件 |
 
 ## 二、场景测试用例
 

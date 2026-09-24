@@ -1,5 +1,5 @@
 /**
- * S04 单元测试：UT-S04-01 ~ UT-S04-26（来源：logos/resources/test/core-S04-test-cases.md）
+ * S04 单元测试：UT-S04-01 ~ UT-S04-28（来源：logos/resources/test/core-S04-test-cases.md）
  * 频道与消息校验、斜杠命令、调度员会话生命周期、草案与确认。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -252,5 +252,36 @@ describe('S04 1.4 草案与确认', () => {
     const r = await mcp(token, 'lookup_jira', { key: 'CIR-19418' });
     expect(r.error.code).toBe(-32003); expect(r.error.message).toContain('SOURCE_UNAVAILABLE');
     expect(Number((await app.db.one<{ n: string }>(`SELECT count(*) AS n FROM jobs WHERE kind='jira-lookup'`))!.n)).toBe(0);
+  }));
+});
+
+describe('S04 1.5 草案去重与状态回写（2026-09-24 实验环境）', () => {
+  it('UT-S04-27: 同一来源已有未完结任务 → 草案标出已有任务，确认默认 409，force 才新建', () => withReport('UT-S04-27', async () => {
+    await channel();
+    await seedTask(app.db, { key: 'T-250', state: 'pending_decision', source: 'CIR-19418', channel: 'doris-index' });
+    const r0 = await post('/task new --source CIR-19418 --repo selectdb/selectdb-core --path fix');
+    const m = await app.db.one<any>(`SELECT payload FROM messages WHERE ref_type='draft' AND ref_id=$1`, [r0.body.draft.id]);
+    expect(m.payload.existing).toMatchObject({ key: 'T-250', state: 'pending_decision' });
+    const dup = await http(app, 'POST', `/api/drafts/${r0.body.draft.id}/confirm`);
+    expect(dup.status).toBe(409); expect(dup.body.code).toBe('DUPLICATE_SOURCE'); expect(dup.body.message).toContain('T-250');
+    expect((await app.db.one<any>('SELECT status FROM task_drafts WHERE id=$1', [r0.body.draft.id])).status).toBe('open');
+    const forced = await http(app, 'POST', `/api/drafts/${r0.body.draft.id}/confirm`, { force: true });
+    expect(forced.status).toBe(201); expect(forced.body.key).not.toBe('T-250');
+    // 已完成的任务不算重复
+    await app.db.query(`UPDATE tasks SET state='done' WHERE source_ref='CIR-19418'`);
+    const r1 = await post('/task new --source CIR-19418 --repo selectdb/selectdb-core --path fix');
+    expect((await http(app, 'POST', `/api/drafts/${r1.body.draft.id}/confirm`)).status).toBe(201);
+  }));
+  it('UT-S04-28: 草案确认 / 取消后，草案卡消息回写状态与任务号', () => withReport('UT-S04-28', async () => {
+    await channel();
+    const a = await post('/task new --source CIR-19418 --repo selectdb/selectdb-core --path fix');
+    const created = await http(app, 'POST', `/api/drafts/${a.body.draft.id}/confirm`);
+    const ma = await app.db.one<any>(`SELECT payload FROM messages WHERE ref_type='draft' AND ref_id=$1`, [a.body.draft.id]);
+    expect(ma.payload.status).toBe('confirmed'); expect(ma.payload.taskKey).toBe(created.body.key);
+    const b = await post('/task new --source CIR-19419 --repo selectdb/selectdb-core --path fix');
+    await http(app, 'POST', `/api/drafts/${b.body.draft.id}/cancel`);
+    const mb = await app.db.one<any>(`SELECT payload FROM messages WHERE ref_type='draft' AND ref_id=$1`, [b.body.draft.id]);
+    expect(mb.payload.status).toBe('cancelled');
+    expect(await app.db.one(`SELECT 1 FROM events WHERE type='message.updated' AND payload->'message'->>'refId'=$1`, [b.body.draft.id])).not.toBeNull();
   }));
 });

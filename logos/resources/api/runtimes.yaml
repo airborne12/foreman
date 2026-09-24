@@ -267,6 +267,11 @@ components:
           type: array
           items: { type: string }
           example: [agent:claude, agent:codex, build:doris, repo:apache/doris, vpn:jira]
+        repos:
+          type: array
+          items: { type: string }
+          description: "worker 注册时登记的仓库；代码任务只派给登记了目标仓库的 runtime（core-02 §5.1）"
+          example: [selectdb/selectdb-core]
         agents:
           type: object
           description: "每家 agent 的运行中会话数与上限"

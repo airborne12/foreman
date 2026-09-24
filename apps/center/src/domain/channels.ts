@@ -250,10 +250,11 @@ export class Channels {
   async createDraft(c: any, fields: DraftFields, origin: 'dispatcher' | 'command', sessionId?: string | null) {
     const now = this.clock.now();
     const highlight = (['source', 'repo', 'path'] as const).filter((k) => !fields[k]);
+    const existing = await this.activeTaskFor(fields.source);
     const d = await this.db.one<any>(`INSERT INTO task_drafts (channel_id, session_id, origin, status, fields, expires_at, created_at, updated_at) VALUES ($1,$2,$3,'open',$4,$5,$6,$6) RETURNING *`,
       [c.id, sessionId ?? null, origin, JSON.stringify(fields), new Date(now.getTime() + 24 * 3600_000), now]);
     const m = await this.db.one<any>(`INSERT INTO messages (channel_id, kind, author, text, ref_type, ref_id, payload, created_at) VALUES ($1,'draft_card',$2,$3,'draft',$4,$5,$6) RETURNING *`,
-      [c.id, origin === 'command' ? 'system' : 'claude', `草案：${fields.source || '（待补）'}${fields.sourceTitle ? ` · ${fields.sourceTitle}` : ''}`, d!.id, JSON.stringify({ fields, highlight, note: fields.note ?? null }), now]);
+      [c.id, origin === 'command' ? 'system' : 'claude', `草案：${fields.source || '（待补）'}${fields.sourceTitle ? ` · ${fields.sourceTitle}` : ''}`, d!.id, JSON.stringify({ fields, highlight, note: fields.note ?? null, status: 'open', existing }), now]);
     await this.events.record(this.db.pool, { type: 'message.new', channelId: c.id, payload: { channel: c.slug, message: serializeMessage(m, null, c.slug) } });
     this.events.flush();
     return this.serializeDraft(d!, c.slug, highlight);
@@ -275,8 +276,25 @@ export class Channels {
     return d;
   }
 
+  /** 同一来源（Jira key / PR）已有未完结的根任务：草案上提示，确认时默认拦下，避免重复派活 */
+  private async activeTaskFor(source: string | null | undefined) {
+    if (!source) return null;
+    const t = await this.db.one<{ key: string; state: string; channel_slug: string }>(`SELECT t.key, t.state, c.slug AS channel_slug FROM tasks t JOIN channels c ON c.id=t.channel_id WHERE t.source_ref=$1 AND t.parent_id IS NULL AND t.state NOT IN ('done') ORDER BY t.created_at DESC LIMIT 1`, [source]);
+    return t ? { key: t.key, state: t.state, channel: t.channel_slug } : null;
+  }
+
+  /** 草案卡消息同步状态（确认后显示任务号，取消后收起按钮） */
+  private async markDraftMessage(id: string, patch: Record<string, unknown>) {
+    const rows = await this.db.query<any>(`UPDATE messages SET payload = payload || $2::jsonb WHERE ref_type='draft' AND ref_id=$1 RETURNING *`, [id, JSON.stringify(patch)]);
+    for (const m of rows.rows) {
+      const ch = await this.db.one<{ slug: string }>('SELECT slug FROM channels WHERE id=$1', [m.channel_id]);
+      await this.events.record(this.db.pool, { type: 'message.updated', channelId: m.channel_id, payload: { channel: ch?.slug, message: serializeMessage(m, null, ch?.slug ?? '') } });
+    }
+    this.events.flush();
+  }
+
   /** Step 32–34：确认草案 → 建根任务并挂到频道，随后进入 S01 Step 11 */
-  async confirmDraft(id: string, edits?: Partial<DraftFields>) {
+  async confirmDraft(id: string, edits?: Partial<DraftFields>, force = false) {
     const d = await this.draftById(id);
     const now = this.clock.now();
     if (d.status === 'open' && d.expires_at && new Date(d.expires_at) <= now) {
@@ -285,6 +303,8 @@ export class Channels {
     }
     if (d.status !== 'open') throw new ApiError(409, 'DRAFT_NOT_OPEN', `草案已${d.status === 'confirmed' ? '确认' : d.status === 'cancelled' ? '取消' : '过期'}`);
     const f: DraftFields = { ...(d.fields as DraftFields), ...(edits ?? {}) };
+    const dup = force ? null : await this.activeTaskFor(f.source);
+    if (dup) throw new ApiError(409, 'DUPLICATE_SOURCE', `${f.source} 已有任务 ${dup.key}（${dup.state}），可直接打开它；确需另起一个请选"仍要新建"`);
     const repoSource = edits?.repo ? 'manual' : (f.repoSource ?? 'llm');
     const sourceType = /^[A-Z]+-\d+$/.test(f.source) ? 'jira' : /^[\w.-]+\/[\w.-]+#\d+$/.test(f.source) ? 'github' : 'channel';
     const created = await this.db.tx(async (c) => {
@@ -302,6 +322,7 @@ export class Channels {
       return t;
     });
     this.events.flush();
+    await this.markDraftMessage(id, { status: 'confirmed', taskKey: created.key });
     await this.intake.scheduleCodeLocate(created.id);
     const fresh = await this.tasks.byKey(created.key);
     return this.tasks.serialize(fresh, d.channel_slug);
@@ -310,7 +331,7 @@ export class Channels {
   /** Step 31：取消草案（幂等） */
   async cancelDraft(id: string) {
     const d = await this.draftById(id);
-    if (d.status === 'open') await this.db.query(`UPDATE task_drafts SET status='cancelled', updated_at=$2 WHERE id=$1`, [id, this.clock.now()]);
+    if (d.status === 'open') { await this.db.query(`UPDATE task_drafts SET status='cancelled', updated_at=$2 WHERE id=$1`, [id, this.clock.now()]); await this.markDraftMessage(id, { status: 'cancelled' }); }
     return this.serializeDraft(await this.draftById(id), d.channel_slug);
   }
 

@@ -16,11 +16,11 @@ export interface ApprovalRow {
   payload: Record<string, unknown>; trust_mode_snapshot: string; trust_streak_snapshot: number; feishu_message_id: string | null; feishu_deferred: boolean;
   decided_via: string | null; decided_at: Date | null; modified: boolean; final_body: string | null; comment: string | null; superseded_by: string | null; action_id: string | null; expires_at: Date | null; created_at: Date;
   /** 下面几项由 listInbox / byKey / list 的 JOIN 带出（其他查询没有，故可选）：拍板时要先看清这是哪个单 */
-  task_key?: string; task_title?: string; task_source_type?: string; task_source_ref?: string;
+  task_key?: string; task_title?: string; task_source_type?: string; task_source_ref?: string; task_source_url?: string | null; task_priority?: string | null;
 }
 
 /** 审批 + 任务上下文：审批卡只有执行细节没法判断，必须带上原始单号与标题 */
-const APPROVAL_WITH_TASK = `SELECT a.*, t.key AS task_key, t.title AS task_title, t.source_type AS task_source_type, t.source_ref AS task_source_ref FROM approvals a JOIN tasks t ON t.id=a.task_id`;
+const APPROVAL_WITH_TASK = `SELECT a.*, t.key AS task_key, t.title AS task_title, t.source_type AS task_source_type, t.source_ref AS task_source_ref, t.source_url AS task_source_url, cp.jira->>'priority' AS task_priority FROM approvals a JOIN tasks t ON t.id=a.task_id LEFT JOIN context_packs cp ON cp.task_id=t.id`;
 
 export type ActionExecutor = (a: { approval: ApprovalRow; finalBody: string; payload: Record<string, unknown>; taskId: string }) => Promise<Record<string, unknown>>;
 /** 补偿器：撤回已执行的动作（S06 Step 32）；返回 false 表示不可撤回 */
@@ -342,7 +342,7 @@ export class Approvals {
   serialize(a: ApprovalRow) {
     return {
       key: a.key, taskKey: a.task_key ?? (a.payload as any)?.taskKey ?? null, taskTitle: a.task_title ?? null,
-      taskSource: a.task_source_ref ? `${a.task_source_type ?? 'src'}:${a.task_source_ref}` : null, actionType: a.action_type, status: a.status, title: a.title, body: a.body, bodyHash: a.body_hash,
+      taskSource: a.task_source_ref ? `${a.task_source_type ?? 'src'}:${a.task_source_ref}` : null, taskSourceUrl: a.task_source_url ?? null, priority: a.task_priority ?? null, actionType: a.action_type, status: a.status, title: a.title, body: a.body, bodyHash: a.body_hash,
       payload: a.payload, trustMode: a.trust_mode_snapshot, trustStreak: a.trust_streak_snapshot, feishuMessageId: a.feishu_message_id, feishuDeferred: a.feishu_deferred,
       decidedVia: a.decided_via, decidedAt: a.decided_at ? new Date(a.decided_at).toISOString() : null, modified: a.modified, finalBody: a.final_body, comment: a.comment,
       supersededBy: (a.payload as any)?.supersededByKey ?? a.superseded_by, actionId: a.action_id, sessionId: a.session_id, createdAt: new Date(a.created_at).toISOString(),

@@ -40,8 +40,9 @@ export function channelRoutes(app: AppContext) {
   r.post('/api/drafts/:id/confirm', async (c) => {
     const b = await parseBody(c, z.object({
       edits: z.object({ repo: z.string().optional(), path: z.enum(TASK_PATHS).optional(), runtime: z.string().optional(), agent: z.enum(AGENTS).optional(), pickTargets: z.array(z.string()).optional() }).optional(),
+      force: z.boolean().optional(),
     }));
-    return c.json(await app.channels.confirmDraft(c.req.param('id'), b.edits), 201);
+    return c.json(await app.channels.confirmDraft(c.req.param('id'), b.edits, b.force ?? false), 201);
   });
   r.post('/api/drafts/:id/cancel', async (c) => c.json(await app.channels.cancelDraft(c.req.param('id'))));
 
