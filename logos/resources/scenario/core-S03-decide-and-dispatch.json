@@ -130,8 +130,8 @@
         { "step": "Step 1", "method": "GET", "url": "/api/approvals?taskKey=T-233&status=pending", "expected_status": 200, "extract": { "ak": "body.items[0].key", "h": "body.items[0].bodyHash" } },
         { "step": "EX-6.1", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 422, "assert": [{ "path": "body.code", "equals": "REPO_REQUIRED" }] },
         { "step": "EX-6.1", "method": "GET", "url": "/api/approvals/{{ak}}", "expected_status": 200, "assert": [{ "path": "body.status", "equals": "pending" }] },
-        { "step": "EX-6.1", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}", "overrides": { "repo": "apache/doris" } }, "expected_status": 200, "assert": [{ "path": "body.approval.modified", "equals": true }] },
-        { "step": "EX-6.1", "method": "GET", "url": "/api/tasks/T-233", "expected_status": 200, "assert": [{ "path": "body.repo.name", "equals": "apache/doris" }, { "path": "body.repo.source", "equals": "manual" }] }
+        { "step": "EX-6.1", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}", "overrides": { "repo": "selectdb/selectdb-core" } }, "expected_status": 200, "assert": [{ "path": "body.approval.modified", "equals": true }] },
+        { "step": "EX-6.1", "method": "GET", "url": "/api/tasks/T-233", "expected_status": 200, "assert": [{ "path": "body.repo.name", "equals": "selectdb/selectdb-core" }, { "path": "body.repo.source", "equals": "manual" }] }
       ]
     },
     {
