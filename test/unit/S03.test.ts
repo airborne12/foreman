@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-54（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-55（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -755,6 +755,25 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
       for (let i = 0; i < 30 && !calls.includes('resume:th-54'); i++) await new Promise((r) => setTimeout(r, 100));
       expect(calls).toContain('resume:th-54');
     } finally { w2.stop(); }
+  }));
+  it('UT-S03-55: 批准后续接已结束的会话失败 → 进失败卡，不假装在跑', () => withReport('UT-S03-55', async () => {
+    const w = await fw('dev');
+    const { token, taskId, sessionId } = await mcpSession('T-264', 'claude');
+    const call = mcpCall(token, 'request_approval', { taskKey: 'T-264', actionType: 'create_pr', title: '创建 PR', body: '改动说明', timeoutMinutes: 0.01 });
+    await new Promise((r) => setTimeout(r, 300)); await app.fakeClock.advance(1_000);
+    const key = (await call).result.structuredContent.approvalKey;
+    await app.dispatch.onSessionState('dev', { sessionId, state: 'done', source: 'exit' });
+    expect((await app.tasks.byKey('T-264')).state).toBe('waiting_approval');
+    const hash = (await app.db.one<any>('SELECT body_hash FROM approvals WHERE key=$1', [key])).body_hash;
+    expect((await http(app, 'POST', `/api/approvals/${key}/decide`, { decision: 'approve', bodyHash: hash })).status).toBe(200);
+    const env = await w.expect((e) => e.type === 'session.resume' && e.payload.sessionId === sessionId);
+    expect(String(env.payload.text)).toContain('已批准');
+    // worker 已不认识这个会话（例如重启丢了记录）
+    w.send('error', { code: 'RESUME_FAILED', message: '会话不在本 runtime', retryable: false }, env.id);
+    for (let i = 0; i < 30 && (await app.tasks.byKey('T-264')).state !== 'failed'; i++) await new Promise((r) => setTimeout(r, 100));
+    expect((await app.tasks.byKey('T-264')).state).toBe('failed');
+    const card = await app.db.one<any>(`SELECT payload FROM messages WHERE task_id=$1 AND kind='failure_card' ORDER BY created_at DESC LIMIT 1`, [taskId]);
+    expect(card.payload.options).toContain('fresh_session');
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');

@@ -10,14 +10,19 @@ case "$RT" in
   dev)
     DEV_SSH="${DEV_SSH:-jiangkai@10.26.20.3}"
     CENTER_SSH="${CENTER_SSH:-jiangkai2@172.17.2.13}"
-    ssh "$DEV_SSH" 'mkdir -p ~/.foreman/bin ~/.config/systemd/user && chmod 700 ~/.foreman'
+    # worker 的家目录以 systemd 用户实例为准，不能用 ssh 登录后的 ~：2026-09-29 账号 home 从 /mnt/disk1 迁到
+    # /mnt/disk14，ssh 进去的 ~ 变了而在跑的 worker 还在老目录，两次发布都落空、跑的仍是旧版
+    WHOME="$(ssh "$DEV_SSH" 'systemctl --user show-environment 2>/dev/null | sed -n "s/^HOME=//p"')"
+    [ -n "$WHOME" ] || WHOME="$(ssh "$DEV_SSH" 'echo $HOME')"
+    echo "worker 家目录：$WHOME"
+    ssh "$DEV_SSH" "mkdir -p '$WHOME/.foreman/bin' '$WHOME/.config/systemd/user' && chmod 700 '$WHOME/.foreman'"
     # 首次部署：同步 token 与 worker.yaml（已存在则保留）
     TOKEN="$(ssh "$CENTER_SSH" 'sed -n "s/^FOREMAN_TOKEN=//p" ~/.foreman/env')"
     [ -n "$TOKEN" ] || { echo "读不到中心的 FOREMAN_TOKEN"; exit 1; }
     # agent 走订阅版 CLI 要出网，而 systemd --user 不读 ~/.bashrc：代理必须进 EnvironmentFile，
     # 否则 codex 连 chatgpt.com 直接 403（缺省沿用中心 center.yaml 的 proxy，可用 WORKER_PROXY 覆盖）
     PROXY="${WORKER_PROXY:-$(ssh "$CENTER_SSH" 'sed -n "s/^proxy: *//p" ~/.foreman/center.yaml' | head -1)}"
-    ssh "$DEV_SSH" "bash -s '$TOKEN' '$PROXY'" <<'REMOTE'
+    ssh "$DEV_SSH" "HOME='$WHOME' bash -s '$TOKEN' '$PROXY'" <<'REMOTE'
 set -euo pipefail
 TOKEN="$1"
 PROXY="${2:-}"
@@ -53,16 +58,20 @@ YAML
   chmod 600 ~/.foreman/worker.yaml; echo "worker.yaml 已生成（未登记仓库，代码类任务暂不路由到 dev）"
 else echo "worker.yaml 已存在，保留"; fi
 REMOTE
-    scp -q "$SRC" "$DEV_SSH:.foreman/bin/foreman-worker.mjs.new"
-    scp -q "$ROOT/scripts/systemd/foreman-worker.service" "$DEV_SSH:.config/systemd/user/foreman-worker.service"
+    scp -q "$SRC" "$DEV_SSH:$WHOME/.foreman/bin/foreman-worker.mjs.new"
+    scp -q "$ROOT/scripts/systemd/foreman-worker.service" "$DEV_SSH:$WHOME/.config/systemd/user/foreman-worker.service"
+    ssh "$DEV_SSH" "cd '$WHOME/.foreman/bin' && md5sum foreman-worker.mjs.new | cut -c1-32" | grep -qx "$(md5 -q "$SRC" 2>/dev/null || md5sum "$SRC" | cut -c1-32)" || { echo "新 bundle 校验不一致"; exit 1; }
     ssh "$DEV_SSH" 'set -e
       export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
-      cd ~/.foreman/bin
+      cd '"'$WHOME'"'/.foreman/bin
       [ -f foreman-worker.mjs ] && mv foreman-worker.mjs foreman-worker.mjs.prev
       mv foreman-worker.mjs.new foreman-worker.mjs
       systemctl --user daemon-reload
       systemctl --user enable foreman-worker >/dev/null 2>&1; systemctl --user restart foreman-worker   # enable --now 不会重启已在运行的旧进程
       sleep 3; systemctl --user is-active foreman-worker'
+    # 发布后自检：systemd 实际跑的 bundle 必须就是刚构建的这一个
+    RUNNING="$(ssh "$DEV_SSH" 'f=$(systemctl --user show foreman-worker -p ExecStart --value | grep -o "/[^ ;]*foreman-worker\.mjs" | head -1); md5sum "$f" | cut -c1-32; echo "$f" >&2')"
+    [ "$RUNNING" = "$(md5 -q "$SRC" 2>/dev/null || md5sum "$SRC" | cut -c1-32)" ] && echo "自检通过：在跑的就是本次构建" || { echo "自检失败：systemd 在跑的不是本次构建"; exit 1; }
     ;;
   center)
     ssh "${CENTER_SSH:-jiangkai2@172.17.2.13}" 'launchctl kickstart -k gui/$(id -u)/ai.foreman.worker && sleep 2 && echo restarted' ;;

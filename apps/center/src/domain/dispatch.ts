@@ -41,10 +41,11 @@ export class Dispatch {
       // EX-22.1：等待超时后会话已结束 → 续接送回批准
       const s = await this.db.one<any>(`SELECT s.*, r.name AS runtime FROM sessions s JOIN runtimes r ON r.id=s.runtime_id WHERE s.id=$1`, [a.session_id]);
       if (s && ['done', 'stopped', 'failed'].includes(s.state)) {
-        this.hub.send(s.runtime, 'session.resume', { sessionId: s.id, text: `审批 ${a.key} 已批准，继续创建 PR` });
-        await this.db.query(`UPDATE sessions SET state='running', updated_at=$2 WHERE id=$1`, [s.id, this.clock.now()]);
-        await this.db.query(`UPDATE tasks SET state='running', updated_at=$2 WHERE id=$1`, [a.task_id, this.clock.now()]);
-        await this.threadEvent(a.task_id, `已恢复会话 ${s.agent_session_id ?? s.id.slice(0, 6)}：送入「已批准」`);
+        // 走 resumeSession：登记 dispatch 作业，worker 回 RESUME_FAILED 时能落到「续接失败 → 三选一」。
+        // 之前直接 hub.send 且先把会话标 running：续接失败被静默丢掉，任务假装在跑（2026-09-29 T-81 / A-90）
+        await this.db.query(`UPDATE tasks SET state='running', queue_reason=NULL, updated_at=$2 WHERE id=$1 AND state IN ('waiting_approval','paused','delivered')`, [a.task_id, this.clock.now()]);
+        await this.threadEvent(a.task_id, `${a.key} 已批准，续接会话 ${s.agent_session_id?.slice(0, 8) ?? s.id.slice(0, 6)} 继续`);
+        await this.resumeSession(a.task_id, `审批 ${a.key} 已批准，继续创建 PR`);
         await this.broadcastTask(a.task_id);
       }
       return;
