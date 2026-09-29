@@ -452,13 +452,17 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
   it('UT-S03-40: 降级分流卡可从面板重新定位；已拍板的任务返回 409', () => withReport('UT-S03-40', async () => {
     const w = await fw('dev');
     const { taskId } = await pending('T-246');
-    await app.db.query(`UPDATE triage_cards SET degraded=true, degraded_reason='开发机离线，代码定位待补' WHERE task_id=$1`, [taskId]);
+    await app.db.query(`UPDATE triage_cards SET degraded=true, degraded_reason='开发机离线，代码定位待补', base_branch='3.1 or 4.0' WHERE task_id=$1`, [taskId]);
+    await app.db.query(`UPDATE tasks SET base_branch='3.1 or 4.0' WHERE id=$1`, [taskId]);
     const r = await http(app, 'POST', '/api/tasks/T-246/relocate');
     expect(r.status).toBe(202);
     const env = await w.expect((e) => e.type === 'worktree.create');
     expect(env.payload.taskKey).toBe('T-246');
     expect(await app.db.one(`SELECT 1 FROM sessions WHERE task_id=$1 AND kind='code_locate' AND state='planned'`, [taskId])).not.toBeNull();
     expect(await app.db.one(`SELECT 1 FROM messages WHERE task_id=$1 AND text='已从面板发起重新定位'`, [taskId])).not.toBeNull();
+    // 旧的基线结论清掉，由新一轮定位重新判断
+    expect((await app.db.one<any>('SELECT base_branch FROM triage_cards WHERE task_id=$1', [taskId])).base_branch).toBeNull();
+    expect((await app.db.one<any>('SELECT base_branch FROM tasks WHERE id=$1', [taskId])).base_branch).toBeNull();
     // 重复点击不重复派
     await http(app, 'POST', '/api/tasks/T-246/relocate');
     expect(Number((await app.db.one<any>(`SELECT count(*) AS n FROM sessions WHERE task_id=$1 AND kind='code_locate'`, [taskId])).n)).toBe(1);
@@ -630,6 +634,11 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     expect(n.targetBranch).toBeNull();
     expect(n.suggestedPath).toBe('先确认扫描版本\n（定位给出的基线不是一条具体分支，拍板时请确认：3.1 or 4.0）');
     expect(normalizeTriage({ targetBranch: '  branch-4.1 ' }, known).targetBranch).toBe('branch-4.1');
+    // 任务上遗留的非法基线不被沿用
+    const legacy = await seedTask(app.db, { key: 'T-259', state: 'triaging', runtime: 'dev' });
+    await app.db.query(`UPDATE tasks SET base_branch='3.1 or 4.0' WHERE id=$1`, [legacy]);
+    await app.intake.emitTriage(legacy, null, { tier: 'fix', effort: 'small', repo: { name: 'selectdb/selectdb-core', confidence: 0.9 }, suggestedPath: 'x' });
+    expect((await app.db.one<any>('SELECT base_branch FROM triage_cards WHERE task_id=$1', [legacy])).base_branch).toBeNull();
     // 端到端：MCP deliver 短名 → 分流卡仓库为全名，且能路由到登记该仓库的 dev
     await fw('dev');
     const taskId = await seedTask(app.db, { key: 'T-256', state: 'triaging', runtime: 'dev', repo: null });

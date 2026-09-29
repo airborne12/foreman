@@ -286,7 +286,8 @@ export class Intake {
     const allLocations = triage.codeLocations ?? [];
     const truncated = allLocations.length > 8;
     // 目标分支：定位会话判断出来的优先，其次沿用任务上已有的（补齐降级卡时不要丢掉先前的判断）
-    const targetBranch = triage.targetBranch ?? t.base_branch ?? null;
+    // 沿用任务上已有的基线前也要确认是一条合法分支（2026-09-29 之前入库的卡里有「3.1 or 4.0」这种）
+    const targetBranch = triage.targetBranch ?? (t.base_branch && isBranchName(t.base_branch) ? t.base_branch : null);
     const payload = { taskKey: t.key, tier, effort, repo: { name: repoName, source: repoSource, confidence: triage.repo?.confidence ?? null, candidates: triage.repo?.candidates ?? [] }, baseBranch: targetBranch, suggestedPath: triage.suggestedPath ?? '', codeLocations: allLocations.slice(0, 8), defaultRuntime, defaultAgent, degraded: !!triage.degraded, degradedReason: triage.degradedReason ?? null, summaryLine: `档位 ${tier} · 预估 ${effort} · 仓库 ${repoName ?? '待确认'} · 基线 ${targetBranch ?? '仓库默认'} · runtime ${defaultRuntime ?? '-'} · agent ${defaultAgent}` };
     await this.db.tx(async (c) => {
       await c.query(`INSERT INTO triage_cards (task_id, tier, effort, repo_name, repo_confidence, repo_candidates, base_branch, suggested_path, code_locations, default_runtime, default_agent, degraded, degraded_reason, session_id, created_at, updated_at)

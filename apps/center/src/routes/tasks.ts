@@ -93,6 +93,9 @@ export function taskRoutes(app: AppContext) {
     const active = await app.db.one(`SELECT 1 FROM sessions WHERE task_id=$1 AND kind='code_locate' AND state IN ('planned','running','waiting_input')`, [t.id]);
     if (!active) {
       await app.db.query(`INSERT INTO messages (channel_id, task_id, kind, author, text, created_at) VALUES ($1,$2,'system','system',$3,$4)`, [t.channel_id, t.id, '已从面板发起重新定位', app.clock.now()]);
+      // 重新定位 = 重新判断：旧的基线结论清掉，否则新结论判不出基线时会沿用旧值（入库是 COALESCE）
+      await app.db.query(`UPDATE triage_cards SET base_branch=NULL WHERE task_id=$1`, [t.id]);
+      await app.db.query(`UPDATE tasks SET base_branch=NULL WHERE id=$1`, [t.id]);
       await app.intake.scheduleCodeLocate(t.id);
     }
     const fresh = await app.tasks.byKey(t.key);
