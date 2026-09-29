@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-45（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-46（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -334,11 +334,14 @@ describe('S03 1.4 worktree 与会话指令', () => {
     expect(start.slice(0, 3)).toEqual(['exec', '-C', '/tmp/fx/wt/T-231']);
     expect(start).toContain('sandbox_mode="workspace-write"');
     expect(start).toContain('mcp_servers.foreman.http_headers.Authorization="Bearer tok-2"');
+    // codex 0.158 起 MCP 工具默认要审批：只放行 foreman 服务器（2026-09-29 生产 12 个定位会话 deliver 全被拒）
+    expect(start).toContain('mcp_servers.foreman.default_tools_approval_mode="approve"');
     const s = { sessionId: input.sessionId, agent: 'codex', agentSessionId: 'th-1', pid: 1, cwd: input.cwd, logFile: '/dev/null', state: 'done' as const, mcp: input.mcp };
     const resume = codexResumeArgs(s, 'th-1', '继续');
     expect(resume.slice(0, 2)).toEqual(['exec', 'resume']);
     expect(resume).not.toContain('-C');
     expect(resume).toContain('mcp_servers.foreman.url="http://127.0.0.1:7801/mcp"');
+    expect(resume).toContain('mcp_servers.foreman.default_tools_approval_mode="approve"');
     expect(resume.slice(-2)).toEqual(['th-1', '继续']);
   }));
 });
@@ -516,6 +519,18 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     expect(t.cwd).toBe(resolve(home, 'workspace')); expect(existsSync(t.cwd)).toBe(true); expect(t.sessionId).toBe('s1');
     const w = textWorkspace({ cwd: '/mnt/wt/T-1' }, home);
     expect(w.cwd).toBe('/mnt/wt/T-1');
+  }));
+  it('UT-S03-46: 代码定位会话结束未回写时，已有的降级卡也刷新原因', () => withReport('UT-S03-46', async () => {
+    await fw('dev');
+    const taskId = await seedTask(app.db, { key: 'T-254', state: 'triaging', runtime: 'dev' });
+    await app.intake.emitTriage(taskId, null, { degraded: true, degradedReason: '代码定位排队中：dev 上 agent 并发已满' });
+    const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'codex', kind: 'code_locate' });
+    await app.dispatch.onSessionState('dev', { sessionId: sid, state: 'done', source: 'exit' });
+    const card = await app.db.one<any>('SELECT degraded, degraded_reason FROM triage_cards WHERE task_id=$1', [taskId]);
+    expect(card.degraded).toBe(true); expect(card.degraded_reason).toBe('代码定位失败：会话结束但未回写分流结果');
+    const aps = await app.db.query<any>(`SELECT status, payload FROM approvals WHERE task_id=$1 AND action_type='triage_confirm'`, [taskId]);
+    expect(aps.rows).toHaveLength(1); expect(aps.rows[0].status).toBe('pending');
+    expect(aps.rows[0].payload.degradedReason).toBe('代码定位失败：会话结束但未回写分流结果');
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');

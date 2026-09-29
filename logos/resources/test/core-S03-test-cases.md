@@ -62,8 +62,9 @@
 | UT-S03-43 | worktree 已被实现会话用过时，基线不同也原样复用 | S03 Step 11；UT-S07-23 回归（重试时误触发重建） | 任务基线 4.1，ready worktree 基于 main 且已被 implement 会话用过 | dispatchTask(attempt 2) | 直接下发 session.start，不发 worktree.create，线程不写「按新基线重建」 |
 | UT-S03-44 | agent 启动失败换家时守并发上限，另一家满了就排队 | EX-15.1 + EX-7.2；2026-09-29 生产实测（claude 目录未信任全部起不来，3 个代码定位换到 codex，codex 跑到 6/3） | dev 上 codex 已 3/3 运行 | claude 实现会话、claude 代码定位会话各报 AGENT_START_FAILED | 实现任务回到 queued、agent=codex、原因「排队：claude 启动失败…」；代码定位写回 queued 的 code-locate 作业；codex 活跃会话数保持 3 |
 | UT-S03-45 | 文本会话的占位 cwd 改到专用目录 | worker-channel.yaml → SessionStart.cwd；2026-09-29 claude 2.1.284 起 --bg 只在被信任目录启动，调度员落在 /tmp 起不来 | 临时 FOREMAN_HOME | textWorkspace(cwd=/tmp)；textWorkspace(cwd=worktree) | /tmp 换成 <home>/workspace 且目录已建；worktree 路径原样返回 |
+| UT-S03-46 | 代码定位会话结束未回写时，已有的降级卡也刷新原因 | S01 EX-22.1；2026-09-29 生产实测（会话已跑完，卡上仍写「排队中：并发已满」） | 任务已有降级分流卡（原因「代码定位排队中」），code_locate 会话 running | session.state done（未 deliver） | 分流卡原因改为「代码定位失败：会话结束但未回写分流结果」，审批仍 pending 且只有一条 |
 | UT-S03-30 | claude --bg 启动参数、工具黑名单与会话 id 解析 | S03 Step 15；claude 2.1.26x 实测 | fake claude：`--bg` 输出 `backgrounded · 3f171235 · T-231-implement`，`agents --json --all` 返回该短 id 与完整 sessionId；配置 disallowedTools | session.start | 参数含 `--permission-mode auto`、`--strict-mcp-config`、`--mcp-config=<json>`、`--disallowedTools=<逗号分隔>`（都带 =，变长参数用空格写法会吞掉 prompt），prompt 仍是最后一个参数；agentSessionId 为完整 UUID，shortId 为 3f171235 |
-| UT-S03-31 | codex 启动带 workspace-write 沙箱，续接不带 -C | S03 Step 15；codex exec resume --help | — | codexStartArgs / codexResumeArgs | 启动含 `-C <cwd>` 与 `sandbox_mode="workspace-write"`；续接以 `exec resume` 开头、不含 `-C`、含 MCP 配置，最后两个参数为 threadId 与文本 |
+| UT-S03-31 | codex 启动带 workspace-write 沙箱，续接不带 -C | S03 Step 15；codex exec resume --help | — | codexStartArgs / codexResumeArgs | 启动含 `-C <cwd>` 与 `sandbox_mode="workspace-write"`；续接以 `exec resume` 开头、不含 `-C`、含 MCP 配置，最后两个参数为 threadId 与文本；启动与续接都带 `mcp_servers.foreman.default_tools_approval_mode="approve"`（codex 0.158 起 MCP 工具默认要审批，后台 never 策略下会全部被拒，2026-09-29 生产实测） |
 
 ### 1.5 产物与子任务（来源：mcp.yaml → DeliverInput；schema.sql → artifacts、tasks 子任务 key）
 

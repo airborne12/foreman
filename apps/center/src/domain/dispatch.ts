@@ -232,8 +232,9 @@ export class Dispatch {
       await this.db.query(`UPDATE sessions SET state='done', exit_code=$2, ended_at=$3, updated_at=$3 WHERE id=$1`, [s.id, p.exitCode ?? 0, now]);
       const t = await this.db.one<any>('SELECT * FROM tasks WHERE id=$1', [s.task_id]);
       if (s.kind === 'code_locate') {
-        const card = await this.db.one('SELECT 1 FROM triage_cards WHERE task_id=$1', [s.task_id]);
-        if (!card) await this.intake.emitTriage(s.task_id, s.id, { degraded: true, degradedReason: '代码定位失败：会话结束但未回写分流结果' });
+        // 已有的降级卡（排队中 / 开发机离线）也要刷新原因，否则会话跑完了卡上还写着「排队中」
+        const card = await this.db.one<{ degraded: boolean }>('SELECT degraded FROM triage_cards WHERE task_id=$1', [s.task_id]);
+        if (!card || card.degraded) await this.intake.emitTriage(s.task_id, s.id, { degraded: true, degradedReason: '代码定位失败：会话结束但未回写分流结果' });
       } else if (s.kind === 'review') {
         await this.db.query(`UPDATE tasks SET state='done', terminal_at=$2, updated_at=$2 WHERE id=$1`, [t.id, now]);
         await this.threadEvent(t.id, `review 完成（${s.agent}）`);

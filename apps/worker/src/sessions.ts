@@ -167,7 +167,9 @@ function codexCommon(mcp: { url: string; token: string } | undefined, sandbox?: 
   return [
     '--json', '--skip-git-repo-check',
     '-c', `sandbox_mode="${sandbox ?? 'workspace-write'}"`, '-c', 'sandbox_workspace_write.network_access=true',
-    ...(mcp ? ['-c', `mcp_servers.foreman.url="${mcp.url}"`, '-c', `mcp_servers.foreman.http_headers.Authorization="Bearer ${mcp.token}"`] : []),
+    // codex 0.158（2026-09-28 自动更新）起 MCP 工具调用默认要审批，后台 exec 的审批策略是 never，
+    // 平台工具（get_task / report_progress / deliver…）会全部被拒：只放行 foreman 这一个服务器，shell 等其他审批不变
+    ...(mcp ? ['-c', `mcp_servers.foreman.url="${mcp.url}"`, '-c', `mcp_servers.foreman.http_headers.Authorization="Bearer ${mcp.token}"`, '-c', 'mcp_servers.foreman.default_tools_approval_mode="approve"'] : []),
   ];
 }
 export function codexStartArgs(input: SessionStartInput, sandbox?: string | null) {
