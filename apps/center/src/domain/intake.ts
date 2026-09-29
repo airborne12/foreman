@@ -188,7 +188,12 @@ export class Intake {
     }
     if (jobId) await this.db.query(`UPDATE jobs SET status='dispatched', runtime_id=$2, dispatched_at=$3 WHERE id=$1`, [jobId, rt.id, now]);
     const t = await this.db.one<any>('SELECT * FROM tasks WHERE id=$1', [taskId]);
-    const repo = t.repo_name ?? (Object.values(this.cfg.sources.jira.project_repo_map)[0] as string | undefined) ?? 'apache/doris';
+    // 任务上的仓库可能是早先 agent 交回的短名（2026-09-29 T-71：selectdb-core，建 worktree 报「未配置仓库」）：先按已登记仓库补全
+    const known = await this.knownRepos();
+    const fallback = (Object.values(this.cfg.sources.jira.project_repo_map)[0] as string | undefined) ?? known[0] ?? 'apache/doris';
+    const named = t.repo_name ? normalizeRepo(t.repo_name, known) : null;
+    const repo = named && known.includes(named) ? named : fallback;
+    if (named && named !== t.repo_name && known.includes(named)) await this.db.query(`UPDATE tasks SET repo_name=$2 WHERE id=$1`, [taskId, named]);
     await this.db.query(`INSERT INTO sessions (task_id, runtime_id, agent, kind, state, prompt, created_at, updated_at) VALUES ($1,$2,$3,'code_locate','planned','',$4,$4)`, [taskId, rt.id, agent, now]);
     await this.db.query(`UPDATE tasks SET runtime_name=$2, updated_at=$3 WHERE id=$1`, [taskId, rt.name, now]);
     await this.sendWorktreeCreate(taskId, rt.name, repo, 'code_locate');
@@ -300,8 +305,9 @@ export class Intake {
       if (existing) {
         await c.query(`UPDATE approvals SET payload=$2, updated_at=$3 WHERE id=$1`, [existing.id, JSON.stringify(payload), now]);
         await c.query(`UPDATE triage_cards SET approval_id=$2 WHERE task_id=$1`, [taskId, existing.id]);
-        await c.query(`INSERT INTO messages (channel_id, task_id, kind, author, text, created_at) VALUES ($1,$2,'system','system',$3,$4)`, [t.channel_id, taskId, '代码定位已补齐', now]);
-        await this.events.record(c, { type: 'thread.event', taskId, payload: { taskKey: t.key, text: '代码定位已补齐' } });
+        const note = payload.degraded ? `代码定位未完成：${payload.degradedReason ?? '原因未知'}` : '代码定位已补齐';
+        await c.query(`INSERT INTO messages (channel_id, task_id, kind, author, text, created_at) VALUES ($1,$2,'system','system',$3,$4)`, [t.channel_id, taskId, note, now]);
+        await this.events.record(c, { type: 'thread.event', taskId, payload: { taskKey: t.key, text: note } });
         await this.events.record(c, { type: 'inbox.new', taskId, payload: { itemType: 'approval', item: { ...this.approvals.serialize(existing), payload }, updated: true } });
       }
     });

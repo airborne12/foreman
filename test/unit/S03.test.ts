@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-50（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-51（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -677,6 +677,18 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     // 3) 再点一次不重复排队
     expect((await http(app, 'POST', '/api/tasks/T-258/relocate')).status).toBe(202);
     expect(await jobs(b)).toEqual(['queued', 'skipped']);
+  }));
+  it('UT-S03-51: 任务上的短仓库名在定位建 worktree 前补全；降级更新的线程提示写「未完成」', () => withReport('UT-S03-51', async () => {
+    const w = await fw('dev');
+    const { taskId } = await pending('T-260');
+    await app.db.query(`UPDATE tasks SET repo_name='selectdb-core' WHERE id=$1`, [taskId]);
+    expect((await http(app, 'POST', '/api/tasks/T-260/relocate')).status).toBe(202);
+    const env = await w.expect((e) => e.type === 'worktree.create' && e.payload.taskKey === 'T-260');
+    expect(env.payload.repo).toBe('selectdb/selectdb-core');
+    expect((await app.tasks.byKey('T-260')).repo_name).toBe('selectdb/selectdb-core');
+    await app.intake.emitTriage(taskId, null, { degraded: true, degradedReason: 'worktree 创建失败' });
+    const note = await app.db.one<any>(`SELECT text FROM messages WHERE task_id=$1 AND text LIKE '代码定位%' ORDER BY created_at DESC, seq DESC LIMIT 1`, [taskId]);
+    expect(note.text).toBe('代码定位未完成：worktree 创建失败');
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');
