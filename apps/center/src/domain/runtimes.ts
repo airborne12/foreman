@@ -89,7 +89,9 @@ export class Runtimes {
     const lost: Array<{ id: string; task_id: string | null; kind: string }> = [];
     await this.db.tx(async (c) => {
       const reported = new Map(sessions.map((s) => [s.sessionId, s]));
-      const active = await c.query<{ id: string; state: string; task_id: string | null; kind: string }>(`SELECT id, state, task_id, kind FROM sessions WHERE runtime_id=$1 AND state IN ('planned','running','waiting_input')`, [rt.id]);
+      // planned 的会话 worker 还没起（刚派发、还在等 worktree），不在它的清单里是正常的，不能判失联：
+      // 2026-09-29 T-77 在 worker 重新上线补派的同一刻被对账判成 lost
+      const active = await c.query<{ id: string; state: string; task_id: string | null; kind: string }>(`SELECT id, state, task_id, kind FROM sessions WHERE runtime_id=$1 AND state IN ('running','waiting_input')`, [rt.id]);
       for (const s of active.rows) {
         const rep = reported.get(s.id);
         if (!rep) {

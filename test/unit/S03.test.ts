@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-57（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-58（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -830,6 +830,23 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     w.send('worktree.ready', { taskKey: 'T-268', path: '/tmp/fx/wt/T-268@doris', branchName: 'foreman/T-268', reused: false, repo: 'apache/doris' }, env.id);
     for (let i = 0; i < 30; i++) { if (await app.db.one(`SELECT 1 FROM worktrees WHERE path='/tmp/fx/wt/T-268@doris'`)) break; await new Promise((r) => setTimeout(r, 100)); }
     expect((await app.db.one<any>(`SELECT repo_name FROM worktrees WHERE path='/tmp/fx/wt/T-268@doris'`)).repo_name).toBe('apache/doris');
+  }));
+  it('UT-S03-58: 重连对账不把刚派发的 planned 会话判失联；实现 worktree 就绪但会话不在时不擅自起代码定位', () => withReport('UT-S03-58', async () => {
+    const w = await fw('dev');
+    const t1 = await seedTask(app.db, { key: 'T-269', state: 'queued', runtime: 'dev' });
+    const planned = await seedSession(app.db, { taskId: t1, runtime: 'dev', agent: 'codex', kind: 'implement', state: 'planned' });
+    const t2 = await seedTask(app.db, { key: 'T-270', state: 'running', runtime: 'dev' });
+    const running = await seedSession(app.db, { taskId: t2, runtime: 'dev', agent: 'codex', kind: 'implement', state: 'running' });
+    w.send('session.list', { sessions: [] });
+    for (let i = 0; i < 30 && (await app.db.one<any>('SELECT state FROM sessions WHERE id=$1', [running])).state !== 'lost'; i++) await new Promise((r) => setTimeout(r, 100));
+    expect((await app.db.one<any>('SELECT state FROM sessions WHERE id=$1', [running])).state).toBe('lost');
+    expect((await app.db.one<any>('SELECT state FROM sessions WHERE id=$1', [planned])).state).toBe('planned');
+    // 实现 worktree 就绪，但没有等它的 planned 会话 → 只写线程提示，不起 code_locate
+    await app.db.query(`UPDATE sessions SET state='lost' WHERE id=$1`, [planned]);
+    await app.db.query(`INSERT INTO jobs (kind, status, args, scheduled_at, dispatched_at, created_at) VALUES ('dispatch','dispatched',$1,now(),now(),now())`, [JSON.stringify({ commandId: crypto.randomUUID(), type: 'worktree.create', taskId: t1, purpose: 'implement', runtime: 'dev', repo: 'selectdb/selectdb-core' })]);
+    await app.dispatch.onWorktreeReady('dev', { taskKey: 'T-269', path: '/tmp/fx/wt/T-269', branchName: 'foreman/T-269', reused: false, repo: 'selectdb/selectdb-core' });
+    expect(await app.db.one(`SELECT 1 FROM sessions WHERE task_id=$1 AND kind='code_locate'`, [t1])).toBeNull();
+    expect(await app.db.one(`SELECT 1 FROM messages WHERE task_id=$1 AND text LIKE '%等它的会话已不在%'`, [t1])).not.toBeNull();
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');

@@ -151,7 +151,14 @@ export class Dispatch {
     await this.db.query(`UPDATE jobs SET status='succeeded', finished_at=$2 WHERE kind='dispatch' AND status='dispatched' AND args->>'type'='worktree.create' AND args->>'taskId'=$1`, [t.id, now]);
     const pending = await this.db.one<{ id: string }>(`SELECT id FROM sessions WHERE task_id=$1 AND runtime_id=$2 AND state='planned' ORDER BY created_at DESC LIMIT 1`, [t.id, rt.id]);
     if (pending) { await this.db.query(`UPDATE sessions SET worktree_id=$2 WHERE id=$1`, [pending.id, wt!.id]); await this.startSession(pending.id, ready.path); return; }
-    // 无 planned 会话：这是代码定位（S01 Step 15）
+    // 无 planned 会话：只有为代码定位建的 worktree 才起定位会话（S01 Step 15）。
+    // 实现 / review 的 worktree 到了而等它的会话已不在（例如被对账误判失联）时，不能擅自起代码定位——
+    // 2026-09-29 T-77：拍过板的任务因此又跑了一遍定位、被打回待拍板
+    const job = await this.db.one<{ args: any }>(`SELECT args FROM jobs WHERE kind='dispatch' AND args->>'type'='worktree.create' AND args->>'taskId'=$1 ORDER BY created_at DESC LIMIT 1`, [t.id]);
+    if (job?.args?.purpose && job.args.purpose !== 'code_locate') {
+      await this.threadEvent(t.id, `worktree 已就绪（${ready.path}），但等它的会话已不在：在收件箱选「重试」或在线程里回复即可继续`);
+      return;
+    }
     const agent = await this.intake.nextAgent();
     const s = await this.db.one<{ id: string }>(`INSERT INTO sessions (task_id, runtime_id, agent, kind, state, prompt, worktree_id, created_at, updated_at) VALUES ($1,$2,$3,'code_locate','planned','',$4,$5,$5) RETURNING id`, [t.id, rt.id, agent, wt!.id, now]);
     await this.startSession(s!.id, ready.path);
