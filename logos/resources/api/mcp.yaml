@@ -214,14 +214,14 @@ components:
           type: object
           required: [name, confidence]
           properties:
-            name: { type: string, nullable: true }
+            name: { type: string, nullable: true, description: "owner/name 全名，从已登记仓库中选；短名（如 selectdb-core）能唯一对上已登记仓库时中心自动补全，对不上或有歧义原样保留" }
             confidence: { type: number }
-            candidates: { type: array, items: { type: string } }
-        suggestedPath: { type: string }
+            candidates: { type: array, items: { type: string }, description: "同 name 的补全规则" }
+        suggestedPath: { type: string, description: "一两句中文：建议怎么改、为什么" }
         targetBranch:
           type: string
           nullable: true
-          description: "目标代码所在分支。与仓库级默认基线不同时必须给出（如代码只在 branch-selectdb-doris-4.1 上），worktree 将从它拉；判不出留空，由拍板时指定或回退到仓库级默认"
+          description: "目标代码所在分支。与仓库级默认基线不同时必须给出（如代码只在 branch-selectdb-doris-4.1 上），worktree 将从它拉；判不出留空，由拍板时指定或回退到仓库级默认。只能是一条具体分支名：写成多个分支或说明文字（如「3.1 or 4.0」）时中心清空该字段，把原文追加到 suggestedPath 交给拍板的人确认"
         codeLocations:
           type: array
           maxItems: 8

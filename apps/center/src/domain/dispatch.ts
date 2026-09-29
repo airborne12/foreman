@@ -182,7 +182,8 @@ export class Dispatch {
     const s = await this.db.one<any>(`SELECT s.*, r.name AS runtime, t.key AS task_key, t.path AS task_path, t.repo_name FROM sessions s JOIN runtimes r ON r.id=s.runtime_id LEFT JOIN tasks t ON t.id=s.task_id WHERE s.id=$1`, [sessionId]);
     if (!s) return;
     const token = IntakeStatics.newToken();
-    const prompt = promptOverride ?? (this.promptFor(s.kind, s.task_key, s.task_path, s.repo_name) + (s.prompt ? `\n\n${s.prompt}` : ''));
+    const known = s.kind === 'code_locate' ? await this.intake.knownRepos() : undefined;
+    const prompt = promptOverride ?? (this.promptFor(s.kind, s.task_key, s.task_path, s.repo_name, known) + (s.prompt ? `\n\n${s.prompt}` : ''));
     const now = this.clock.now();
     await this.db.query(`UPDATE sessions SET cwd=$2, prompt=$3, mcp_token_hash=$4, updated_at=$5 WHERE id=$1`, [sessionId, cwd, prompt, IntakeStatics.hash(token), now]);
     const env = this.hub.send(s.runtime, 'session.start', {
@@ -193,10 +194,18 @@ export class Dispatch {
     await this.db.query(`INSERT INTO jobs (kind, status, args, scheduled_at, dispatched_at, created_at) VALUES ('dispatch','dispatched',$1,$2,$2,$2)`, [JSON.stringify({ commandId: env.id, type: 'session.start', sessionId, taskId: s.task_id }), now]);
   }
 
-  promptFor(kind: string, taskKey: string, path: string | null, repo: string | null) {
+  promptFor(kind: string, taskKey: string, path: string | null, repo: string | null, knownRepos?: string[]) {
     const base = `你在 foreman 任务 ${taskKey} 的 worktree 中工作（仓库 ${repo ?? '待定'}）。先调用 MCP 工具 get_task 读取上下文包；每完成一个可感知步骤调用 report_progress（≤200 字）；需要用户决策调用 ask_user；需要人确认的动作（如创建 PR）先调用 request_approval；产物用 deliver 回写。禁止使用任何 API key。`;
     switch (kind) {
-      case 'code_locate': return `${base}\n本会话只做代码定位与分流：找出最相关的文件与函数（≤8 处），判断档位（fix/plan/proto）、工作量（small/medium/large）、目标仓库置信度，然后 deliver({kind:"triage", ...})。不要修改代码。`;
+      // 字段逐个写清：2026-09-29 claude 交回短仓库名（selectdb-core）、建议只写一个词 fix，codex 把基线写成「3.1 or 4.0」
+      case 'code_locate': return `${base}
+本会话只做代码定位与分流，不要修改代码。结束前调用一次 deliver，artifacts 里放一个 {kind:"triage", ...} 对象，字段要求：
+- tier：fix（简单修复）/ plan（出方案）/ proto（出原型）
+- effort：small（<2h）/ medium（半天）/ large（>1 天）
+- repo：{ name, confidence（0–1）, candidates }。name 必须是 owner/name 全名，从已登记仓库中选：${(knownRepos ?? []).join('、') || '（无）'}；拿不准就把 name 置 null，可能的放进 candidates
+- targetBranch：要改的那一条具体分支名（如 branch-selectdb-doris-4.1）；判断不了就填 null，不要写多个分支或写说明
+- suggestedPath：一两句中文，说明建议怎么改、为什么
+- codeLocations：最相关的 ≤8 处，每处 { file, line, symbol, why }，why 用中文写这处为什么相关`;
       case 'plan': return `${base}\n本会话产出方案文档：写到 docs/plan-${taskKey}.md 并 deliver({kind:"doc", path, title, content})。不要改业务代码。`;
       case 'proto': return `${base}\n本会话产出可运行 demo 分支加一页说明，deliver({kind:"branch", branch, readmePath})。`;
       case 'review': return `${base}\n本会话对同一任务的 PR 做 review：给出必须修/建议修/可忽略三类意见，通过 report_progress 回写结论。`;

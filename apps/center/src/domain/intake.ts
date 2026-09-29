@@ -246,7 +246,18 @@ export class Intake {
   }
 
   /** deliver(triage)：分流卡 + 审批（Step 22–26）；降级卡补齐时原位更新（EX-12.1） */
-  async emitTriage(taskId: string, sessionId: string | null, triage: { tier?: string; effort?: string; repo?: { name: string | null; confidence: number; candidates?: string[] }; targetBranch?: string | null; suggestedPath?: string; codeLocations?: any[]; degraded?: boolean; degradedReason?: string }) {
+  /** 平台认得的仓库：runtime 登记的、Jira 项目映射里的、配了仓库级基线的 */
+  async knownRepos(): Promise<string[]> {
+    const rows = await this.db.query<{ repos: Record<string, unknown> | null }>('SELECT repos FROM runtimes');
+    const set = new Set<string>();
+    for (const r of rows.rows) for (const k of Object.keys(r.repos ?? {})) set.add(k);
+    for (const v of Object.values(this.cfg.sources.jira.project_repo_map ?? {})) set.add(String(v));
+    for (const k of Object.keys(this.cfg.repo_base_branch ?? {})) set.add(k);
+    return [...set].sort();
+  }
+
+  async emitTriage(taskId: string, sessionId: string | null, input: { tier?: string; effort?: string; repo?: { name: string | null; confidence: number; candidates?: string[] }; targetBranch?: string | null; suggestedPath?: string; codeLocations?: any[]; degraded?: boolean; degradedReason?: string }) {
+    const triage = normalizeTriage(input, await this.knownRepos());
     const now = this.clock.now();
     const t = await this.db.one<any>(`SELECT t.*, c.slug AS channel_slug FROM tasks t JOIN channels c ON c.id=t.channel_id WHERE t.id=$1`, [taskId]);
     if (!t) return;
@@ -326,4 +337,31 @@ export class Intake {
     await this.notifications.send({ kind: 'digest', target: this.cfg.feishu.owner_open_id ?? 'owner', text: `你有 ${deferred.rows.length} 项待拍板（今日推送已达上限，改为整点汇总）：${deferred.rows.map((r) => r.key).join(' · ')}\n面板：/inbox` });
     return { sent: deferred.rows.length };
   }
+}
+
+/** 仓库名归一：短名 / 大小写不同但能唯一对上已登记仓库的，换成全名；对不上或有歧义则原样 */
+export function normalizeRepo(name: string, known: string[]): string {
+  if (known.includes(name)) return name;
+  const base = (x: string) => x.split('/').pop()!.toLowerCase();
+  const hits = known.filter((k) => k.toLowerCase() === name.toLowerCase() || base(k) === base(name));
+  return hits.length === 1 ? hits[0]! : name;
+}
+
+/** 是否像一条具体的 git 分支名（不能有空格、说明文字、多个分支） */
+export function isBranchName(b: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(b) && !b.includes('..') && !b.endsWith('/') && !b.endsWith('.lock');
+}
+
+/** 定位结论入库前的兜底：仓库名补全、非法基线清空并把原文留给拍板的人 */
+export function normalizeTriage<T extends { repo?: { name: string | null; confidence: number; candidates?: string[] }; targetBranch?: string | null; suggestedPath?: string }>(t: T, known: string[]): T {
+  const out = { ...t };
+  if (t.repo) {
+    out.repo = { ...t.repo, name: t.repo.name ? normalizeRepo(t.repo.name, known) : null, ...(t.repo.candidates ? { candidates: [...new Set(t.repo.candidates.map((c) => normalizeRepo(c, known)))] } : {}) };
+  }
+  const b = t.targetBranch?.trim();
+  if (b && !isBranchName(b)) {
+    out.targetBranch = null;
+    out.suggestedPath = `${t.suggestedPath ? `${t.suggestedPath}\n` : ''}（定位给出的基线不是一条具体分支，拍板时请确认：${b}）`;
+  } else if (t.targetBranch !== undefined) out.targetBranch = b || null;
+  return out;
 }

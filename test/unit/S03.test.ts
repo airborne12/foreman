@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-48（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-49（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -16,7 +16,7 @@ import { fixtures, type FixtureCtx } from '../orchestration/fixtures.js';
 import { WorktreeCreate, SessionStart, WorkerConfig, makeEnvelope, routeTask } from '@foreman/shared';
 import { createWorktree, pickBuildEnv, resolveBaseRef } from '../../apps/worker/src/worktree.js';
 import { Worker, textWorkspace } from '../../apps/worker/src/worker.js';
-import { Intake } from '../../apps/center/src/domain/intake.js';
+import { Intake, normalizeRepo, isBranchName, normalizeTriage } from '../../apps/center/src/domain/intake.js';
 import { isManagedPath, setClaudeTrust } from '../../apps/worker/src/claudeTrust.js';
 import { runGc } from '../../apps/worker/src/gc.js';
 import { statSync, mkdirSync } from 'node:fs';
@@ -613,6 +613,36 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
       w.stop();
       if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
     }
+  }));
+  it('UT-S03-49: 定位结论入库前兜底——短仓库名补全、非法基线清空并留给拍板', () => withReport('UT-S03-49', async () => {
+    const known = ['apache/doris', 'selectdb/selectdb-core'];
+    expect(normalizeRepo('selectdb-core', known)).toBe('selectdb/selectdb-core');
+    expect(normalizeRepo('SelectDB/SelectDB-Core', known)).toBe('selectdb/selectdb-core');
+    expect(normalizeRepo('apache/doris', known)).toBe('apache/doris');
+    expect(normalizeRepo('foo/bar', known)).toBe('foo/bar');
+    expect(normalizeRepo('doris', ['apache/doris', 'selectdb/doris'])).toBe('doris'); // 有歧义不猜
+    expect(isBranchName('branch-selectdb-doris-4.1')).toBe(true);
+    expect(isBranchName('origin/branch-4.0')).toBe(true);
+    expect(isBranchName('branch-selectdb-doris-3.1 or branch-selectdb-doris-4.0; scan version unspecified')).toBe(false);
+    expect(isBranchName('a..b')).toBe(false);
+    const n = normalizeTriage({ repo: { name: 'selectdb-core', confidence: 0.6, candidates: ['selectdb-core', 'doris'] }, targetBranch: '3.1 or 4.0', suggestedPath: '先确认扫描版本' }, known);
+    expect(n.repo).toEqual({ name: 'selectdb/selectdb-core', confidence: 0.6, candidates: ['selectdb/selectdb-core', 'apache/doris'] });
+    expect(n.targetBranch).toBeNull();
+    expect(n.suggestedPath).toBe('先确认扫描版本\n（定位给出的基线不是一条具体分支，拍板时请确认：3.1 or 4.0）');
+    expect(normalizeTriage({ targetBranch: '  branch-4.1 ' }, known).targetBranch).toBe('branch-4.1');
+    // 端到端：MCP deliver 短名 → 分流卡仓库为全名，且能路由到登记该仓库的 dev
+    await fw('dev');
+    const taskId = await seedTask(app.db, { key: 'T-256', state: 'triaging', runtime: 'dev', repo: null });
+    const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'claude', kind: 'code_locate' });
+    const token = Intake.newToken();
+    await app.db.query('UPDATE sessions SET mcp_token_hash=$2 WHERE id=$1', [sid, Intake.hash(token)]);
+    const r = await mcpCall(token, 'deliver', { taskKey: 'T-256', artifacts: [{ kind: 'triage', tier: 'fix', effort: 'small', repo: { name: 'selectdb-core', confidence: 0.8 }, targetBranch: '4.0 or 4.1', suggestedPath: '补判空', codeLocations: [{ file: 'be/src/x.cpp', line: 1, why: '入口' }] }] });
+    expect(r.error).toBeUndefined();
+    const card = await app.db.one<any>('SELECT repo_name, base_branch, default_runtime, suggested_path FROM triage_cards WHERE task_id=$1', [taskId]);
+    expect(card.repo_name).toBe('selectdb/selectdb-core'); expect(card.default_runtime).toBe('dev');
+    expect(card.base_branch).toBeNull(); expect(card.suggested_path).toContain('拍板时请确认：4.0 or 4.1');
+    // 定位提示词列出已登记仓库与字段要求
+    expect(app.dispatch.promptFor('code_locate', 'T-256', null, null, known)).toContain('从已登记仓库中选：apache/doris、selectdb/selectdb-core');
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');
