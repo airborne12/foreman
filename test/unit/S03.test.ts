@@ -451,6 +451,11 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     // 改选已登记的仓库正常通过
     const ok = await http(app, 'POST', `/api/approvals/${key}/decide`, { decision: 'approve', bodyHash: hash, overrides: { repo: 'selectdb/selectdb-core' } });
     expect(ok.status).toBe(200);
+    // 没改选时校验分流卡上的仓库（T-77：卡上是 apache/doris，原样批准后卡在队列）
+    const b = await pending('T-266', { repo: 'apache/doris' });
+    const asIs = await http(app, 'POST', `/api/approvals/${b.key}/decide`, { decision: 'approve', bodyHash: b.hash });
+    expect(asIs.status).toBe(422); expect(asIs.body.code).toBe('REPO_UNAVAILABLE');
+    expect((await http(app, 'POST', `/api/approvals/${b.key}/decide`, { decision: 'reject', bodyHash: b.hash })).status).toBe(200); // 否决不受影响
   }));
   it('UT-S03-40: 降级分流卡可从面板重新定位；已拍板的任务返回 409', () => withReport('UT-S03-40', async () => {
     const w = await fw('dev');

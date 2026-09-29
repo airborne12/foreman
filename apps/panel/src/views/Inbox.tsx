@@ -187,6 +187,9 @@ function ApprovalDetail({ a, title, head, runtimes, reload }: { a: any; title: s
   const repoHosts = (r: string) => runtimes.filter((x) => (x.repos ?? []).includes(r)).map((x) => x.name);
   const anyRepos = runtimes.some((x) => (x.repos ?? []).length);
   const repoMissing = isTriage && !repoName;
+  // 仓库定了但没有 runtime 登记：拍了也派不出去（T-77），先提醒并禁止原样执行
+  const repoOrphan = isTriage && !!repoName && anyRepos && !repoHosts(repoName).length;
+  const registered = [...new Set(runtimes.flatMap((x) => (x.repos ?? []) as string[]))];
   const modified = Object.keys(ov).length > 0 || (!isTriage && body !== a.body);
   const set = (k: string, v: string) => setOv((o) => { const n = { ...o }; if (!v || v === dflt(k)) delete n[k]; else n[k] = v; return n; });
   const dflt = (k: string) => ({ path: p.tier, repo: p.repo?.name, baseBranch: p.baseBranch, runtime: p.defaultRuntime, agent: p.defaultAgent } as Record<string, string | undefined>)[k] ?? '';
@@ -197,7 +200,7 @@ function ApprovalDetail({ a, title, head, runtimes, reload }: { a: any; title: s
 
   // ⌘/Ctrl+Enter 批准
   useEffect(() => {
-    const on = (e: KeyboardEvent) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && !busy && !repoMissing && !rejecting) { e.preventDefault(); void decide('approve'); } };
+    const on = (e: KeyboardEvent) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && !busy && !repoMissing && !repoOrphan && !rejecting) { e.preventDefault(); void decide('approve'); } };
     window.addEventListener('keydown', on); return () => window.removeEventListener('keydown', on);
   });
 
@@ -248,6 +251,13 @@ function ApprovalDetail({ a, title, head, runtimes, reload }: { a: any; title: s
             </div>
           )}
 
+          {repoOrphan && (
+            <div className="callout bad" style={{ marginBottom: 14, flexDirection: 'column', alignItems: 'stretch' }}>
+              <div className="row"><Icon name="alert" /><span className="callout-title">{repoName} 没有 runtime 能跑</span></div>
+              <div>现在没有哪台 runtime 登记了这个仓库，原样拍板会卡在队列里。改选一个已登记的仓库，或先在开发机 worker.yaml 登记 {repoName}。</div>
+              {!!registered.length && <div className="chips">{registered.map((r) => <button key={r} className="chip" onClick={() => set('repo', r)}><span className="mono">{r}</span><small>{repoHosts(r).join('、')}</small></button>)}</div>}
+            </div>
+          )}
           {!!facts.length && (
             <div className="facts">
               {facts.map((f) => <div key={f.k} className={`fact${f.key && ov[f.key] ? ' changed' : ''}${f.missing ? ' missing' : ''}`}><div className="k">{f.k}</div><div className={`v${f.mono ? ' mono' : ''}`}>{f.v}</div></div>)}
@@ -328,8 +338,8 @@ function ApprovalDetail({ a, title, head, runtimes, reload }: { a: any; title: s
             <span className="spacer" />
             {isTriage && <Btn className="ghost" icon={editing ? 'chevronUp' : 'pencil'} onClick={() => setEditing(!editing)}>{editing ? '收起调整' : '调整'}</Btn>}
             <Btn className="danger" icon="x" disabled={!!busy} onClick={() => setRejecting(true)}>否决</Btn>
-            <Btn className="go" icon="check" busy={busy === a.key} disabled={!!busy || repoMissing} onClick={() => decide('approve')} title={repoMissing ? '先选仓库' : '⌘ + Enter'}>
-              {repoMissing ? '先选仓库' : modified ? '按修改执行' : '按建议执行'}
+            <Btn className="go" icon="check" busy={busy === a.key} disabled={!!busy || repoMissing || repoOrphan} onClick={() => decide('approve')} title={repoMissing ? '先选仓库' : repoOrphan ? '该仓库没有 runtime 能跑' : '⌘ + Enter'}>
+              {repoMissing ? '先选仓库' : repoOrphan ? '仓库无 runtime' : modified ? '按修改执行' : '按建议执行'}
             </Btn>
           </>
         )}

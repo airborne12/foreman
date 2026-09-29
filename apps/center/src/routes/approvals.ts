@@ -46,12 +46,17 @@ export function approvalRoutes(app: AppContext) {
     if (!/^A-\d+$/.test(key)) throw new ApiError(404, 'NOT_FOUND', `审批 ${key} 不存在`);
     const body = await parseBody(c, Decide);
     // 拍板时改选的仓库必须至少有一个 runtime 登记过，否则拍完才在派发时卡住（2026-09-24 实验环境 T-3）
-    const repo = body.decision === 'approve' ? (body.overrides as Record<string, unknown> | null | undefined)?.repo : undefined;
+    // 校验的是实际生效的仓库：没改选时就是分流卡上的仓库（2026-09-29 T-77：卡上是 apache/doris，原样批准后卡在队列里）
+    let repo: unknown = body.decision === 'approve' ? (body.overrides as Record<string, unknown> | null | undefined)?.repo : undefined;
+    if (body.decision === 'approve' && !repo) {
+      const ap = await app.approvals.byKey(key);
+      if (ap?.action_type === 'triage_confirm') repo = (ap.payload as any)?.repo?.name ?? undefined;
+    }
     if (typeof repo === 'string' && repo) {
       const rts = await app.db.query<{ name: string; repos: Record<string, unknown> | null }>('SELECT name, repos FROM runtimes');
       const reported = rts.rows.filter((r) => r.repos && Object.keys(r.repos).length);
       if (reported.length && !reported.some((r) => repo in r.repos!)) {
-        throw new ApiError(422, 'REPO_UNAVAILABLE', `没有 runtime 登记仓库 ${repo}（已登记：${reported.map((r) => `${r.name}: ${Object.keys(r.repos!).join('、')}`).join('；')}）`);
+        throw new ApiError(422, 'REPO_UNAVAILABLE', `没有 runtime 登记仓库 ${repo}，拍了也派不出去。可以改选已登记的仓库（${reported.map((r) => `${r.name}: ${Object.keys(r.repos!).join('、')}`).join('；')}），或先在 worker.yaml 里登记它`);
       }
     }
     const result = await app.approvals.decide(key, { decision: body.decision, bodyHash: body.bodyHash, editedBody: body.editedBody ?? null, overrides: body.overrides ?? null, comment: body.comment ?? null, via: 'panel' });
