@@ -24,7 +24,7 @@ export function diskUsedRatio(path: string): number | null {
   try { const s = statfsSync(path); const total = Number(s.blocks) * Number(s.bsize); const free = Number(s.bavail) * Number(s.bsize); return total > 0 ? (total - free) / total : null; } catch { return null; }
 }
 
-export function runGc(input: GcInput, opts?: { diskPath?: string; remove?: (p: string) => void }): GcResult {
+export function runGc(input: GcInput, opts?: { diskPath?: string; remove?: (p: string) => void; onRemoved?: (p: string) => void }): GcResult {
   const removed: GcResult['removed'] = [];
   let freed = 0;
   const protectedSet = new Set(input.protectedTaskKeys);
@@ -37,7 +37,7 @@ export function runGc(input: GcInput, opts?: { diskPath?: string; remove?: (p: s
     if (protectedSet.has(c.taskKey)) continue;
     if (!existsSync(c.path)) { removed.push({ taskKey: c.taskKey, path: c.path, terminalAt: c.terminalAt ?? null, bytes: 0 }); continue; }
     const bytes = dirSize(c.path);
-    if (!input.dryRun) remove(c.path);
+    if (!input.dryRun) { remove(c.path); opts?.onRemoved?.(c.path); }
     removed.push({ taskKey: c.taskKey, path: c.path, terminalAt: c.terminalAt ?? null, bytes });
     freed += bytes;
     if (input.policy === 'high_watermark' && !input.dryRun && opts?.diskPath) {

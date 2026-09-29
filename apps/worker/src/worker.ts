@@ -12,6 +12,7 @@ import { execFile } from 'node:child_process';
 import { Envelope, makeEnvelope, CENTER_TO_WORKER, type WorkerConfig } from '@foreman/shared';
 import { runGc, diskUsedRatio } from './gc.js';
 import { foremanHome } from './config.js';
+import { isManagedPath, setClaudeTrust, isUntrustedError, type TrustScope } from './claudeTrust.js';
 
 /**
  * 调度员、无仓库的出方案等文本会话没有 worktree，中心下发的 cwd 是占位的 /tmp。
@@ -152,7 +153,7 @@ export class Worker {
       switch (env.type) {
         case 'worktree.gc': {
           const input = CENTER_TO_WORKER['worktree.gc'].parse(env.payload);
-          const result = runGc(input, { diskPath: this.opts.config.worktree.disk_path });
+          const result = runGc(input, { diskPath: this.opts.config.worktree.disk_path, onRemoved: (p) => this.trustClaude(p, false) });
           reply = makeEnvelope('worktree.gc.result', result as unknown as Record<string, unknown>, { ref: env.id });
           break;
         }
@@ -181,7 +182,13 @@ export class Worker {
           const adapter = (this.opts.adapters ?? ADAPTERS)[input.agent];
           if (!bin || !adapter) { reply = makeEnvelope('error', { code: 'AGENT_START_FAILED', message: `本 runtime 未配置 agent ${input.agent}`, retryable: false }, { ref: env.id }); break; }
           try {
-            const s = await adapter.start(input, bin, (code, err) => this.onSessionExit(input.sessionId, code, err), this.adapterOpts(input.agent, input.sessionId));
+            if (input.agent === 'claude') this.trustClaude(input.cwd, true);
+            const start = () => adapter.start(input, bin, (code, err) => this.onSessionExit(input.sessionId, code, err), this.adapterOpts(input.agent, input.sessionId));
+            // 正在运行的 claude 可能用旧内容回写 ~/.claude.json 冲掉刚写的信任：报未信任就补标一次再试
+            const s = await start().catch(async (e) => {
+              if (input.agent !== 'claude' || !isUntrustedError(String((e as Error).message)) || !this.trustClaude(input.cwd, true)) throw e;
+              return start();
+            });
             this.sessions.set(input.sessionId, s);
             this.state.sessions[input.agent] = (this.state.sessions[input.agent] ?? 0) + 1; this.setState({});
             reply = makeEnvelope('session.started', { sessionId: input.sessionId, agentSessionId: s.agentSessionId, startedAt: new Date().toISOString(), pid: s.pid }, { ref: env.id });
@@ -196,6 +203,7 @@ export class Worker {
           const adapter = s ? (this.opts.adapters ?? ADAPTERS)[s.agent] : null;
           const bin = s ? this.opts.config.agents[s.agent]?.bin : null;
           if (!s || !adapter || !bin) { reply = makeEnvelope('error', { code: 'RESUME_FAILED', message: `会话 ${input.sessionId} 不在本 runtime`, retryable: false }, { ref: env.id }); break; }
+          if (s.agent === 'claude') this.trustClaude(s.cwd, true);
           try { await adapter.resume(s, input.text, bin, (code, err) => this.onSessionExit(input.sessionId, code, err), this.adapterOpts(s.agent, s.sessionId)); reply = makeEnvelope('session.state', { sessionId: s.sessionId, state: 'running', source: 'poll', observedAt: new Date().toISOString() }, { ref: env.id }); }
           catch (e) { reply = makeEnvelope('error', { code: 'RESUME_FAILED', message: String((e as Error).message).slice(0, 500), retryable: false }, { ref: env.id }); }
           break;
@@ -245,6 +253,20 @@ export class Worker {
   }
 
   private decSession(agent: string) { this.state.sessions[agent] = Math.max(0, (this.state.sessions[agent] ?? 0) - 1); this.setState({}); }
+
+  /** worker 自己管理的目录：各仓库 worktreeRoot 之下、文本会话目录 */
+  private trustScope(): TrustScope {
+    return { childrenOf: Object.values(this.opts.config.repos).map((r) => r.worktreeRoot), exact: [resolve(foremanHome(), 'workspace')] };
+  }
+  /** 标记 / 取消 claude 对该目录的信任；非 worker 管理的目录一律不碰。条目被冲掉时再调一次即补回 */
+  private trustClaude(path: string, trusted: boolean): boolean {
+    if (!isManagedPath(path, this.trustScope())) return false;
+    try {
+      const changed = setClaudeTrust(path, trusted);
+      if (changed) this.log(`claude 工作区${trusted ? '已信任' : '已取消信任'}：${path}`);
+      return true;
+    } catch (e) { this.log(`claude 工作区信任写入失败（${path}）：${(e as Error).message}`); return false; }
+  }
 
   private adapterOpts(agent: string, sessionId: string): AdapterOptions {
     const a = this.opts.config.agents[agent];

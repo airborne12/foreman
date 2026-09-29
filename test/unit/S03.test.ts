@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-46（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-48（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -17,6 +17,10 @@ import { WorktreeCreate, SessionStart, WorkerConfig, makeEnvelope, routeTask } f
 import { createWorktree, pickBuildEnv, resolveBaseRef } from '../../apps/worker/src/worktree.js';
 import { Worker, textWorkspace } from '../../apps/worker/src/worker.js';
 import { Intake } from '../../apps/center/src/domain/intake.js';
+import { isManagedPath, setClaudeTrust } from '../../apps/worker/src/claudeTrust.js';
+import { runGc } from '../../apps/worker/src/gc.js';
+import { statSync, mkdirSync } from 'node:fs';
+import { SessionStartError } from '../../apps/worker/src/sessions.js';
 
 let app: TestApp;
 const workers: FakeWorker[] = [];
@@ -531,6 +535,84 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     const aps = await app.db.query<any>(`SELECT status, payload FROM approvals WHERE task_id=$1 AND action_type='triage_confirm'`, [taskId]);
     expect(aps.rows).toHaveLength(1); expect(aps.rows[0].status).toBe('pending');
     expect(aps.rows[0].payload.degradedReason).toBe('代码定位失败：会话结束但未回写分流结果');
+  }));
+  it('UT-S03-47: claude 工作区信任只写 worker 管理的目录，保留其他内容，坏文件不覆盖', () => withReport('UT-S03-47', async () => {
+    const scope = { childrenOf: ['/mnt/wt'], exact: ['/home/u/.foreman/workspace'] };
+    expect(isManagedPath('/mnt/wt/T-1', scope)).toBe(true);
+    expect(isManagedPath('/mnt/wt/T-1/sub', scope)).toBe(true);
+    expect(isManagedPath('/mnt/wt', scope)).toBe(false);
+    expect(isManagedPath('/mnt/wt-other/T-1', scope)).toBe(false);
+    expect(isManagedPath('/home/u/.foreman/workspace', scope)).toBe(true);
+    expect(isManagedPath('/home/u', scope)).toBe(false);
+
+    const dir = mkdtempSync(resolve(tmpdir(), 'ctrust-'));
+    const f = resolve(dir, '.claude.json');
+    writeFileSync(f, JSON.stringify({ userID: 'u1', projects: { '/mnt/wt/T-2': { lastCost: 3, allowedTools: ['Read'] } } }), { mode: 0o600 });
+    expect(setClaudeTrust('/mnt/wt/T-1', true, f)).toBe(true);
+    expect(setClaudeTrust('/mnt/wt/T-1', true, f)).toBe(false); // 幂等
+    expect(setClaudeTrust('/mnt/wt/T-2', true, f)).toBe(true);
+    const d = JSON.parse(readFileSync(f, 'utf8'));
+    expect(d.userID).toBe('u1');
+    expect(d.projects['/mnt/wt/T-1']).toMatchObject({ hasTrustDialogAccepted: true, allowedTools: [], mcpServers: {} });
+    expect(d.projects['/mnt/wt/T-2']).toMatchObject({ hasTrustDialogAccepted: true, lastCost: 3, allowedTools: ['Read'] });
+    expect(statSync(f).mode & 0o777).toBe(0o600);
+    expect(setClaudeTrust('/mnt/wt/T-1', false, f)).toBe(true);
+    expect(JSON.parse(readFileSync(f, 'utf8')).projects['/mnt/wt/T-1']).toBeUndefined();
+    // 解析失败：抛错且文件原样
+    writeFileSync(f, '{ broken');
+    expect(() => setClaudeTrust('/mnt/wt/T-3', true, f)).toThrow();
+    expect(readFileSync(f, 'utf8')).toBe('{ broken');
+    // 回收回调
+    const removed: string[] = [];
+    runGc({ policy: 'retain_days', dryRun: false, highWatermark: 0.85, protectedTaskKeys: [], candidates: [{ taskKey: 'T-9', path: resolve(dir, 'wt-T-9'), terminalAt: null }] }, { remove: () => undefined, onRemoved: (p) => removed.push(p) });
+    expect(removed).toEqual([]); // 目录不存在时不算删除，不回调
+    mkdirSync(resolve(dir, 'wt-T-9'));
+    runGc({ policy: 'retain_days', dryRun: false, highWatermark: 0.85, protectedTaskKeys: [], candidates: [{ taskKey: 'T-9', path: resolve(dir, 'wt-T-9'), terminalAt: null }] }, { remove: () => undefined, onRemoved: (p) => removed.push(p) });
+    expect(removed).toEqual([resolve(dir, 'wt-T-9')]);
+  }));
+  it('UT-S03-48: worker 起 claude 前自动信任自己建的 worktree；被冲掉时补标重试；管理范围外的目录不碰', () => withReport('UT-S03-48', async () => {
+    const home = mkdtempSync(resolve(tmpdir(), 'chome-'));
+    const root = mkdtempSync(resolve(tmpdir(), 'cwt-'));
+    const prev = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = home;
+    const f = resolve(home, '.claude.json');
+    writeFileSync(f, JSON.stringify({ projects: {} }), { mode: 0o600 });
+    let calls = 0; let dropOnce = true;
+    const trusted = (cwd: string) => JSON.parse(readFileSync(f, 'utf8')).projects?.[cwd]?.hasTrustDialogAccepted === true;
+    // 假 claude：模拟 2.1.284 的信任检查；第一次调用时模拟另一个 claude 进程回写旧内容冲掉条目
+    const fakeClaude = {
+      async start(input: any) {
+        calls += 1;
+        if (dropOnce && trusted(input.cwd)) { dropOnce = false; writeFileSync(f, JSON.stringify({ projects: {} })); }
+        if (!trusted(input.cwd)) throw new SessionStartError(`claude --bg 失败：Workspace not trusted. Run \`claude\` in ${input.cwd} once`);
+        return { sessionId: input.sessionId, agent: 'claude', agentSessionId: 'cl-x', pid: 1, cwd: input.cwd, logFile: '/dev/null', state: 'running' as const };
+      },
+      async resume() {}, async stop() {},
+    };
+    const cfg = WorkerConfig.parse({ name: 'w48', center: { url: app.ws, token: TEST_TOKEN }, transport: 'direct', labels: ['agent:claude'], agents: { claude: { bin: 'fake-claude', maxConcurrent: 3 } }, repos: { 'selectdb/selectdb-core': { main: '/tmp/fx/core', worktreeRoot: root } } });
+    const w = new Worker({ config: cfg, log: () => undefined, stateFile: resolve(home, 'state.json'), adapters: { claude: fakeClaude } as any });
+    try {
+      w.start();
+      for (let i = 0; i < 50 && !app.workerHub.isOnline('w48'); i++) await new Promise((r) => setTimeout(r, 100));
+      const wt = resolve(root, 'T-255'); mkdirSync(wt);
+      const taskId = await seedTask(app.db, { key: 'T-255', state: 'queued', runtime: 'w48' });
+      const sid = await seedSession(app.db, { taskId, runtime: 'w48', agent: 'claude', kind: 'code_locate', state: 'planned' });
+      app.workerHub.send('w48', 'session.start', { sessionId: sid, taskKey: 'T-255', kind: 'code_locate', agent: 'claude', prompt: 'p', cwd: wt, mcp: { url: 'http://x/mcp', token: 't' } });
+      for (let i = 0; i < 50; i++) { if ((await app.db.one<any>('SELECT state FROM sessions WHERE id=$1', [sid])).state === 'running') break; await new Promise((r) => setTimeout(r, 100)); }
+      expect((await app.db.one<any>('SELECT state FROM sessions WHERE id=$1', [sid])).state).toBe('running');
+      expect(calls).toBe(2); // 首次被冲掉 → 补标后重试成功
+      expect(trusted(wt)).toBe(true);
+      // 管理范围外的目录：不写信任，照常报启动失败
+      const outside = mkdtempSync(resolve(tmpdir(), 'outside-'));
+      const sid2 = await seedSession(app.db, { taskId, runtime: 'w48', agent: 'claude', kind: 'code_locate', state: 'planned' });
+      app.workerHub.send('w48', 'session.start', { sessionId: sid2, taskKey: 'T-255', kind: 'code_locate', agent: 'claude', prompt: 'p', cwd: outside, mcp: { url: 'http://x/mcp', token: 't' } });
+      for (let i = 0; i < 20 && calls < 3; i++) await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 200));
+      expect(calls).toBe(3); // 只试一次，不补标重试
+      expect(JSON.parse(readFileSync(f, 'utf8')).projects[outside]).toBeUndefined();
+    } finally {
+      w.stop();
+      if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+    }
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');

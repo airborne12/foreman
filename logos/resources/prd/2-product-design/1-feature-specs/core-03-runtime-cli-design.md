@@ -201,6 +201,7 @@ tunnels:
 - 复用：同一任务的重试与换 agent 复用同一 worktree。
 - 回收：`retain_days` 后删除；磁盘超过 `disk_high_watermark` 时从最老终态 worktree 删起；运行中任务的 worktree 永不删除；每次删除写任务线程事件。
 - `foreman worker gc --dry-run` 列出将删除项与释放空间。
+- claude 工作区信任（2026-09-29 起，经用户同意）：claude 2.1.284 起 `--bg` 只在被信任的目录里启动，git 仓库只认仓库根自己的信任、父目录的信任不继承，所以每个新 worktree 都要单独信任。worker 在起 claude（启动与续接）前，把该目录写进 `~/.claude.json`（设了 `CLAUDE_CONFIG_DIR` 则写那里）的 `projects.<路径>.hasTrustDialogAccepted=true`；启动仍报未信任时（正在运行的 claude 回写旧内容冲掉了条目）补标后重试一次；worktree 回收时删除对应条目。只处理 worker 自己管理的目录：各仓库 `worktreeRoot` 之下的子目录与文本会话目录 `~/.foreman/workspace`，其他路径一律不写。写入先读最新内容、写临时文件后改名替换；文件解析失败时不覆盖。
 
 #### 验收条件（交互级）
 
