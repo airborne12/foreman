@@ -322,6 +322,24 @@ export class Dispatch {
       // 换家重试一次，复用 worktree（EX-15.1）
       const wt = await this.db.one<any>(`SELECT id, path FROM worktrees WHERE task_id=$1 AND runtime_id=$2 AND state='ready'`, [s.task_id, s.runtime_id]);
       const other = otherAgent(s.agent as AgentName);
+      // 换家也要守并发上限（EX-7.2）：另一家满了就排队，不能硬塞。
+      // 2026-09-29 生产：claude 在 dev 上因目录未信任全部起不来，3 个代码定位同时换到 codex，codex 跑到 6/3
+      const rt = await this.db.one<any>('SELECT name, agents FROM runtimes WHERE id=$1', [s.runtime_id]);
+      const cap = Number(rt?.agents?.[other]?.maxConcurrent ?? this.cfg.agent_concurrency[other] ?? 3);
+      const busy = await this.runningCount(s.runtime_id, other);
+      if (busy >= cap) {
+        if (s.kind === 'code_locate') {
+          if (!(await this.db.one(`SELECT 1 FROM jobs WHERE kind='code-locate' AND status='queued' AND args->>'taskId'=$1`, [s.task_id]))) {
+            await this.db.query(`INSERT INTO jobs (kind, status, required_label, args, dedupe_key, scheduled_at, created_at) VALUES ('code-locate','queued','build:doris',$1,$2,$3,$3)`, [JSON.stringify({ taskId: s.task_id }), `code-locate:${s.task_id}`, now]);
+          }
+          if (!(await this.db.one('SELECT 1 FROM triage_cards WHERE task_id=$1', [s.task_id]))) await this.intake.emitTriage(s.task_id, null, { degraded: true, degradedReason: `代码定位排队中：${s.agent} 启动失败，${other} 并发已满（${busy}/${cap}）` });
+        } else {
+          await this.db.query(`UPDATE tasks SET state='queued', agent=$2, queue_reason=$3, updated_at=$4 WHERE id=$1`, [s.task_id, other, `排队：${s.agent} 启动失败，等 ${other} 空出名额（${busy}/${cap}）`, now]);
+          await this.broadcastTask(s.task_id);
+        }
+        await this.threadEvent(s.task_id, `${other} 并发已满（${busy}/${cap}），排队等名额再换 ${other} 重试`);
+        return;
+      }
       const ns = await this.db.one<{ id: string }>(`INSERT INTO sessions (task_id, runtime_id, agent, kind, state, prompt, attempt, worktree_id, created_at, updated_at) VALUES ($1,$2,$3,$4,'planned','',$5,$6,$7,$7) RETURNING id`, [s.task_id, s.runtime_id, other, s.kind, Number(s.attempt) + 1, wt?.id ?? s.worktree_id ?? null, now]);
       if (s.kind !== 'code_locate') await this.db.query(`UPDATE tasks SET agent=$2, author_agent=CASE WHEN $3='implement' THEN $2 ELSE author_agent END, updated_at=$4 WHERE id=$1`, [s.task_id, other, s.kind, now]);
       await this.threadEvent(s.task_id, `改用 ${other} 重试（第 2 次，复用 worktree）`);

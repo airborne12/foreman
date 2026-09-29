@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-43（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-44（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -481,6 +481,34 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     const env = await w.expect((e) => e.type === 'session.start' || e.type === 'worktree.create');
     expect(env.type).toBe('session.start');
     expect(await app.db.one(`SELECT 1 FROM messages WHERE task_id=$1 AND text LIKE '%按新基线重建%'`, [taskId])).toBeNull();
+  }));
+  it('UT-S03-44: agent 启动失败换家时守并发上限，另一家满了就排队', () => withReport('UT-S03-44', async () => {
+    const w = await fw('dev');
+    // codex 已满 3/3
+    for (let i = 0; i < 3; i++) {
+      const t = await seedTask(app.db, { key: `T-26${i}`, state: 'running', runtime: 'dev', agent: 'codex' });
+      await seedSession(app.db, { taskId: t, runtime: 'dev', agent: 'codex', kind: 'implement' });
+    }
+    const count = async () => Number((await app.db.one<any>(`SELECT count(*) AS n FROM sessions WHERE agent='codex' AND state IN ('planned','running','waiting_input')`)).n);
+    // 实现会话：claude 起不来 → codex 满 → 任务排队，不新建 codex 会话
+    const impl = await seedTask(app.db, { key: 'T-252', state: 'queued', runtime: 'dev', agent: 'claude' });
+    const s1 = await seedSession(app.db, { taskId: impl, runtime: 'dev', agent: 'claude', kind: 'implement', state: 'planned' });
+    await app.dispatch.startSession(s1, '/tmp/fx/wt/T-252');
+    const e1 = await w.expect((e) => e.type === 'session.start' && e.payload.sessionId === s1);
+    w.send('error', { code: 'AGENT_START_FAILED', message: 'Workspace not trusted', retryable: false }, e1.id);
+    for (let i = 0; i < 30; i++) { if ((await app.tasks.byKey('T-252')).queue_reason) break; await new Promise((r) => setTimeout(r, 100)); }
+    const t = await app.tasks.byKey('T-252');
+    expect(t.state).toBe('queued'); expect(t.agent).toBe('codex'); expect(t.queue_reason).toMatch(/^排队：claude 启动失败/);
+    expect(await count()).toBe(3);
+    // 代码定位：同样不硬塞，改回 code-locate 队列
+    const loc = await seedTask(app.db, { key: 'T-253', state: 'triaging', runtime: 'dev' });
+    const s2 = await seedSession(app.db, { taskId: loc, runtime: 'dev', agent: 'claude', kind: 'code_locate', state: 'planned' });
+    await app.dispatch.startSession(s2, '/tmp/fx/wt/T-253');
+    const e2 = await w.expect((e) => e.type === 'session.start' && e.payload.sessionId === s2);
+    w.send('error', { code: 'AGENT_START_FAILED', message: 'Workspace not trusted', retryable: false }, e2.id);
+    for (let i = 0; i < 30; i++) { if (await app.db.one(`SELECT 1 FROM jobs WHERE kind='code-locate' AND status='queued' AND args->>'taskId'=$1`, [loc])) break; await new Promise((r) => setTimeout(r, 100)); }
+    expect(await app.db.one(`SELECT 1 FROM jobs WHERE kind='code-locate' AND status='queued' AND args->>'taskId'=$1`, [loc])).not.toBeNull();
+    expect(await count()).toBe(3);
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');
