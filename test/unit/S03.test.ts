@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-53（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-54（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -721,6 +721,40 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     const inbox = await http(app, 'GET', '/api/inbox');
     expect(inbox.body.failures.map((f: any) => f.key)).not.toContain('T-262');
     expect(inbox.body.approvals.map((a: any) => a.key)).toContain(key);
+  }));
+  it('UT-S03-54: worker 重启后恢复会话记录，等审批的会话仍能续接、不被判失联', () => withReport('UT-S03-54', async () => {
+    const home = mkdtempSync(resolve(tmpdir(), 'w54-'));
+    const calls: string[] = [];
+    const fake = {
+      async start(input: any) { calls.push('start'); return { sessionId: input.sessionId, agent: 'codex', agentSessionId: 'th-54', pid: null, cwd: input.cwd, logFile: '/dev/null', state: 'running' as const, mcp: input.mcp }; },
+      async resume(s: any) { calls.push(`resume:${s.agentSessionId}`); s.state = 'running'; },
+      async stop() {},
+      attach(s: any) { calls.push(`attach:${s.sessionId}`); },
+    };
+    const cfg = WorkerConfig.parse({ name: 'w54', center: { url: app.ws, token: TEST_TOKEN }, transport: 'direct', labels: [], agents: { codex: { bin: 'fake-codex', maxConcurrent: 3 } }, repos: {} });
+    const mk = () => new Worker({ config: cfg, log: () => undefined, stateFile: resolve(home, 'worker-state.json'), adapters: { codex: fake } as any });
+    const online = async () => { for (let i = 0; i < 50 && !app.workerHub.isOnline('w54'); i++) await new Promise((r) => setTimeout(r, 100)); };
+    const w1 = mk(); w1.start(); await online();
+    const taskId = await seedTask(app.db, { key: 'T-263', state: 'waiting_approval', runtime: 'w54' });
+    const sid = await seedSession(app.db, { taskId, runtime: 'w54', agent: 'codex', kind: 'implement', state: 'planned' });
+    app.workerHub.send('w54', 'session.start', { sessionId: sid, taskKey: 'T-263', kind: 'implement', agent: 'codex', prompt: 'p', cwd: '/tmp', mcp: { url: 'http://x/mcp', token: 't54' } });
+    for (let i = 0; i < 50; i++) { if ((await app.db.one<any>('SELECT state FROM sessions WHERE id=$1', [sid])).state === 'running') break; await new Promise((r) => setTimeout(r, 100)); }
+    const f = resolve(home, 'sessions.json');
+    expect(existsSync(f)).toBe(true); expect(statSync(f).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(f, 'utf8'))[0]).toMatchObject({ sessionId: sid, agentSessionId: 'th-54', state: 'running' });
+    w1.stop();
+    for (let i = 0; i < 50 && app.workerHub.isOnline('w54'); i++) await new Promise((r) => setTimeout(r, 100));
+    // 新进程（同一配置目录）：恢复记录，运行中的重新盯住；对账时会话在清单里，不判失联
+    const w2 = mk(); w2.start(); await online();
+    try {
+      expect(w2.sessions.get(sid)?.agentSessionId).toBe('th-54');
+      expect(calls).toContain(`attach:${sid}`);
+      await new Promise((r) => setTimeout(r, 400));
+      expect((await app.db.one<any>('SELECT state FROM sessions WHERE id=$1', [sid])).state).not.toBe('lost');
+      app.workerHub.send('w54', 'session.resume', { sessionId: sid, text: '审批 A-1 已批准，继续创建 PR' });
+      for (let i = 0; i < 30 && !calls.includes('resume:th-54'); i++) await new Promise((r) => setTimeout(r, 100));
+      expect(calls).toContain('resume:th-54');
+    } finally { w2.stop(); }
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');

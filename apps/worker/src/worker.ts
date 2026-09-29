@@ -6,7 +6,7 @@
  * - 指令：worktree.gc、worktree.create（S03 Step 11）、job.run（Jira / gh）、session.start/resume/stop/logs（S03 Step 13–19）
  */
 import WebSocket from 'ws';
-import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync, existsSync, renameSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { Envelope, makeEnvelope, CENTER_TO_WORKER, type WorkerConfig } from '@foreman/shared';
@@ -67,7 +67,40 @@ export class Worker {
     this.stateFile = opts.stateFile ?? opts.config.state_file ?? resolve(foremanHome(), 'worker-state.json');
   }
 
-  start() { this.stopped = false; this.connect(); }
+  start() { this.stopped = false; this.loadSessions(); this.connect(); }
+
+  /**
+   * 会话记录落盘（~/.foreman/sessions.json，0600：含该会话的 MCP token）。
+   * 之前只在内存里：worker 一重启，等审批 / 等回答的会话全都续接不上（2026-09-29 T-81：批准 A-90 后续接必然失败）。
+   */
+  private get sessionsFile() { return resolve(dirname(this.stateFile), 'sessions.json'); }
+  private saveSessions() {
+    try {
+      const all = [...this.sessions.values()].slice(-200);
+      mkdirSync(dirname(this.sessionsFile), { recursive: true });
+      const tmp = `${this.sessionsFile}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify(all, null, 2), { mode: 0o600 });
+      renameSync(tmp, this.sessionsFile);
+    } catch (e) { this.log(`会话记录写盘失败：${(e as Error).message}`); }
+  }
+  private loaded = false;
+  private loadSessions() {
+    if (this.loaded) return; this.loaded = true;
+    let rows: TrackedSession[] = [];
+    try { if (existsSync(this.sessionsFile)) rows = JSON.parse(readFileSync(this.sessionsFile, 'utf8')); } catch (e) { this.log(`会话记录读取失败，忽略：${(e as Error).message}`); return; }
+    for (const s of rows) {
+      if (!s?.sessionId || this.sessions.has(s.sessionId)) continue;
+      this.sessions.set(s.sessionId, s);
+      if (s.state !== 'running') continue;
+      const adapter = (this.opts.adapters ?? ADAPTERS)[s.agent];
+      const bin = this.opts.config.agents[s.agent]?.bin;
+      if (adapter?.attach && bin) {
+        adapter.attach(s, bin, (code, err) => this.onSessionExit(s.sessionId, code, err), this.adapterOpts(s.agent, s.sessionId));
+        this.state.sessions[s.agent] = (this.state.sessions[s.agent] ?? 0) + 1;
+      }
+    }
+    if (rows.length) this.log(`恢复会话记录 ${rows.length} 条（运行中 ${rows.filter((x) => x.state === 'running').length}）`);
+  }
 
   stop() {
     this.stopped = true;
@@ -189,7 +222,7 @@ export class Worker {
               if (input.agent !== 'claude' || !isUntrustedError(String((e as Error).message)) || !this.trustClaude(input.cwd, true)) throw e;
               return start();
             });
-            this.sessions.set(input.sessionId, s);
+            this.sessions.set(input.sessionId, s); this.saveSessions();
             this.state.sessions[input.agent] = (this.state.sessions[input.agent] ?? 0) + 1; this.setState({});
             reply = makeEnvelope('session.started', { sessionId: input.sessionId, agentSessionId: s.agentSessionId, startedAt: new Date().toISOString(), pid: s.pid }, { ref: env.id });
           } catch (e) {
@@ -204,14 +237,14 @@ export class Worker {
           const bin = s ? this.opts.config.agents[s.agent]?.bin : null;
           if (!s || !adapter || !bin) { reply = makeEnvelope('error', { code: 'RESUME_FAILED', message: `会话 ${input.sessionId} 不在本 runtime`, retryable: false }, { ref: env.id }); break; }
           if (s.agent === 'claude') this.trustClaude(s.cwd, true);
-          try { await adapter.resume(s, input.text, bin, (code, err) => this.onSessionExit(input.sessionId, code, err), this.adapterOpts(s.agent, s.sessionId)); reply = makeEnvelope('session.state', { sessionId: s.sessionId, state: 'running', source: 'poll', observedAt: new Date().toISOString() }, { ref: env.id }); }
+          try { await adapter.resume(s, input.text, bin, (code, err) => this.onSessionExit(input.sessionId, code, err), this.adapterOpts(s.agent, s.sessionId)); this.saveSessions(); reply = makeEnvelope('session.state', { sessionId: s.sessionId, state: 'running', source: 'poll', observedAt: new Date().toISOString() }, { ref: env.id }); }
           catch (e) { reply = makeEnvelope('error', { code: 'RESUME_FAILED', message: String((e as Error).message).slice(0, 500), retryable: false }, { ref: env.id }); }
           break;
         }
         case 'session.stop': {
           const input = CENTER_TO_WORKER['session.stop'].parse(env.payload);
           const s = this.sessions.get(input.sessionId);
-          if (s) { await ((this.opts.adapters ?? ADAPTERS)[s.agent]?.stop(s, this.opts.config.agents[s.agent]?.bin)); this.decSession(s.agent); }
+          if (s) { await ((this.opts.adapters ?? ADAPTERS)[s.agent]?.stop(s, this.opts.config.agents[s.agent]?.bin)); this.decSession(s.agent); this.saveSessions(); }
           reply = makeEnvelope('session.state', { sessionId: input.sessionId, state: 'stopped', source: 'poll', observedAt: new Date().toISOString() }, { ref: env.id });
           break;
         }
@@ -285,7 +318,7 @@ export class Worker {
     if (!s) return;
     if (s.state === 'stopped') return;
     s.state = code === 0 ? 'done' : 'failed'; s.exitCode = code;
-    this.decSession(s.agent);
+    this.decSession(s.agent); this.saveSessions();
     this.send('session.state', { sessionId, state: s.state, source: 'exit', exitCode: code, failureReason: code === 0 ? null : (err || tail(s.logFile, 5)).slice(0, 500), observedAt: new Date().toISOString() });
   }
 

@@ -43,6 +43,8 @@ export class SessionStartError extends Error { constructor(message: string, publ
 type OnExit = (code: number | null, err: string) => void;
 export interface AgentAdapter {
   start(input: SessionStartInput, bin: string, onExit: OnExit, opts?: AdapterOptions): Promise<TrackedSession>;
+  /** worker 重启后重新盯住仍在跑的会话（会话记录从 sessions.json 恢复） */
+  attach?(s: TrackedSession, bin: string, onExit: OnExit, opts?: AdapterOptions): void;
   resume(s: TrackedSession, text: string, bin: string, onExit: OnExit, opts?: AdapterOptions): Promise<void>;
   stop(s: TrackedSession, bin?: string): Promise<void>;
   logs?(s: TrackedSession, limit: number, bin: string): Promise<string[]>;
@@ -111,6 +113,7 @@ async function listClaudeAgents(bin: string, cwd: string): Promise<ClaudeAgent[]
 const shortOf = (s: TrackedSession) => s.shortId ?? s.agentSessionId.slice(0, 8);
 
 export const claudeAdapter: AgentAdapter = {
+  attach(s, bin, onExit, opts = {}) { pollClaude(bin, s, onExit, opts); },
   async start(input, bin, onExit, opts = {}) {
     const log = logPath(input.cwd, input.sessionId);
     const args = claudeStartArgs(input, opts.permissionMode, opts.disallowedTools);
@@ -188,6 +191,20 @@ export function codexResumeArgs(s: TrackedSession, threadId: string, text: strin
 }
 
 export const codexAdapter: AgentAdapter = {
+  // codex exec 是 worker 起的子进程，重启后拿不到退出码：轮询进程是否还在，退出后按日志里有没有 turn.completed 判成败
+  attach(s, _bin, onExit, opts = {}) {
+    const t = setInterval(() => {
+      if (s.state !== 'running') { clearInterval(t); return; }
+      let alive = false;
+      try { if (s.pid) { process.kill(s.pid, 0); alive = true; } } catch { alive = false; }
+      if (alive) return;
+      clearInterval(t);
+      const ok = /"type":"turn\.completed"/.test(tail(s.logFile, 50));
+      s.state = ok ? 'done' : 'failed';
+      onExit(ok ? 0 : 1, ok ? '' : 'codex 进程已退出（worker 重启期间），日志里没有完成标记');
+    }, opts.pollMs ?? 20_000);
+    t.unref();
+  },
   async start(input, bin, onExit, opts = {}) {
     const log = logPath(input.cwd, input.sessionId);
     const p = spawnDetached(bin, codexStartArgs(input, opts.sandbox), input.cwd, cleanEnv(input.env), log, (code, err) => { s.state = code === 0 ? 'done' : 'failed'; s.exitCode = code; onExit(code, err); });
