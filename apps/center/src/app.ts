@@ -118,8 +118,13 @@ export async function createApp(config: CenterConfig, opts?: { clock?: Clock; fe
     for (const s of lost) {
       if (!s.task_id) continue;
       const t = await db.one<{ key: string }>('SELECT key FROM tasks WHERE id=$1', [s.task_id]);
-      if (s.kind === 'code_locate') await intake.emitTriage(s.task_id, s.id, { degraded: true, degradedReason: `代码定位会话失联（${name} 上已不存在），可重试` });
-      else await dispatch.failTask(s.task_id, `会话失联：${name} 上已不存在该会话`, ['retry', 'switch_agent', 'abandon']);
+      if (s.kind === 'code_locate') {
+        // 定位卡自带「重新定位」，不用再往频道拉调度员（每丢一个定位会话就起一个调度员 agent，纯耗额度）
+        await intake.closeCodeLocateJobs(s.task_id, 'failed');
+        await intake.emitTriage(s.task_id, s.id, { degraded: true, degradedReason: `代码定位会话失联（${name} 上已不存在），可重新定位` });
+        continue;
+      }
+      await dispatch.failTask(s.task_id, `会话失联：${name} 上已不存在该会话`, ['retry', 'switch_agent', 'abandon']);
       await channels.escalateToChannel(s.task_id, `${t?.key ?? '任务'} 的${s.kind === 'code_locate' ? '代码定位' : ''}会话在 ${name} 上失联（worker 重启或进程退出），已按降级处理。需要的话在这里说一声怎么继续。`, { reason: 'session_lost', sessionKind: s.kind });
     }
   });

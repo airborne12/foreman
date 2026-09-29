@@ -38,7 +38,7 @@
 |----|------|------|---------|------|---------|
 | UT-S05-18 | last_seen 超过 90 秒标离线并把其会话 reachable=false | Step 22–23 | dev 有 2 个 running 会话 | tick(heartbeat-check) at +91s | runtimes.online false；sessions.reachable false；tasks.state 不变 |
 | UT-S05-19 | 89 秒不判离线 | Step 22 | — | tick at +89s | online 仍 true |
-| UT-S05-22 | 会话失联后有善后：代码定位出降级卡，实现类会话进失败卡，并把事情送进频道 | S05 Step 16–17 + S06 承接 | 一个 code_locate、一个 implement 会话 running，worker 上报的清单里都没有 | session.list 对账 | 两者 state=lost；code_locate 的任务出 degraded 分流卡，implement 的任务 state=failed 且收件箱有失败卡；两者所属频道各出现一条系统消息并由调度员接手（无调度员则拉起） |
+| UT-S05-22 | 会话失联后有善后：代码定位出降级卡（不进频道），实现类会话进失败卡并把事情送进频道 | S05 Step 16–17 + S06 承接；2026-09-29 调整：定位卡自带「重新定位」，失联不再拉调度员 | 一个 code_locate、一个 implement 会话 running，worker 上报的清单里都没有 | session.list 对账 | 两者 state=lost；code_locate 任务出降级分流卡（原因含「可重新定位」），不写频道；implement 任务 failed（失败卡三选一），频道写 reason=session_lost 的消息 |
 | UT-S05-20 | session.list 对账：本机不存在的会话标 lost，并关掉它推断出的问题 | Step 16–17；EX-19.1 | DB 有 3 个 running，worker 报 2 个；缺失那个带一条 origin=hook 的 open 问题 | session.list | 缺失那个 state=lost，其余 reachable=true；该会话的 hook 问题 status=timeout（会话没了，没人能回答） |
 | UT-S05-21 | 离线期间指令写入 pendingCommands 并在 ack 时按序回放 | Step 13、EX-23.1 | dev 离线，排队 2 条指令 | 注册 | ack.pendingCommands 长度 2 且顺序一致 |
 | UT-S05-22 | 连续离线 5 分钟只推一次飞书告警 | Step 24 | 注入时钟 | 离线 5 分钟、10 分钟 | notifications alert 1 条 |

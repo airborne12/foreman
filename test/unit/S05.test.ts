@@ -211,7 +211,7 @@ describe('S05 1.3 离线判定与对账', () => {
     expect((await app.db.one<any>('SELECT online FROM runtimes WHERE name=$1', ['dev'])).online).toBe(true);
   }));
 
-  it('UT-S05-22: 会话失联后有善后：定位出降级卡、实现类进失败卡，并送进频道', () => withReport('UT-S05-22', async () => {
+  it('UT-S05-22: 会话失联后有善后：定位出降级卡（不进频道）、实现类进失败卡并送进频道', () => withReport('UT-S05-22', async () => {
     const w = await fw('dev');
     const t1 = await seedTask(app.db, { key: 'T-910', state: 'triaging' });
     const t2 = await seedTask(app.db, { key: 'T-911', state: 'running' });
@@ -229,9 +229,10 @@ describe('S05 1.3 离线判定与对账', () => {
     // 代码定位 → 降级卡；实现类 → 失败卡三选一
     expect((await app.db.one<any>('SELECT degraded, degraded_reason FROM triage_cards WHERE task_id=$1', [t1])).degraded).toBe(true);
     expect((await app.tasks.byKey('T-911')).state).toBe('failed');
-    // 两者都要送进所属频道，让人能接着说怎么办
+    // 实现类送进所属频道，让人能接着说怎么办；定位卡自带「重新定位」，不再拉调度员（2026-09-29：每丢一个定位会话就起一个调度员）
     const msgs = await app.db.query<any>(`SELECT task_id FROM messages WHERE payload->>'reason'='session_lost'`);
-    expect(msgs.rows.map((r) => r.task_id).sort()).toEqual([t1, t2].sort());
+    expect(msgs.rows.map((r) => r.task_id)).toEqual([t2]);
+    expect((await app.db.one<any>('SELECT degraded_reason FROM triage_cards WHERE task_id=$1', [t1])).degraded_reason).toContain('可重新定位');
   }));
 
   it('UT-S05-20: session.list 对账，本机不存在的会话标 lost', () => withReport('UT-S05-20', async () => {

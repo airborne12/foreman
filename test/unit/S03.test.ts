@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-49（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-50（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -643,6 +643,31 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     expect(card.base_branch).toBeNull(); expect(card.suggested_path).toContain('拍板时请确认：4.0 or 4.1');
     // 定位提示词列出已登记仓库与字段要求
     expect(app.dispatch.promptFor('code_locate', 'T-256', null, null, known)).toContain('从已登记仓库中选：apache/doris、selectdb/selectdb-core');
+  }));
+  it('UT-S03-50: 代码定位作业随会话结束关闭；名额满时重新定位进队列，不因遗留作业 500', () => withReport('UT-S03-50', async () => {
+    await fw('dev');
+    // 测试时钟是冻结的假时钟，created_at 不能用来排先后：按状态排序比较
+    const jobs = async (taskId: string) => (await app.db.query<any>(`SELECT status FROM jobs WHERE kind='code-locate' AND args->>'taskId'=$1 ORDER BY status`, [taskId])).rows.map((r) => r.status);
+    // 1) 会话结束 → 已派发的作业关成 succeeded
+    const a = await seedTask(app.db, { key: 'T-257', state: 'triaging', runtime: 'dev' });
+    await app.db.query(`INSERT INTO jobs (kind, status, required_label, args, dedupe_key, dispatched_at, created_at) VALUES ('code-locate','dispatched','build:doris',$1,$2,now(),now())`, [JSON.stringify({ taskId: a }), `code-locate:${a}`]);
+    const sa = await seedSession(app.db, { taskId: a, runtime: 'dev', agent: 'codex', kind: 'code_locate' });
+    await app.dispatch.onSessionState('dev', { sessionId: sa, state: 'done', source: 'exit' });
+    expect(await jobs(a)).toEqual(['succeeded']);
+    // 2) 名额占满 + 遗留一条已派发作业（生产上从没被关过的那种）→ relocate 仍 202，作业进队列
+    for (const [i, agent] of ['claude', 'claude', 'claude', 'codex', 'codex', 'codex'].entries()) {
+      const t = await seedTask(app.db, { key: `T-27${i}`, state: 'running', runtime: 'dev' });
+      await seedSession(app.db, { taskId: t, runtime: 'dev', agent, kind: 'implement' });
+    }
+    const { taskId: b } = await pending('T-258');
+    await app.db.query(`UPDATE triage_cards SET degraded=true, degraded_reason='x' WHERE task_id=$1`, [b]);
+    await app.db.query(`INSERT INTO jobs (kind, status, required_label, args, dedupe_key, dispatched_at, created_at) VALUES ('code-locate','dispatched','build:doris',$1,$2,now() - interval '3 hours',now() - interval '3 hours')`, [JSON.stringify({ taskId: b }), `code-locate:${b}`]);
+    const r = await http(app, 'POST', '/api/tasks/T-258/relocate');
+    expect(r.status).toBe(202);
+    expect(await jobs(b)).toEqual(['queued', 'skipped']);
+    // 3) 再点一次不重复排队
+    expect((await http(app, 'POST', '/api/tasks/T-258/relocate')).status).toBe(202);
+    expect(await jobs(b)).toEqual(['queued', 'skipped']);
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');

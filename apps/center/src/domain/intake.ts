@@ -160,8 +160,7 @@ export class Intake {
   async scheduleCodeLocate(taskId: string) {
     const rt = await this.findRuntime('build:doris');
     if (!rt) {
-      const existing = await this.db.one(`SELECT 1 FROM jobs WHERE kind='code-locate' AND status='queued' AND args->>'taskId'=$1`, [taskId]);
-      if (!existing) await this.db.query(`INSERT INTO jobs (kind, status, required_label, args, dedupe_key, scheduled_at, created_at) VALUES ('code-locate','queued','build:doris',$1,$2,$3,$3)`, [JSON.stringify({ taskId }), `code-locate:${taskId}`, this.clock.now()]);
+      await this.enqueueCodeLocate(taskId);
       await this.emitTriage(taskId, null, { degraded: true, degradedReason: '开发机离线，代码定位待补' });
       return;
     }
@@ -183,9 +182,7 @@ export class Intake {
     if (active) { if (jobId) await this.db.query(`UPDATE jobs SET status='dispatched', runtime_id=$2, dispatched_at=$3 WHERE id=$1`, [jobId, rt.id, now]); return true; }
     const agent = await this.freeAgent(rt);
     if (!agent) {
-      if (!jobId && !(await this.db.one(`SELECT 1 FROM jobs WHERE kind='code-locate' AND status='queued' AND args->>'taskId'=$1`, [taskId]))) {
-        await this.db.query(`INSERT INTO jobs (kind, status, required_label, args, dedupe_key, scheduled_at, created_at) VALUES ('code-locate','queued','build:doris',$1,$2,$3,$3)`, [JSON.stringify({ taskId }), `code-locate:${taskId}`, now]);
-      }
+      if (!jobId) await this.enqueueCodeLocate(taskId);
       if (!(await this.db.one('SELECT 1 FROM triage_cards WHERE task_id=$1', [taskId]))) await this.emitTriage(taskId, null, { degraded: true, degradedReason: `代码定位排队中：${rt.name} 上 agent 并发已满` });
       return false;
     }
@@ -246,6 +243,23 @@ export class Intake {
   }
 
   /** deliver(triage)：分流卡 + 审批（Step 22–26）；降级卡补齐时原位更新（EX-12.1） */
+  /**
+   * 代码定位排队（幂等）。先收掉这张单遗留的「已派发」作业：它们在会话结束后从没被关，
+   * 会撞上 dedupe 唯一索引（2026-09-29 批量重新定位，名额满时 5 张单直接 500、没进队列）。
+   */
+  async enqueueCodeLocate(taskId: string) {
+    const active = await this.db.one(`SELECT 1 FROM sessions WHERE task_id=$1 AND kind='code_locate' AND state IN ('planned','running','waiting_input')`, [taskId]);
+    if (active) return;
+    await this.closeCodeLocateJobs(taskId, 'skipped');
+    await this.db.query(`INSERT INTO jobs (kind, status, required_label, args, dedupe_key, scheduled_at, created_at) VALUES ('code-locate','queued','build:doris',$1,$2,$3,$3)
+      ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL AND status IN ('queued','dispatched','running') DO NOTHING`, [JSON.stringify({ taskId }), `code-locate:${taskId}`, this.clock.now()]);
+  }
+
+  /** 收掉该任务未完结（已派发 / 运行中）的代码定位作业：会话终结或重新排队前调用 */
+  async closeCodeLocateJobs(taskId: string, status: 'succeeded' | 'failed' | 'skipped') {
+    await this.db.query(`UPDATE jobs SET status=$2, finished_at=$3 WHERE kind='code-locate' AND status IN ('dispatched','running') AND args->>'taskId'=$1`, [taskId, status, this.clock.now()]);
+  }
+
   /** 平台认得的仓库：runtime 登记的、Jira 项目映射里的、配了仓库级基线的 */
   async knownRepos(): Promise<string[]> {
     const rows = await this.db.query<{ repos: Record<string, unknown> | null }>('SELECT repos FROM runtimes');

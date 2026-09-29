@@ -241,6 +241,7 @@ export class Dispatch {
       await this.db.query(`UPDATE sessions SET state='done', exit_code=$2, ended_at=$3, updated_at=$3 WHERE id=$1`, [s.id, p.exitCode ?? 0, now]);
       const t = await this.db.one<any>('SELECT * FROM tasks WHERE id=$1', [s.task_id]);
       if (s.kind === 'code_locate') {
+        await this.intake.closeCodeLocateJobs(s.task_id, 'succeeded');
         // 已有的降级卡（排队中 / 开发机离线）也要刷新原因，否则会话跑完了卡上还写着「排队中」
         const card = await this.db.one<{ degraded: boolean }>('SELECT degraded FROM triage_cards WHERE task_id=$1', [s.task_id]);
         if (!card || card.degraded) await this.intake.emitTriage(s.task_id, s.id, { degraded: true, degradedReason: '代码定位失败：会话结束但未回写分流结果' });
@@ -269,13 +270,14 @@ export class Dispatch {
       if (['done', 'failed', 'stopped'].includes(s.state)) return;
       await this.db.query(`UPDATE sessions SET state='failed', exit_code=$2, failure_reason=$3, ended_at=$4, updated_at=$4 WHERE id=$1`, [s.id, p.exitCode ?? null, p.failureReason ?? null, now]);
       await this.closeInferredQuestions(s.id);
-      if (s.kind === 'code_locate') await this.intake.emitTriage(s.task_id, s.id, { degraded: true, degradedReason: `代码定位失败：${p.failureReason ?? 'exit ' + p.exitCode}` });
+      if (s.kind === 'code_locate') { await this.intake.closeCodeLocateJobs(s.task_id, 'failed'); await this.intake.emitTriage(s.task_id, s.id, { degraded: true, degradedReason: `代码定位失败：${p.failureReason ?? 'exit ' + p.exitCode}` }); }
       else await this.failTask(s.task_id, `会话失败：${p.failureReason ?? 'exit ' + p.exitCode}`, ['retry', 'switch_agent', 'abandon']);
       await this.drainQueue(runtimeName, s.agent);
       return;
     }
     if (p.state === 'stopped') {
       const r = await this.db.query(`UPDATE sessions SET state='stopped', ended_at=$2, updated_at=$2 WHERE id=$1 AND state NOT IN ('done','failed','stopped')`, [s.id, now]);
+      if (s.kind === 'code_locate') await this.intake.closeCodeLocateJobs(s.task_id, 'skipped');
       await this.closeInferredQuestions(s.id);
       if (r.rowCount && s.kind !== 'code_locate') {
         // S07 Step 46：人工停止 → 任务 paused，worktree 保留
@@ -339,9 +341,7 @@ export class Dispatch {
       const busy = await this.runningCount(s.runtime_id, other);
       if (busy >= cap) {
         if (s.kind === 'code_locate') {
-          if (!(await this.db.one(`SELECT 1 FROM jobs WHERE kind='code-locate' AND status='queued' AND args->>'taskId'=$1`, [s.task_id]))) {
-            await this.db.query(`INSERT INTO jobs (kind, status, required_label, args, dedupe_key, scheduled_at, created_at) VALUES ('code-locate','queued','build:doris',$1,$2,$3,$3)`, [JSON.stringify({ taskId: s.task_id }), `code-locate:${s.task_id}`, now]);
-          }
+          await this.intake.enqueueCodeLocate(s.task_id);
           if (!(await this.db.one('SELECT 1 FROM triage_cards WHERE task_id=$1', [s.task_id]))) await this.intake.emitTriage(s.task_id, null, { degraded: true, degradedReason: `代码定位排队中：${s.agent} 启动失败，${other} 并发已满（${busy}/${cap}）` });
         } else {
           await this.db.query(`UPDATE tasks SET state='queued', agent=$2, queue_reason=$3, updated_at=$4 WHERE id=$1`, [s.task_id, other, `排队：${s.agent} 启动失败，等 ${other} 空出名额（${busy}/${cap}）`, now]);
