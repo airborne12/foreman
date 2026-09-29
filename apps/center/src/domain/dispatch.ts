@@ -87,7 +87,8 @@ export class Dispatch {
       }
     }
     const now = this.clock.now();
-    let wt = await this.db.one<any>(`SELECT * FROM worktrees WHERE task_id=$1 AND runtime_id=$2 AND state='ready'`, [taskId, rt.id]);
+    // 只复用同一仓库的工作区：代码定位时仓库可能还没定，拍板后换了仓库就得另建
+    let wt = await this.db.one<any>(`SELECT * FROM worktrees WHERE task_id=$1 AND runtime_id=$2 AND state='ready' AND ($3::text IS NULL OR repo_name=$3) ORDER BY created_at DESC LIMIT 1`, [taskId, rt.id, t.repo_name ?? null]);
     // 代码定位阶段建 worktree 时还没判断出目标分支，用的是仓库默认基线；拍板定了别的基线后不能直接复用，
     // 否则 agent 会在错误的分支上改（2026-09-24 实验环境 T-1：worktree 基于 4.0，任务基线是 4.1）
     // 只重建「代码定位建的、还没有实现类会话用过」的 worktree：重试 / 新会话继续时里面已经有 agent 的改动，不能丢
@@ -136,13 +137,14 @@ export class Dispatch {
   }
 
   // ---------------- worktree.ready → session.start（Step 12–17） ----------------
-  async onWorktreeReady(runtimeName: string, ready: { taskKey: string; path: string; branchName: string; reused: boolean; baseBranch?: string | null; buildEnvMissing?: boolean }) {
+  async onWorktreeReady(runtimeName: string, ready: { taskKey: string; path: string; branchName: string; reused: boolean; baseBranch?: string | null; buildEnvMissing?: boolean; repo?: string }) {
     const t = await this.db.one<any>('SELECT * FROM tasks WHERE key=$1', [ready.taskKey]);
     const rt = await this.db.one<any>('SELECT * FROM runtimes WHERE name=$1', [runtimeName]);
     if (!t || !rt) return;
     const now = this.clock.now();
-    const wt = await this.db.one<{ id: string }>(`INSERT INTO worktrees (task_id, runtime_id, repo_name, base_branch, branch_name, path, state, created_at) VALUES ($1,$2,$3,$4,$5,$6,'ready',$7) ON CONFLICT (runtime_id, path) DO UPDATE SET state='ready', branch_name=EXCLUDED.branch_name, task_id=EXCLUDED.task_id, base_branch=EXCLUDED.base_branch RETURNING id`,
-      [t.id, rt.id, t.repo_name ?? 'apache/doris', ready.baseBranch ?? t.base_branch ?? this.cfg.repo_base_branch?.[t.repo_name] ?? 'master', ready.branchName, ready.path, now]);
+    // 仓库以 worker 实际建工作区用的为准（旧 worker 不回报时退回任务上的）：T-77 的记录写成 apache/doris，磁盘上却是 selectdb-core
+    const wt = await this.db.one<{ id: string }>(`INSERT INTO worktrees (task_id, runtime_id, repo_name, base_branch, branch_name, path, state, created_at) VALUES ($1,$2,$3,$4,$5,$6,'ready',$7) ON CONFLICT (runtime_id, path) DO UPDATE SET state='ready', branch_name=EXCLUDED.branch_name, task_id=EXCLUDED.task_id, base_branch=EXCLUDED.base_branch, repo_name=EXCLUDED.repo_name RETURNING id`,
+      [t.id, rt.id, ready.repo ?? t.repo_name ?? 'apache/doris', ready.baseBranch ?? t.base_branch ?? this.cfg.repo_base_branch?.[t.repo_name] ?? 'master', ready.branchName, ready.path, now]);
     await this.db.query(`UPDATE tasks SET branch_name=$2, updated_at=$3 WHERE id=$1`, [t.id, ready.branchName, now]);
     // 该基线分支没有匹配的构建环境：说清楚，别让 agent 拿不匹配的依赖硬编译（4.1 的代码配 4.0 的 thirdparty 只会在链接阶段失败）
     if (ready.buildEnvMissing) await this.threadEvent(t.id, `worktree 已就绪（基线 ${ready.baseBranch ?? '仓库默认'}），但该分支没有匹配的构建环境：只做静态检查与改动，编译与单测交给 CI`, undefined);

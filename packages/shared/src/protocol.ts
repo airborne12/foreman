@@ -102,6 +102,8 @@ export const WorktreeReady = z.object({
   baseBranch: z.string().optional(),
   /** 该基线分支没有匹配的构建环境：中心要据此降级，不能让 agent 拿不匹配的依赖硬编译 */
   buildEnvMissing: z.boolean().optional(),
+  /** 工作区实际所属的仓库（中心据此记录；任务上的仓库可能在代码定位之后才改） */
+  repo: z.string().optional(),
 });
 export const WorktreeGc = z.object({
   policy: z.enum(['retain_days', 'high_watermark']),

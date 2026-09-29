@@ -5,8 +5,8 @@
  * - 写入 .foreman/context.md、.foreman/task.json、.claude/settings.json（Notification 钩子）
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
+import { resolve, dirname, basename } from 'node:path';
 
 export interface WorktreeCreateInput {
   taskKey: string; repo: string; baseBranch: string; branchName?: string; buildEnv?: Record<string, string>;
@@ -67,9 +67,21 @@ export function pickBuildEnv(byBranch: Record<string, Record<string, string>> | 
   return byBranch.default ? { env: byBranch.default, matched: 'default' } : { env: null, matched: null };
 }
 
+/** 工作区是否由该主仓库建出（比对 git common dir）；不是 git 目录也算不属于 */
+export function belongsTo(path: string, main: string, git: GitRunner = realGit): boolean {
+  try {
+    const common = String(git(['rev-parse', '--git-common-dir'], path)).trim();
+    const real = (p: string) => { try { return realpathSync(p); } catch { return resolve(p); } };
+    return real(resolve(path, common)) === real(resolve(main, '.git'));
+  } catch { return false; }
+}
+
 export function createWorktree(input: WorktreeCreateInput, repo: { main: string; worktreeRoot: string }, git: GitRunner = realGit): WorktreeReadyOutput {
   const branchName = input.branchName ?? defaultBranchName(input.taskKey);
-  const path = resolve(repo.worktreeRoot, input.taskKey);
+  // 同一任务换了仓库（代码定位时仓库未定、用了默认仓库；拍板后定成另一个）：原路径上的工作区属于别的主仓库，
+  // 不能复用，否则 agent 会在错的仓库里改（2026-09-29 T-77：定位工作区来自 selectdb-core，任务要改 apache/doris）
+  let path = resolve(repo.worktreeRoot, input.taskKey);
+  if (existsSync(path) && !belongsTo(path, repo.main, git)) path = resolve(repo.worktreeRoot, `${input.taskKey}@${basename(repo.main)}`);
   let reused = false;
   const exists = existsSync(path);
   if (exists && (input.reuseIfExists ?? true) && !input.resetToBase) {

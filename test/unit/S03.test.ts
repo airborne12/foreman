@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-56（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-57（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -14,7 +14,7 @@ import { FakeWorker } from '../helpers/fakeWorker.js';
 import { seedTask, seedRuntime, seedSession, seedWorktree, runtimeId } from '../helpers/seed.js';
 import { fixtures, type FixtureCtx } from '../orchestration/fixtures.js';
 import { WorktreeCreate, SessionStart, WorkerConfig, makeEnvelope, routeTask } from '@foreman/shared';
-import { createWorktree, pickBuildEnv, resolveBaseRef } from '../../apps/worker/src/worktree.js';
+import { createWorktree, pickBuildEnv, resolveBaseRef, belongsTo } from '../../apps/worker/src/worktree.js';
 import { Worker, textWorkspace } from '../../apps/worker/src/worker.js';
 import { Intake, normalizeRepo, isBranchName, normalizeTriage } from '../../apps/center/src/domain/intake.js';
 import { isManagedPath, setClaudeTrust } from '../../apps/worker/src/claudeTrust.js';
@@ -806,6 +806,30 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     expect(Number((await app.db.one<any>(`SELECT count(*) AS n FROM tasks WHERE parent_id=$1`, [child])).n)).toBe(0); // 不派生孙任务
     const note = await app.db.one<any>(`SELECT text FROM messages WHERE task_id=$1 AND text LIKE 'T-265.2 review%'`, [parent]);
     expect(note.text).toContain('只有建议'); expect(note.text).toContain('补序列化路径回归');
+  }));
+  it('UT-S03-57: 任务换了仓库时不复用别的仓库建的工作区', () => withReport('UT-S03-57', async () => {
+    // worker：同一 worktreeRoot 下，T-267 已由仓库 A 建出；按仓库 B 建时另起路径
+    const a = gitRepo(); const b = gitRepo();
+    const root = mkdtempSync(resolve(tmpdir(), 'wt57-'));
+    const wa = createWorktree({ taskKey: 'T-267', repo: 'x/a', baseBranch: 'master' }, { main: a.main, worktreeRoot: root });
+    expect(belongsTo(wa.path, a.main)).toBe(true); expect(belongsTo(wa.path, b.main)).toBe(false);
+    const wb = createWorktree({ taskKey: 'T-267', repo: 'x/b', baseBranch: 'master' }, { main: b.main, worktreeRoot: root });
+    expect(wb.reused).toBe(false); expect(wb.path).not.toBe(wa.path);
+    expect(belongsTo(wb.path, b.main)).toBe(true);
+    // 再按 B 建一次：复用 B 自己那个
+    const wb2 = createWorktree({ taskKey: 'T-267', repo: 'x/b', baseBranch: 'master' }, { main: b.main, worktreeRoot: root });
+    expect(wb2.path).toBe(wb.path);
+    // 中心：任务仓库是 apache/doris，已有的 ready 工作区记的是 selectdb-core → 不复用，发 worktree.create
+    const w = await fw('dev', { repos: { 'selectdb/selectdb-core': { main: '/tmp/fx/core', worktreeRoot: '/tmp/fx/wt' }, 'apache/doris': { main: '/tmp/fx/doris', worktreeRoot: '/tmp/fx/wt' } } });
+    const taskId = await seedTask(app.db, { key: 'T-268', state: 'queued', runtime: 'dev', repo: 'apache/doris' });
+    await seedWorktree(app.db, { taskId, runtime: 'dev', path: '/tmp/fx/wt/T-268', repo: 'selectdb/selectdb-core' });
+    await app.dispatch.dispatchTask(taskId);
+    const env = await w.expect((e) => e.type === 'worktree.create' || e.type === 'session.start');
+    expect(env.type).toBe('worktree.create'); expect(env.payload.repo).toBe('apache/doris');
+    // worker 回报实际仓库，中心据此记录
+    w.send('worktree.ready', { taskKey: 'T-268', path: '/tmp/fx/wt/T-268@doris', branchName: 'foreman/T-268', reused: false, repo: 'apache/doris' }, env.id);
+    for (let i = 0; i < 30; i++) { if (await app.db.one(`SELECT 1 FROM worktrees WHERE path='/tmp/fx/wt/T-268@doris'`)) break; await new Promise((r) => setTimeout(r, 100)); }
+    expect((await app.db.one<any>(`SELECT repo_name FROM worktrees WHERE path='/tmp/fx/wt/T-268@doris'`)).repo_name).toBe('apache/doris');
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');

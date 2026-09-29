@@ -197,7 +197,7 @@ export class Worker {
           try {
             const picked = pickBuildEnv(this.opts.config.build_env[input.repo], input.baseBranch);
             const out = createWorktree({ ...input, buildEnv: input.buildEnv ?? picked.env ?? undefined }, repo, this.opts.git);
-            reply = makeEnvelope('worktree.ready', { ...out, baseBranch: input.baseBranch, buildEnvMissing: !input.buildEnv && !picked.env } as unknown as Record<string, unknown>, { ref: env.id });
+            reply = makeEnvelope('worktree.ready', { ...out, baseBranch: input.baseBranch, buildEnvMissing: !input.buildEnv && !picked.env, repo: input.repo } as unknown as Record<string, unknown>, { ref: env.id });
           } catch (e) {
             reply = makeEnvelope('error', { code: 'WORKTREE_FAILED', message: String((e as Error).message), retryable: e instanceof WorktreeError ? e.retryable : false }, { ref: env.id });
           }
