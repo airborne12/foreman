@@ -768,6 +768,9 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     expect((await http(app, 'POST', `/api/approvals/${key}/decide`, { decision: 'approve', bodyHash: hash })).status).toBe(200);
     const env = await w.expect((e) => e.type === 'session.resume' && e.payload.sessionId === sessionId);
     expect(String(env.payload.text)).toContain('已批准');
+    // 续接由 dispatch 负责：不再往频道送「没人接得住」、不拉调度员
+    await new Promise((r) => setTimeout(r, 200));
+    expect(await app.db.one(`SELECT 1 FROM messages WHERE payload->>'reason'='approval_decided_no_waiter' AND payload->>'approvalKey'=$1`, [key])).toBeNull();
     // worker 已不认识这个会话（例如重启丢了记录）
     w.send('error', { code: 'RESUME_FAILED', message: '会话不在本 runtime', retryable: false }, env.id);
     for (let i = 0; i < 30 && (await app.tasks.byKey('T-264')).state !== 'failed'; i++) await new Promise((r) => setTimeout(r, 100));

@@ -138,8 +138,12 @@ export async function createApp(config: CenterConfig, opts?: { clock?: Clock; fe
     // 再往频道推一条只会盖掉真正该看的失败提示（口径与 approvals.execute 一致）
     const byAgent = (a.payload as any)?.executor === 'agent' || ((a.payload as any)?.executor !== 'center' && a.session_id);
     if (!byAgent) return;
+    // 批准的建 PR：dispatch（EX-22.1）负责续接会话，续接失败会进失败卡，不用再往频道拉调度员。
+    // 之前按会话状态判断，而续接会先把会话标 running，于是这里误判「没人接得住」又拉起调度员（2026-09-29 A-90）
+    // 会话已失联（不可续接）的仍要进频道（UT-S06-34）
     if (d.approved) {
       const s = a.session_id ? await db.one<any>('SELECT state FROM sessions WHERE id=$1', [a.session_id]) : null;
+      if (s && a.action_type === 'create_pr' && s.state !== 'lost') return;
       if (s && ['done', 'stopped', 'failed'].includes(s.state)) return; // 可续接，dispatch 已送回「已批准」
     }
     const verb = d.approved ? '已批准' : '已否决';
