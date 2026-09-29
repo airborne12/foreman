@@ -173,6 +173,7 @@ components:
               - $ref: '#/components/schemas/DocArtifact'
               - $ref: '#/components/schemas/BranchArtifact'
               - $ref: '#/components/schemas/TriageArtifact'
+              - $ref: '#/components/schemas/ReviewArtifact'
               - $ref: '#/components/schemas/CandidatesArtifact'
         summary: { type: string, maxLength: 2000, description: "完成摘要，写入线程" }
     PrArtifact:
@@ -203,6 +204,17 @@ components:
         kind: { type: string, const: branch }
         branch: { type: string }
         readmePath: { type: string, nullable: true }
+    ReviewArtifact:
+      type: object
+      description: "review 子任务的结论（2026-09-29 新增，迁移 0003）。review 会话只能交这一种；交 pr / doc / branch 会被拒绝（交 pr 会派生孙任务）。中心在父任务线程写一条结论摘要"
+      required: [kind, verdict]
+      properties:
+        kind: { type: string, const: review }
+        verdict: { type: string, enum: [approve, request_changes, comment], description: "approve 可以合 / request_changes 有必须修 / comment 只有建议" }
+        mustFix: { type: array, maxItems: 50, items: { type: string }, description: "必须修的问题，每条一句中文" }
+        suggestions: { type: array, maxItems: 50, items: { type: string }, description: "建议修的问题" }
+        content: { type: string, maxLength: 20000, description: "完整 review 意见（中文 markdown）" }
+        url: { type: string, description: "被 review 的 PR 链接" }
     TriageArtifact:
       type: object
       required: [kind, tier, effort, repo, suggestedPath]

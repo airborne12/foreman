@@ -39,10 +39,19 @@ export function MessageRow({ m, onDraft, onPick, busy, pendingApprovals }: { m: 
     );
   }
   if (m.kind === 'artifact_card') {
-    const icon = p.kind === 'pr' ? 'pr' : p.kind === 'branch' ? 'branch' : 'file';
+    const icon = p.kind === 'pr' ? 'pr' : p.kind === 'branch' ? 'branch' : p.kind === 'review' ? 'checkCircle' : 'file';
+    const verdict = p.kind === 'review' ? ({ approve: ['可以合', 'go'], request_changes: ['需要修改', 'bad'], comment: ['只有建议', 'warn'] } as Record<string, [string, string]>)[p.verdict] : null;
     return (
-      <div className="mcard go">
-        <div className="mhead"><Icon name={icon} size="sm" />{p.kind === 'pr' ? 'PR 已创建' : p.kind === 'doc' ? '方案已产出' : p.kind === 'branch' ? '分支已推送' : `产物 ${p.kind}`}<span className="badge">{m.author}</span>{time}</div>
+      <div className={`mcard ${verdict?.[1] === 'bad' ? 'bad' : 'go'}`}>
+        <div className="mhead"><Icon name={icon} size="sm" />{p.kind === 'pr' ? 'PR 已创建' : p.kind === 'doc' ? '方案已产出' : p.kind === 'branch' ? '分支已推送' : p.kind === 'review' ? 'Review 结论' : `产物 ${p.kind}`}
+          {verdict && <span className={`badge ${verdict[1]}`}>{verdict[0]}</span>}<span className="badge">{m.author}</span>{time}</div>
+        {p.kind === 'review' && (
+          <div className="stack small" style={{ gap: 4, marginBottom: 6 }}>
+            {!!p.mustFix?.length && <div><b>必须修</b><ul style={{ margin: '2px 0 0 18px', padding: 0 }}>{p.mustFix.map((x: string, i: number) => <li key={i}>{x}</li>)}</ul></div>}
+            {!!p.suggestions?.length && <div><b>建议</b><ul style={{ margin: '2px 0 0 18px', padding: 0 }}>{p.suggestions.map((x: string, i: number) => <li key={i}>{x}</li>)}</ul></div>}
+            {!p.mustFix?.length && !p.suggestions?.length && <div className="muted">没有问题</div>}
+          </div>
+        )}
         {p.url && <div><a href={p.url} target="_blank" rel="noreferrer">{p.title ?? p.url} <Icon name="external" size="sm" /></a></div>}
         {p.branch && <div className="mono small">{p.branch}</div>}
         {p.diffStat && <div className="small muted">+{p.diffStat.additions} −{p.diffStat.deletions} · {p.diffStat.files} 个文件</div>}

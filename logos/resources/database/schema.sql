@@ -578,7 +578,7 @@ CREATE TABLE artifacts (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   task_id       UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   session_id    UUID REFERENCES sessions(id) ON DELETE SET NULL,
-  kind          TEXT NOT NULL CHECK (kind IN ('pr', 'doc', 'branch', 'triage', 'candidates')),
+  kind          TEXT NOT NULL CHECK (kind IN ('pr', 'doc', 'branch', 'triage', 'candidates', 'review')),
   url           TEXT,
   title         TEXT,
   path          TEXT,
@@ -589,7 +589,7 @@ CREATE TABLE artifacts (
   mirrored_to   JSONB NOT NULL DEFAULT '[]'::jsonb,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-COMMENT ON TABLE artifacts IS 'agent 交付的产物：PR、方案文档、demo 分支、分流结果、候选列表';
+COMMENT ON TABLE artifacts IS 'agent 交付的产物：PR、方案文档、demo 分支、分流结果、候选列表、review 结论（0003 迁移补入 review）';
 COMMENT ON COLUMN artifacts.id IS '主键';
 COMMENT ON COLUMN artifacts.task_id IS '所属任务';
 COMMENT ON COLUMN artifacts.session_id IS '交付的会话';

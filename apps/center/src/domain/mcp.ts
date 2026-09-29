@@ -34,6 +34,15 @@ const CandidatesArtifact = z.object({
   candidates: z.array(z.object({ messageId: z.string(), reason: z.string(), confidence: z.number().min(0).max(1) })).min(1),
 });
 const OtherArtifact = z.object({ kind: z.enum(['pr', 'doc', 'branch']) }).passthrough();
+/** review 子任务的结论（0003 迁移）：不派生子任务，写进 review 与父任务两条线程 */
+const ReviewArtifact = z.object({
+  kind: z.literal('review'),
+  verdict: z.enum(['approve', 'request_changes', 'comment']),
+  mustFix: z.array(z.string().max(1000)).max(50).default([]),
+  suggestions: z.array(z.string().max(1000)).max(50).default([]),
+  content: z.string().max(20000).optional(),
+  url: z.string().max(500).optional(),
+});
 export const ArtifactInput = z.union([TriageArtifact, OtherArtifact]);
 
 const TOOLS = [
@@ -140,7 +149,9 @@ export class McpService {
       case 'deliver': {
         const a = z.object({ taskKey: z.string().optional(), artifacts: z.array(z.record(z.unknown())).min(1), summary: z.string().max(2000).optional() }).parse(args);
         // 按 kind 分别校验，保证错误信息指向具体字段（如 tier、confidence）
-        const artifacts = a.artifacts.map((x) => (x.kind === 'triage' ? TriageArtifact.parse(x) : x.kind === 'candidates' ? CandidatesArtifact.parse(x) : OtherArtifact.parse(x)));
+        const artifacts = a.artifacts.map((x) => (x.kind === 'triage' ? TriageArtifact.parse(x) : x.kind === 'candidates' ? CandidatesArtifact.parse(x) : x.kind === 'review' ? ReviewArtifact.parse(x) : OtherArtifact.parse(x)));
+        // review 会话交 pr 会给子任务再建孙任务（撞 tasks_key_check）：直接给出该怎么交
+        if (session.kind === 'review' && artifacts.some((x: any) => x.kind !== 'review')) throw new Error('review 会话请用 {kind:"review", verdict, mustFix, suggestions, content, url} 回写结论，不要交 pr / doc / branch');
         if (!session.task_id) {
           // 候选扫描会话（S02 Step 26–29）：只接受 candidates
           const cands = artifacts.filter((x: any) => x.kind === 'candidates').flatMap((x: any) => x.candidates as Array<{ messageId: string; reason: string; confidence: number }>);

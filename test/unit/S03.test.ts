@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-55（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-56（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -777,6 +777,30 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     expect((await app.tasks.byKey('T-264')).state).toBe('failed');
     const card = await app.db.one<any>(`SELECT payload FROM messages WHERE task_id=$1 AND kind='failure_card' ORDER BY created_at DESC LIMIT 1`, [taskId]);
     expect(card.payload.options).toContain('fresh_session');
+  }));
+  it('UT-S03-56: review 子任务回写结论（kind=review），交 pr 被明确拒绝；review worktree 沿用父任务基线', () => withReport('UT-S03-56', async () => {
+    const w = await fw('dev');
+    const parent = await seedTask(app.db, { key: 'T-265', state: 'delivered', runtime: 'dev', agent: 'claude' });
+    await app.db.query(`UPDATE tasks SET base_branch='branch-hotfix-x' WHERE id=$1`, [parent]);
+    const child = await seedTask(app.db, { key: 'T-265.2', parentKey: 'T-265', state: 'queued', kind: 'review', runtime: 'dev', agent: 'codex' });
+    // 基线沿用父任务
+    await app.dispatch.dispatchTask(child, { kind: 'review', agent: 'codex' });
+    const env = await w.expect((e) => e.type === 'worktree.create' && e.payload.taskKey === 'T-265.2');
+    expect(env.payload.baseBranch).toBe('branch-hotfix-x');
+    // 回写结论
+    const sid = await seedSession(app.db, { taskId: child, runtime: 'dev', agent: 'codex', kind: 'review' });
+    const token = Intake.newToken();
+    await app.db.query('UPDATE sessions SET mcp_token_hash=$2 WHERE id=$1', [sid, Intake.hash(token)]);
+    const bad = await mcpCall(token, 'deliver', { taskKey: 'T-265.2', artifacts: [{ kind: 'pr', url: 'https://github.com/o/r/pull/1' }] });
+    expect(JSON.stringify(bad.error)).toContain('kind:\\"review\\"');
+    const ok = await mcpCall(token, 'deliver', { taskKey: 'T-265.2', artifacts: [{ kind: 'review', verdict: 'comment', mustFix: [], suggestions: ['补序列化路径回归'], content: '## 结论\n可合', url: 'https://github.com/o/r/pull/1' }], summary: 'review 完成' });
+    expect(ok.error).toBeUndefined();
+    const art = await app.db.one<any>(`SELECT kind, url, payload FROM artifacts WHERE task_id=$1`, [child]);
+    expect(art).toMatchObject({ kind: 'review', url: 'https://github.com/o/r/pull/1' });
+    expect(art.payload).toMatchObject({ verdict: 'comment', mustFix: [], suggestions: ['补序列化路径回归'] });
+    expect(Number((await app.db.one<any>(`SELECT count(*) AS n FROM tasks WHERE parent_id=$1`, [child])).n)).toBe(0); // 不派生孙任务
+    const note = await app.db.one<any>(`SELECT text FROM messages WHERE task_id=$1 AND text LIKE 'T-265.2 review%'`, [parent]);
+    expect(note.text).toContain('只有建议'); expect(note.text).toContain('补序列化路径回归');
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');

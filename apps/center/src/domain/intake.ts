@@ -228,10 +228,12 @@ export class Intake {
    * 仓库级固定值对不上任务要改的分支时，agent 在 worktree 里根本找不到目标代码。
    */
   async baseBranchFor(taskId: string, repo?: string | null): Promise<string> {
-    const t = await this.db.one<any>('SELECT base_branch, repo_name FROM tasks WHERE id=$1', [taskId]);
+    const t = await this.db.one<any>('SELECT base_branch, repo_name, parent_id FROM tasks WHERE id=$1', [taskId]);
     const card = await this.db.one<{ base_branch: string | null }>('SELECT base_branch FROM triage_cards WHERE task_id=$1', [taskId]);
+    // 子任务（review / pr）沿用父任务定下的基线：T-81.2 的 review worktree 落在仓库默认 cloud-4.0，而 PR 是向 hotfix 分支提的
+    const parent = !t?.base_branch && t?.parent_id ? await this.db.one<{ base_branch: string | null }>('SELECT base_branch FROM tasks WHERE id=$1', [t.parent_id]) : null;
     const r = repo ?? t?.repo_name ?? null;
-    return t?.base_branch ?? card?.base_branch ?? (r ? this.cfg.repo_base_branch?.[r] : undefined) ?? 'master';
+    return t?.base_branch ?? card?.base_branch ?? parent?.base_branch ?? (r ? this.cfg.repo_base_branch?.[r] : undefined) ?? 'master';
   }
 
   async sendWorktreeCreate(taskId: string, runtimeName: string, repo: string, purpose: 'code_locate' | 'implement' | 'review', fetchFirst = false, resetToBase = false) {

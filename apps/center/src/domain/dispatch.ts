@@ -209,7 +209,14 @@ export class Dispatch {
 - codeLocations：最相关的 ≤8 处，每处 { file, line, symbol, why }，why 用中文写这处为什么相关`;
       case 'plan': return `${base}\n本会话产出方案文档：写到 docs/plan-${taskKey}.md 并 deliver({kind:"doc", path, title, content})。不要改业务代码。`;
       case 'proto': return `${base}\n本会话产出可运行 demo 分支加一页说明，deliver({kind:"branch", branch, readmePath})。`;
-      case 'review': return `${base}\n本会话对同一任务的 PR 做 review：给出必须修/建议修/可忽略三类意见，通过 report_progress 回写结论。`;
+      case 'review': return `${base}
+本会话对父任务的 PR 做 review，不要改代码、不要推送。worktree 已按 PR 的目标分支建好；先用 gh 拉取 PR 的改动再审。
+结束前调用一次 deliver，artifacts 里放一个 {kind:"review", ...}：
+- verdict：approve（可以合）/ request_changes（有必须修的问题）/ comment（只有建议）
+- mustFix：必须修的问题清单，每条一句中文，写清文件与原因；没有就给空数组
+- suggestions：建议修的清单，同上
+- content：完整 review 意见（中文 markdown）
+- url：被 review 的 PR 链接`;
       default: return `${base}\n本会话按路径 ${path ?? 'fix'} 实现修复：复现、修改、跑相关 UT，然后 request_approval(create_pr) 并在批准后用 create-doris-pr skill 建 PR，最后 deliver({kind:"pr", url, title, diffStat})。`;
     }
   }
@@ -398,6 +405,14 @@ export class Dispatch {
           await c.query(`INSERT INTO tasks (key, parent_id, channel_id, title, state, kind, source_type, source_ref, repo_name, repo_source, runtime_name, agent, last_activity_at, created_at, updated_at)
             SELECT $1, id, channel_id, $2, 'queued', 'review', 'github', $3, repo_name, repo_source, runtime_name, $4, $5, $5, $5 FROM tasks WHERE id=$6`, [`${s.task_key}.${n + 2}`, `review（${reviewer}）`, a.url, reviewer, now, s.task_id]);
           await c.query(`INSERT INTO messages (channel_id, task_id, kind, author, text, created_at) VALUES ($1,$2,'system','system',$3,$4)`, [s.channel_id, s.task_id, `子任务 ${s.task_key}.${n + 1} PR 已创建 · 子任务 ${s.task_key}.${n + 2} review 由 ${reviewer} 执行（作者 ${s.agent}）`, now]);
+        } else if (a.kind === 'review') {
+          // review 结论：写 review 子任务的产物；同时在父任务线程留一条摘要，用户在 T-x 线程就能看到结论
+          const mustFix = (a.mustFix ?? []) as string[]; const sugg = (a.suggestions ?? []) as string[];
+          const verdict = ({ approve: '可以合', request_changes: '需要修改', comment: '只有建议' } as Record<string, string>)[a.verdict] ?? a.verdict;
+          const line = `review（${s.agent}）：${verdict} · 必须修 ${mustFix.length} 条 · 建议 ${sugg.length} 条${mustFix.length ? `\n必须修：\n- ${mustFix.join('\n- ')}` : ''}${sugg.length ? `\n建议：\n- ${sugg.join('\n- ')}` : ''}`;
+          await c.query(`UPDATE artifacts SET payload=$2 WHERE task_id=$1 AND session_id=$3 AND kind='review'`, [s.task_id, JSON.stringify({ verdict: a.verdict, mustFix, suggestions: sugg }), sessionId]);
+          const parent = await this.db.one<{ id: string; channel_id: string }>(`SELECT p.id, p.channel_id FROM tasks t JOIN tasks p ON p.id=t.parent_id WHERE t.id=$1`, [s.task_id], c);
+          if (parent) await c.query(`INSERT INTO messages (channel_id, task_id, kind, author, text, created_at) VALUES ($1,$2,'system','system',$3,$4)`, [parent.channel_id, parent.id, `${s.task_key} ${line}`, now]);
         } else if (a.kind === 'doc') {
           await c.query(`UPDATE tasks SET state='delivered', last_activity_at=$2, updated_at=$2 WHERE id=$1`, [s.task_id, now]);
           await c.query(`UPDATE context_packs SET plan_doc=$2, updated_at=$3, version=version+1 WHERE task_id=$1`, [s.task_id, a.content ?? null, now]);
