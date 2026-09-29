@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-44（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-45（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -15,7 +15,7 @@ import { seedTask, seedRuntime, seedSession, seedWorktree, runtimeId } from '../
 import { fixtures, type FixtureCtx } from '../orchestration/fixtures.js';
 import { WorktreeCreate, SessionStart, WorkerConfig, makeEnvelope, routeTask } from '@foreman/shared';
 import { createWorktree, pickBuildEnv, resolveBaseRef } from '../../apps/worker/src/worktree.js';
-import { Worker } from '../../apps/worker/src/worker.js';
+import { Worker, textWorkspace } from '../../apps/worker/src/worker.js';
 import { Intake } from '../../apps/center/src/domain/intake.js';
 
 let app: TestApp;
@@ -509,6 +509,13 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     for (let i = 0; i < 30; i++) { if (await app.db.one(`SELECT 1 FROM jobs WHERE kind='code-locate' AND status='queued' AND args->>'taskId'=$1`, [loc])) break; await new Promise((r) => setTimeout(r, 100)); }
     expect(await app.db.one(`SELECT 1 FROM jobs WHERE kind='code-locate' AND status='queued' AND args->>'taskId'=$1`, [loc])).not.toBeNull();
     expect(await count()).toBe(3);
+  }));
+  it('UT-S03-45: 文本会话的占位 cwd /tmp 改到 ~/.foreman/workspace，worktree 会话原样', () => withReport('UT-S03-45', async () => {
+    const home = mkdtempSync(resolve(tmpdir(), 'fhome-'));
+    const t = textWorkspace({ cwd: '/tmp', sessionId: 's1' }, home);
+    expect(t.cwd).toBe(resolve(home, 'workspace')); expect(existsSync(t.cwd)).toBe(true); expect(t.sessionId).toBe('s1');
+    const w = textWorkspace({ cwd: '/mnt/wt/T-1' }, home);
+    expect(w.cwd).toBe('/mnt/wt/T-1');
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');

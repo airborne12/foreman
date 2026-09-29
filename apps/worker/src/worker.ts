@@ -12,6 +12,17 @@ import { execFile } from 'node:child_process';
 import { Envelope, makeEnvelope, CENTER_TO_WORKER, type WorkerConfig } from '@foreman/shared';
 import { runGc, diskUsedRatio } from './gc.js';
 import { foremanHome } from './config.js';
+
+/**
+ * 调度员、无仓库的出方案等文本会话没有 worktree，中心下发的 cwd 是占位的 /tmp。
+ * claude 2.1.284 起 --bg 只在被信任的目录里启动，/tmp 不该整个去信任，改到专用目录 ~/.foreman/workspace。
+ */
+export function textWorkspace<T extends { cwd: string }>(input: T, home = foremanHome()): T {
+  if (input.cwd !== '/tmp') return input;
+  const dir = resolve(home, 'workspace');
+  mkdirSync(dir, { recursive: true });
+  return { ...input, cwd: dir };
+}
 import { createWorktree, pickBuildEnv, WorktreeError, type GitRunner } from './worktree.js';
 import { JiraClient, loadJiraConfig, runJiraJob } from './jira.js';
 import { ADAPTERS, SessionStartError, tail, type TrackedSession, type AgentAdapter, type AdapterOptions } from './sessions.js';
@@ -165,7 +176,7 @@ export class Worker {
           break;
         }
         case 'session.start': {
-          const input = CENTER_TO_WORKER['session.start'].parse(env.payload);
+          const input = textWorkspace(CENTER_TO_WORKER['session.start'].parse(env.payload));
           const bin = this.opts.config.agents[input.agent]?.bin;
           const adapter = (this.opts.adapters ?? ADAPTERS)[input.agent];
           if (!bin || !adapter) { reply = makeEnvelope('error', { code: 'AGENT_START_FAILED', message: `本 runtime 未配置 agent ${input.agent}`, retryable: false }, { ref: env.id }); break; }
