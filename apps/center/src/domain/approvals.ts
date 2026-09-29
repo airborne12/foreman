@@ -47,6 +47,7 @@ export class Approvals {
   hasWaiter(approvalId: string) { return this.waiters.has(approvalId); }
 
   async byKey(key: string, client?: Queryable): Promise<ApprovalRow | null> { return this.db.one<ApprovalRow>(`${APPROVAL_WITH_TASK} WHERE a.key=$1`, [key], client); }
+  async byId(id: string, client?: Queryable): Promise<ApprovalRow | null> { return this.db.one<ApprovalRow>(`${APPROVAL_WITH_TASK} WHERE a.id=$1`, [id], client); }
 
   /** S06 Step 1–10：创建审批；auto 模式直接执行 */
   async request(input: { taskId: string; sessionId?: string | null; actionType: ActionType; title: string; body: string; payload?: Record<string, unknown>; executor?: 'agent' | 'center'; notify?: boolean }): Promise<ApprovalRow> {

@@ -120,7 +120,9 @@ export class McpService {
       }
       case 'request_approval': {
         const a = z.object({ taskKey: z.string(), actionType: z.enum(ACTION_TYPES), title: z.string().max(200), body: z.string().max(20000), payload: z.record(z.unknown()).optional(), timeoutMinutes: z.number().max(APPROVAL_WAIT_MINUTES).optional() }).parse(args);
-        const row = await this.approvals.request({ taskId: session.task_id, sessionId: session.id, actionType: a.actionType, title: a.title, body: a.body, payload: { ...(a.payload ?? {}), taskKey: session.task_key, executor: 'agent' } });
+        // 同一会话对同一类动作已有待批审批（多半是客户端超时后重试）：接着等那条，不再建重复审批（T-81 的 A-90/A-91）
+        const dup = await this.db.one<{ id: string }>(`SELECT id FROM approvals WHERE session_id=$1 AND action_type=$2 AND status='pending' ORDER BY created_at DESC LIMIT 1`, [session.id, a.actionType]);
+        const row = dup ? (await this.approvals.byId(dup.id))! : await this.approvals.request({ taskId: session.task_id, sessionId: session.id, actionType: a.actionType, title: a.title, body: a.body, payload: { ...(a.payload ?? {}), taskKey: session.task_key, executor: 'agent' } });
         if (row.status === 'auto_approved') return { approved: true, approvalKey: row.key, via: 'auto', finalBody: row.body, reason: null, comment: null };
         const d = await this.approvals.waitFor(row.id, (a.timeoutMinutes ?? APPROVAL_WAIT_MINUTES) * 60_000);
         if (d.reason === 'timeout') {

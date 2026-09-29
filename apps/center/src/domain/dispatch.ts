@@ -251,7 +251,12 @@ export class Dispatch {
       } else {
         // 本会话没交付任何产物（如建 PR 被否决后 agent 停下）：不算交付，暂停并进收件箱等人接手
         const produced = await this.db.one('SELECT 1 FROM artifacts WHERE session_id=$1 LIMIT 1', [s.id]);
-        if (!produced && t.state === 'running') {
+        // 本会话还有待批审批：不是「没产物」，是在等人拍板——批准后 onApprovalDecided 会续接会话（EX-22.1）
+        const waiting = produced ? null : await this.db.one<{ key: string }>(`SELECT key FROM approvals WHERE session_id=$1 AND status='pending' ORDER BY created_at DESC LIMIT 1`, [s.id]);
+        if (waiting && ['running', 'waiting_approval'].includes(t.state)) {
+          await this.db.query(`UPDATE tasks SET state='waiting_approval', updated_at=$2 WHERE id=$1`, [t.id, now]);
+          await this.threadEvent(t.id, `会话已结束，等待 ${waiting.key} 审批：批准后自动续接会话继续`);
+        } else if (!produced && t.state === 'running') {
           const last = await this.db.one<{ text: string }>(`SELECT text FROM messages WHERE task_id=$1 AND kind='progress' ORDER BY created_at DESC, seq DESC LIMIT 1`, [t.id]);
           const reason = `人工处理：会话结束但没有产物${last ? `（最后进展：${last.text.slice(0, 80)}）` : ''}，在线程里回复即可让 agent 接着做`;
           await this.db.query(`UPDATE tasks SET state='paused', state_before_pause='running', queue_reason=$2, updated_at=$3 WHERE id=$1`, [t.id, reason, now]);

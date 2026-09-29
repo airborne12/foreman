@@ -14,7 +14,14 @@
 import { spawn, execFile } from 'node:child_process';
 import { writeFileSync, appendFileSync, mkdirSync, openSync, closeSync, readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { FORBIDDEN_ENV_KEYS } from '@foreman/shared';
+import { FORBIDDEN_ENV_KEYS, APPROVAL_WAIT_MINUTES } from '@foreman/shared';
+
+/**
+ * foreman 的 request_approval / ask_user 会阻塞到人处理（最长 30 分钟），而两家 CLI 的 MCP 工具调用默认 60 秒就超时：
+ * 2026-09-29 T-81 的 claude 两次申请建 PR 都在 60 秒报 "The operation timed out"，重复建出 A-90/A-91 后放弃。
+ * 按服务器把超时放到等待上限 + 5 分钟（实测 claude 的 timeout、codex 的 tool_timeout_sec 都能等满 90 秒）。
+ */
+export const FOREMAN_MCP_TIMEOUT_MS = (APPROVAL_WAIT_MINUTES + 5) * 60_000;
 
 export interface SessionStartInput { sessionId: string; taskKey: string | null; kind: string; agent: string; model?: string | null; prompt: string; cwd: string; name?: string; mcp: { url: string; token: string }; env?: Record<string, string>; timeoutMinutes?: number | null }
 export interface TrackedSession { sessionId: string; agent: string; agentSessionId: string; shortId?: string | null; pid: number | null; cwd: string; logFile: string; state: 'running' | 'done' | 'failed' | 'stopped'; exitCode?: number | null; mcp?: { url: string; token: string } }
@@ -66,7 +73,7 @@ export function tail(file: string, lines = 20) { try { return readFileSync(file,
 
 export function claudeStartArgs(input: SessionStartInput, permissionMode?: string | null, disallowedTools?: string[] | null) {
   const name = input.name ?? `foreman-${input.sessionId.slice(0, 8)}`;
-  const mcp = JSON.stringify({ mcpServers: { foreman: { type: 'http', url: input.mcp.url, headers: { Authorization: `Bearer ${input.mcp.token}` } } } });
+  const mcp = JSON.stringify({ mcpServers: { foreman: { type: 'http', url: input.mcp.url, headers: { Authorization: `Bearer ${input.mcp.token}` }, timeout: FOREMAN_MCP_TIMEOUT_MS } } });
   return [
     '--bg', '--name', name, '--permission-mode', permissionMode ?? 'auto', '--strict-mcp-config', `--mcp-config=${mcp}`,
     // 同样用 = 写法：这些参数都是变长的，空格写法会把 prompt 当成值吞掉
@@ -169,7 +176,7 @@ function codexCommon(mcp: { url: string; token: string } | undefined, sandbox?: 
     '-c', `sandbox_mode="${sandbox ?? 'workspace-write'}"`, '-c', 'sandbox_workspace_write.network_access=true',
     // codex 0.158（2026-09-28 自动更新）起 MCP 工具调用默认要审批，后台 exec 的审批策略是 never，
     // 平台工具（get_task / report_progress / deliver…）会全部被拒：只放行 foreman 这一个服务器，shell 等其他审批不变
-    ...(mcp ? ['-c', `mcp_servers.foreman.url="${mcp.url}"`, '-c', `mcp_servers.foreman.http_headers.Authorization="Bearer ${mcp.token}"`, '-c', 'mcp_servers.foreman.default_tools_approval_mode="approve"'] : []),
+    ...(mcp ? ['-c', `mcp_servers.foreman.url="${mcp.url}"`, '-c', `mcp_servers.foreman.http_headers.Authorization="Bearer ${mcp.token}"`, '-c', 'mcp_servers.foreman.default_tools_approval_mode="approve"', '-c', `mcp_servers.foreman.tool_timeout_sec=${FOREMAN_MCP_TIMEOUT_MS / 1000}`] : []),
   ];
 }
 export function codexStartArgs(input: SessionStartInput, sandbox?: string | null) {

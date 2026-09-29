@@ -20,8 +20,9 @@ const FILTERS: Array<{ id: 'all' | Kind; label: string }> = [
 export function Inbox({ shared, loaded }: { shared: Shared; loaded: boolean }) {
   const { inbox, runtimes, reload } = shared;
   const [filter, setFilter] = useState<'all' | Kind>('all');
-  const [selId, setSelId] = useState<string | null>(null);
-  const [opened, setOpened] = useState(false); // 窄屏：列表与详情二选一
+  // 从线程里「去收件箱处理」跳过来时带 ?sel=a:A-90，直接定位到那一条（2026-09-29：只跳到收件箱，用户找不到要处理哪条）
+  const [selId, setSelId] = useState<string | null>(() => new URLSearchParams(location.search).get('sel'));
+  const [opened, setOpened] = useState(() => new URLSearchParams(location.search).has('sel')); // 窄屏：列表与详情二选一
   const listRef = useRef<HTMLDivElement>(null);
 
   const items = useMemo<Item[]>(() => {

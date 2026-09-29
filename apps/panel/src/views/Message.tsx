@@ -72,7 +72,7 @@ export function MessageRow({ m, onDraft, onPick, busy, pendingApprovals }: { m: 
       <div className="mcard warn">
         <div className="mhead"><Icon name="check" size="sm" />待拍板{p.approvalKey && <span className="badge mono">{p.approvalKey}</span>}{time}</div>
         <div>{m.text}</div>
-        <div className="row" style={{ marginTop: 8 }}><Btn className="sm" icon="inbox" onClick={() => navigate('/inbox')}>去收件箱处理</Btn></div>
+        <div className="row" style={{ marginTop: 8 }}><Btn className="sm" icon="inbox" onClick={() => navigate(p.approvalKey ? `/inbox?sel=a:${p.approvalKey}` : '/inbox')}>去收件箱处理</Btn></div>
       </div>
     );
   }

@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-51（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-53（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -327,6 +327,8 @@ describe('S03 1.4 worktree 与会话指令', () => {
     expect(args).toContain('--strict-mcp-config');
     const mcp = args.find((a) => a.startsWith('--mcp-config='))!;
     expect(JSON.parse(mcp.slice('--mcp-config='.length)).mcpServers.foreman).toMatchObject({ type: 'http', url: 'http://127.0.0.1:7801/mcp', headers: { Authorization: 'Bearer tok-1' } });
+    // 阻塞式 request_approval / ask_user 最长 30 分钟：MCP 调用超时放到 35 分钟（claude 默认 60 秒，T-81 实测超时）
+    expect(JSON.parse(mcp.slice('--mcp-config='.length)).mcpServers.foreman.timeout).toBe(35 * 60_000);
     // 黑名单同样要用 = 写法，且不能挤掉最后一个位置参数 prompt
     expect(args).toContain('--disallowedTools=Bash(rm:*),Bash(git push:*)');
     expect(args[args.length - 1]).toBe('实现 T-231');
@@ -340,6 +342,7 @@ describe('S03 1.4 worktree 与会话指令', () => {
     expect(start).toContain('mcp_servers.foreman.http_headers.Authorization="Bearer tok-2"');
     // codex 0.158 起 MCP 工具默认要审批：只放行 foreman 服务器（2026-09-29 生产 12 个定位会话 deliver 全被拒）
     expect(start).toContain('mcp_servers.foreman.default_tools_approval_mode="approve"');
+    expect(start).toContain('mcp_servers.foreman.tool_timeout_sec=2100');
     const s = { sessionId: input.sessionId, agent: 'codex', agentSessionId: 'th-1', pid: 1, cwd: input.cwd, logFile: '/dev/null', state: 'done' as const, mcp: input.mcp };
     const resume = codexResumeArgs(s, 'th-1', '继续');
     expect(resume.slice(0, 2)).toEqual(['exec', 'resume']);
@@ -689,6 +692,35 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     await app.intake.emitTriage(taskId, null, { degraded: true, degradedReason: 'worktree 创建失败' });
     const note = await app.db.one<any>(`SELECT text FROM messages WHERE task_id=$1 AND text LIKE '代码定位%' ORDER BY created_at DESC, seq DESC LIMIT 1`, [taskId]);
     expect(note.text).toBe('代码定位未完成：worktree 创建失败');
+  }));
+  it('UT-S03-52: 同一会话重复申请同类审批（客户端超时重试）时接着等原审批，不建重复', () => withReport('UT-S03-52', async () => {
+    const { token, taskId } = await mcpSession('T-261', 'claude');
+    // 测试时钟冻结：阻塞调用发出后手动推进时钟让它超时返回
+    const timedOut = async (call: Promise<any>) => { await new Promise((r) => setTimeout(r, 300)); await app.fakeClock.advance(1_000); return call; };
+    const req = () => timedOut(mcpCall(token, 'request_approval', { taskKey: 'T-261', actionType: 'create_pr', title: '创建 PR', body: '改动说明', timeoutMinutes: 0.01 }));
+    const r1 = await req(); const r2 = await req();
+    expect(r1.error).toBeUndefined(); expect(r2.error).toBeUndefined();
+    expect(r2.result.structuredContent.approvalKey).toBe(r1.result.structuredContent.approvalKey);
+    const rows = await app.db.query<any>(`SELECT key, status FROM approvals WHERE task_id=$1 AND action_type='create_pr'`, [taskId]);
+    expect(rows.rows).toHaveLength(1); expect(rows.rows[0].status).toBe('pending');
+    // 不同类动作仍单独建
+    await timedOut(mcpCall(token, 'request_approval', { taskKey: 'T-261', actionType: 'jira_comment', title: '评论', body: 'x', timeoutMinutes: 0.01 }));
+    expect(Number((await app.db.one<any>(`SELECT count(*) AS n FROM approvals WHERE task_id=$1`, [taskId])).n)).toBe(2);
+  }));
+  it('UT-S03-53: 会话结束时本会话还有待批审批 → 任务等待审批，不算「没产物」', () => withReport('UT-S03-53', async () => {
+    const { token, taskId, sessionId } = await mcpSession('T-262', 'claude');
+    const call = mcpCall(token, 'request_approval', { taskKey: 'T-262', actionType: 'create_pr', title: '创建 PR', body: '改动说明', timeoutMinutes: 0.01 });
+    await new Promise((res) => setTimeout(res, 300)); await app.fakeClock.advance(1_000);
+    const r = await call;
+    const key = r.result.structuredContent.approvalKey;
+    await app.db.query(`UPDATE tasks SET state='running' WHERE id=$1`, [taskId]);
+    await app.dispatch.onSessionState('dev', { sessionId, state: 'done', source: 'exit' });
+    const t = await app.tasks.byKey('T-262');
+    expect(t.state).toBe('waiting_approval'); expect(t.queue_reason).toBeNull();
+    expect(await app.db.one(`SELECT 1 FROM messages WHERE task_id=$1 AND text LIKE $2`, [taskId, `%等待 ${key} 审批%`])).not.toBeNull();
+    const inbox = await http(app, 'GET', '/api/inbox');
+    expect(inbox.body.failures.map((f: any) => f.key)).not.toContain('T-262');
+    expect(inbox.body.approvals.map((a: any) => a.key)).toContain(key);
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');

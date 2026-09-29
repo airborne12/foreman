@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: "foreman API — MCP（agent 会话调用的工具端点）"
   version: 0.1.0
-  description: "来源：S01 Step 20–22、S03 Step 20–27、S04 Step 18–27、S07 Step 1 / 13 / 28、S02 Step 26。传输为 MCP Streamable HTTP（JSON-RPC 2.0 over POST /mcp），鉴权用任务级一次性 token。工具的入参与出参以 components 定义；ask_user 与 request_approval 为阻塞工具，HTTP 层挂起最长 30 分钟，超时返回结构化结果而非错误。"
+  description: "来源：S01 Step 20–22、S03 Step 20–27、S04 Step 18–27、S07 Step 1 / 13 / 28、S02 Step 26。传输为 MCP Streamable HTTP（JSON-RPC 2.0 over POST /mcp），鉴权用任务级一次性 token。工具的入参与出参以 components 定义；ask_user 与 request_approval 为阻塞工具，HTTP 层挂起最长 30 分钟，超时返回结构化结果而非错误。客户端的 MCP 工具调用超时必须大于 30 分钟（worker 按服务器设为 35 分钟：claude 的 mcpServers.foreman.timeout、codex 的 mcp_servers.foreman.tool_timeout_sec；两家默认 60 秒）。同一会话对同一 actionType 已有待批审批时，request_approval 接着等原审批、返回原 approvalKey，不新建。"
 servers:
   - url: http://127.0.0.1:7801
 security:

@@ -73,7 +73,7 @@ export function ThreadView({ channel, taskKey, shared }: { channel: string; task
               <div className={`callout ${task?.state === 'failed' ? 'bad' : 'warn'}`} style={{ marginBottom: 12 }}>
                 <Icon name={task?.state === 'failed' ? 'alert' : 'clock'} />
                 <div className="grow">{reason.replace(/^人工处理：/, '')}</div>
-                {(task?.state === 'failed' || /^人工处理|^重试|^无进展/.test(reason)) && <Btn className="sm" icon="inbox" onClick={() => navigate('/inbox')}>去收件箱</Btn>}
+                {(task?.state === 'failed' || /^人工处理|^重试|^无进展/.test(reason)) && <Btn className="sm" icon="inbox" onClick={() => navigate(`/inbox?sel=f:${taskKey}`)}>去收件箱</Btn>}
               </div>
             )}
             {err && <div className="callout bad" style={{ marginBottom: 12 }}><Icon name="alert" />{err}</div>}
@@ -175,7 +175,7 @@ export function ThreadView({ channel, taskKey, shared }: { channel: string; task
         {!!task?.pendingApprovals?.length && (
           <div className="aside-sec">
             <h4>待处理审批</h4>
-            {task.pendingApprovals.map((a: any) => <button key={a.key} className="thread-row" onClick={() => navigate('/inbox')}><span className="k">{a.key}</span><span className="ttl">{a.title}</span><Icon name="chevronRight" size="sm" /></button>)}
+            {task.pendingApprovals.map((a: any) => <button key={a.key} className="thread-row" onClick={() => navigate(`/inbox?sel=a:${a.key}`)}><span className="k">{a.key}</span><span className="ttl">{a.title}</span><Icon name="chevronRight" size="sm" /></button>)}
           </div>
         )}
 
