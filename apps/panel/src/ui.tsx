@@ -99,22 +99,32 @@ export function Btn({ busy, icon, children, className, ...rest }: ButtonHTMLAttr
 }
 
 // ---------------- 轻提示（§5.3：操作结果右下角反馈，aria-live） ----------------
-type Toast = { id: number; kind: 'ok' | 'bad'; text: string };
-const ToastCtx = createContext<(kind: 'ok' | 'bad', text: string) => void>(() => {});
+type ToastAction = { label: string; onClick: () => void };
+type Toast = { id: number; kind: 'ok' | 'bad'; text: string; action?: ToastAction };
+type PushToast = (kind: 'ok' | 'bad', text: string, action?: ToastAction) => void;
+const ToastCtx = createContext<PushToast>(() => {});
 export const useToast = () => useContext(ToastCtx);
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<Toast[]>([]);
   const seq = useRef(0);
-  const push = useCallback((kind: 'ok' | 'bad', text: string) => {
+  const push = useCallback<PushToast>((kind, text, action) => {
     const id = ++seq.current;
-    setItems((xs) => [...xs.slice(-3), { id, kind, text }]);
-    setTimeout(() => setItems((xs) => xs.filter((x) => x.id !== id)), kind === 'bad' ? 6000 : 3200);
+    setItems((xs) => [...xs.slice(-3), { id, kind, text, action }]);
+    // 带操作的提示多留一会儿，给人点的时间
+    setTimeout(() => setItems((xs) => xs.filter((x) => x.id !== id)), action ? 8000 : kind === 'bad' ? 6000 : 3200);
   }, []);
+  const dismiss = (id: number) => setItems((xs) => xs.filter((x) => x.id !== id));
   return (
     <ToastCtx.Provider value={push}>
       {children}
       <div className="toasts" role="status" aria-live="polite">
-        {items.map((t) => <div key={t.id} className={`toast ${t.kind}`}><Icon name={t.kind === 'ok' ? 'checkCircle' : 'alert'} />{t.text}</div>)}
+        {items.map((t) => (
+          <div key={t.id} className={`toast ${t.kind}`}>
+            <Icon name={t.kind === 'ok' ? 'checkCircle' : 'alert'} />
+            <span>{t.text}</span>
+            {t.action && <button type="button" className="btn sm accent" onClick={() => { t.action!.onClick(); dismiss(t.id); }}>{t.action.label}<Icon name="chevronRight" size="sm" /></button>}
+          </div>
+        ))}
       </div>
     </ToastCtx.Provider>
   );

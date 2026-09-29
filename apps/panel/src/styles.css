@@ -313,8 +313,9 @@ pre, .pre { font-family: var(--mono); font-size: 12.5px; line-height: 1.6; white
 @keyframes slide { from { transform: translateX(24px); opacity: 0; } }
 .toasts { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 60; pointer-events: none; }
 .toast { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: var(--r-lg); background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); font-size: 13px; animation: slide .18s ease-out; pointer-events: auto; max-width: 420px; }
-.toast.ok svg.i { color: var(--go); }
-.toast.bad svg.i { color: var(--bad); }
+.toast.ok > svg.i { color: var(--go); }
+.toast.bad > svg.i { color: var(--bad); }
+.toast .btn { margin-left: 4px; }
 .gate { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
 .gate .card { width: min(400px, 100%); padding: 24px; box-shadow: var(--shadow); }
 .conn-bar { position: fixed; top: 0; left: 0; right: 0; height: 2px; background: var(--bad); z-index: 70; }

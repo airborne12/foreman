@@ -159,9 +159,10 @@ function useAct(reload: () => Promise<void>) {
   const toast = useToast();
   const [busy, setBusy] = useState('');
   const [err, setErr] = useState('');
-  const act = async (label: string, fn: () => Promise<unknown>, ok?: string) => {
+  /** link：成功后提示里带「查看进展」，拍板后卡片会从收件箱消失，得留一个去任务线程的入口 */
+  const act = async (label: string, fn: () => Promise<unknown>, ok?: string, link?: string | null) => {
     setBusy(label); setErr('');
-    try { await fn(); if (ok) toast('ok', ok); await reload(); }
+    try { await fn(); if (ok) toast('ok', ok, link ? { label: '查看进展', onClick: () => navigate(link) } : undefined); await reload(); }
     catch (e) { setErr(errText(e)); }
     finally { setBusy(''); }
   };
@@ -191,7 +192,7 @@ function ApprovalDetail({ a, title, head, runtimes, reload }: { a: any; title: s
   const decide = (decision: 'approve' | 'reject') => act(a.key, () => api(`/api/approvals/${a.key}/decide`, {
     method: 'POST',
     body: { decision, bodyHash: a.bodyHash, ...(isTriage ? { overrides: Object.keys(ov).length ? ov : null } : { editedBody: body !== a.body ? body : null }), comment: comment || null },
-  }), decision === 'approve' ? `${a.key} 已${modified ? '按修改' : ''}执行` : `${a.key} 已否决`);
+  }), decision === 'approve' ? (isTriage ? `${a.taskKey} 已${modified ? '按修改' : ''}派出，agent 开始干活` : `${a.key} 已批准`) : `${a.key} 已否决`, a.taskKey ? `/c/${p.channel ?? 'jira'}/t/${a.taskKey}` : null);
 
   // ⌘/Ctrl+Enter 批准
   useEffect(() => {
@@ -340,7 +341,7 @@ function ApprovalDetail({ a, title, head, runtimes, reload }: { a: any; title: s
 function QuestionDetail({ q, head, reload }: { q: any; head: ReactNode; reload: () => Promise<void> }) {
   const [text, setText] = useState('');
   const { busy, err, act } = useAct(reload);
-  const send = (t: string) => t.trim() && act('send', () => api(`/api/tasks/${q.taskKey}/messages`, { method: 'POST', body: { text: t, questionId: q.id } }), `已送入 ${q.taskKey} 的会话`);
+  const send = (t: string) => t.trim() && act('send', () => api(`/api/tasks/${q.taskKey}/messages`, { method: 'POST', body: { text: t, questionId: q.id } }), `已送入 ${q.taskKey} 的会话`, `/c/${q.channel ?? 'jira'}/t/${q.taskKey}`);
   return (
     <>
       <div className="detail-body">
@@ -375,8 +376,8 @@ function FailureDetail({ t, title, head, reload }: { t: any; title: string; head
   const { busy, err, act } = useAct(reload);
   const failed = t.state === 'failed';
   const reason: string = (t.failureReason ?? t.queueReason ?? '').replace(/^人工处理：/, '');
-  const retry = (mode: string) => act(mode, () => api(`/api/tasks/${t.key}/retry`, { method: 'POST', body: { mode } }), `${t.key}：${RETRY_LABEL[mode]}`);
-  const reply = () => text.trim() && act('reply', () => api(`/api/tasks/${t.key}/messages`, { method: 'POST', body: { text } }), `已送入 ${t.key} 的会话`).then(() => setText(''));
+  const retry = (mode: string) => act(mode, () => api(`/api/tasks/${t.key}/retry`, { method: 'POST', body: { mode } }), `${t.key}：${RETRY_LABEL[mode]}`, mode === 'abandon' ? null : `/c/${t.channel ?? 'jira'}/t/${t.key}`);
+  const reply = () => text.trim() && act('reply', () => api(`/api/tasks/${t.key}/messages`, { method: 'POST', body: { text } }), `已送入 ${t.key} 的会话`, `/c/${t.channel ?? 'jira'}/t/${t.key}`).then(() => setText(''));
   const canReply = !failed && /会话结束|回复/.test(reason);
   return (
     <>
