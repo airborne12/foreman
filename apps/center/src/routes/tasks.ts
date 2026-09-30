@@ -102,6 +102,19 @@ export function taskRoutes(app: AppContext) {
     return c.json(await app.tasks.serialize(fresh, fresh.channel_slug), 202);
   });
 
+  // 换仓库 / 基线 / agent 重来：停掉在跑的会话、作废旧审批、派全新实现会话
+  r.post('/api/tasks/:key/restart', async (c) => {
+    const body = await parseBody(c, z.object({ repo: z.string().regex(/^[\w.-]+\/[\w.-]+$/).optional(), baseBranch: z.string().min(1).max(200).optional(), agent: z.enum(AGENTS).optional(), reason: z.string().max(500).optional() }).strict());
+    const t = await app.tasks.byKey(c.req.param('key'));
+    if (body.repo) {
+      const rts = await app.db.query<{ repos: Record<string, unknown> | null }>('SELECT repos FROM runtimes');
+      if (!rts.rows.some((r) => r.repos && body.repo! in r.repos)) throw new ApiError(422, 'REPO_UNAVAILABLE', `没有 runtime 登记仓库 ${body.repo}`);
+    }
+    await app.dispatch.restart(t.id, body);
+    const fresh = await app.tasks.byKey(t.key);
+    return c.json(await app.tasks.serialize(fresh, fresh.channel_slug), 202);
+  });
+
   // 从 Jira 重新拉单、按影响版本重算仓库与基线（未拍板的任务）；仓库变了会自动重新定位
   r.post('/api/tasks/:key/refresh-source', async (c) => {
     const t = await app.tasks.byKey(c.req.param('key'));

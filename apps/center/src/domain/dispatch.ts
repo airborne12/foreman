@@ -594,6 +594,39 @@ export class Dispatch {
   }
 
   /** POST /api/sessions/{id}/stop（S07 Step 42–46）：幂等 */
+  /**
+   * 换仓库 / 基线 / agent 重来（2026-09-30 T-83：影响版本 5.0.0 应在 apache/doris master 修，却在 selectdb-core 上做了）。
+   * 在跑的会话先在库里标 stopped 再通知 worker（worker 回报 stopped 时就不会把新一轮暂停掉）；
+   * 旧会话挂着的待批审批作废（否则批了会把旧仓库的改动建成 PR）；然后派一个全新的实现会话。
+   */
+  async restart(taskId: string, o: { repo?: string | null; baseBranch?: string | null; agent?: AgentName | null; reason?: string | null }) {
+    const t = await this.db.one<any>('SELECT * FROM tasks WHERE id=$1', [taskId]);
+    if (!t) throw new ApiError(404, 'NOT_FOUND', '任务不存在');
+    if (['triaging', 'pending_decision'].includes(t.state)) throw new ApiError(409, 'INVALID_STATE', `任务 ${t.key} 还没拍板：在分流卡上调整仓库 / 基线即可`);
+    if (t.state === 'done' || t.kind !== 'code') throw new ApiError(409, 'INVALID_STATE', `任务 ${t.key} 状态 ${t.state} / 类型 ${t.kind} 不能重来`);
+    const now = this.clock.now();
+    const live = await this.db.query<{ id: string; runtime: string }>(`SELECT s.id, r.name AS runtime FROM sessions s JOIN runtimes r ON r.id=s.runtime_id WHERE s.task_id=$1 AND s.state IN ('planned','running','waiting_input')`, [taskId]);
+    for (const s of live.rows) {
+      await this.db.query(`UPDATE sessions SET state='stopped', ended_at=$2, updated_at=$2 WHERE id=$1`, [s.id, now]);
+      await this.closeInferredQuestions(s.id);
+      this.hub.send(s.runtime, 'session.stop', { sessionId: s.id, reason: 'user' });
+    }
+    const stale = await this.db.query<{ id: string; key: string }>(`UPDATE approvals SET status='expired', updated_at=$2 WHERE task_id=$1 AND status='pending' AND action_type<>'triage_confirm' RETURNING id, key`, [taskId, now]);
+    for (const a of stale.rows) await this.events.record(this.db.pool, { type: 'inbox.removed', taskId, payload: { itemType: 'approval', key: a.key, reason: 'restarted' } });
+    this.events.flush();
+    const repo = o.repo ?? t.repo_name;
+    const cp = await this.db.one<{ jira: any }>('SELECT jira FROM context_packs WHERE task_id=$1', [taskId]);
+    const vt = cp?.jira?.versionTarget ?? null;
+    const pick: string[] = o.repo && o.repo !== t.repo_name ? (vt?.repo === o.repo ? vt.pickTargets : []) : (t.pick_targets ?? []);
+    await this.db.query(`UPDATE tasks SET repo_name=$2, repo_source=CASE WHEN $3::boolean THEN 'manual' ELSE repo_source END, base_branch=COALESCE($4, base_branch), pick_targets=$5, state='queued', failure_reason=NULL, queue_reason=NULL, updated_at=$6 WHERE id=$1`,
+      [taskId, repo, !!o.repo && o.repo !== t.repo_name, o.baseBranch ?? null, pick, now]);
+    await this.events.record(this.db.pool, { type: 'inbox.removed', taskId, payload: { itemType: 'failure', key: t.key, reason: 'restarted' } }); this.events.flush();
+    const base = await this.intake.baseBranchFor(taskId, repo);
+    await this.threadEvent(taskId, `重来：${repo} · 基线 ${base}${pick.length ? ` · pick ${pick.join('、')}` : ''}${live.rows.length ? ` · 已停止 ${live.rows.length} 个会话` : ''}${stale.rows.length ? ` · 作废审批 ${stale.rows.map((a) => a.key).join('、')}` : ''}${o.reason ? `（${o.reason}）` : ''}`);
+    const last = await this.db.one<{ attempt: number }>(`SELECT attempt FROM sessions WHERE task_id=$1 AND kind='implement' ORDER BY created_at DESC LIMIT 1`, [taskId]);
+    await this.dispatchTask(taskId, { agent: o.agent ?? null, kind: 'implement', attempt: Number(last?.attempt ?? 0) + 1 });
+  }
+
   async stopSession(sessionId: string) {
     const s = await this.db.one<any>(`SELECT s.*, r.name AS runtime_name, t.key AS task_key FROM sessions s JOIN runtimes r ON r.id=s.runtime_id LEFT JOIN tasks t ON t.id=s.task_id WHERE s.id=$1`, [sessionId]);
     if (!s) throw new ApiError(404, 'NOT_FOUND', '会话不存在');

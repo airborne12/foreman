@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-62（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-63（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -981,6 +981,35 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
       for (let i = 0; i < 60; i++) { try { sh(resolve(root, 'fork.git'), 'rev-parse', '--verify', '--quiet', 'refs/heads/foreman/T-274'); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
       expect(sh(resolve(root, 'fork.git'), 'log', '--format=%s', '-1', 'foreman/T-274')).toBe('fix: T-274');
     } finally { w.stop(); process.env.PATH = oldPath; }
+  }));
+  it('UT-S03-63: 换仓库 / 基线重来：停掉在跑的会话、作废旧审批、按新仓库派全新会话', () => withReport('UT-S03-63', async () => {
+    const w = await fw('dev', { repos: { 'selectdb/selectdb-core': { main: '/tmp/fx/core', worktreeRoot: '/tmp/fx/wt' }, 'apache/doris': { main: '/tmp/fx/doris', worktreeRoot: '/tmp/fx/wt-doris' } } });
+    const taskId = await seedTask(app.db, { key: 'T-275', state: 'waiting_approval', runtime: 'dev', agent: 'claude', authorAgent: 'claude', repo: 'selectdb/selectdb-core' });
+    await app.db.query(`UPDATE tasks SET base_branch='branch-selectdb-doris-5.0-incr' WHERE id=$1`, [taskId]);
+    await app.db.query(`UPDATE context_packs SET jira=$2 WHERE task_id=$1`, [taskId, JSON.stringify({ key: 'DORIS-29301', affectsVersions: ['5.0.0'], versionTarget: { repo: 'apache/doris', baseBranch: 'master', pickTargets: [], versions: ['5.0.0'], unmatched: [] } })]);
+    const old = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'claude', kind: 'implement', state: 'running' });
+    const ap = await app.approvals.request({ taskId, sessionId: old, actionType: 'create_pr', title: 'fix', body: 'b', payload: { taskKey: 'T-275', executor: 'agent' } });
+    // 还没拍板的不能重来；没登记的仓库拒绝
+    const pd = await seedTask(app.db, { key: 'T-276', state: 'pending_decision' });
+    void pd;
+    expect((await http(app, 'POST', '/api/tasks/T-276/restart', { repo: 'apache/doris' })).status).toBe(409);
+    expect((await http(app, 'POST', '/api/tasks/T-275/restart', { repo: 'x/unknown' })).status).toBe(422);
+    const r = await http(app, 'POST', '/api/tasks/T-275/restart', { repo: 'apache/doris', baseBranch: 'master', reason: '影响版本 5.0.0' });
+    expect(r.status).toBe(202);
+    expect((await w.expect((e) => e.type === 'session.stop' && e.payload.sessionId === old)).payload.reason).toBe('user');
+    expect((await app.db.one<any>('SELECT state FROM sessions WHERE id=$1', [old])).state).toBe('stopped');
+    expect((await app.approvals.byKey(ap.key))!.status).toBe('expired');
+    expect((await http(app, 'GET', '/api/inbox')).body.approvals.map((a: any) => a.key)).not.toContain(ap.key);
+    const t = await app.tasks.byKey('T-275');
+    expect(t).toMatchObject({ repo_name: 'apache/doris', repo_source: 'manual', base_branch: 'master', pick_targets: [] });
+    const wc = await w.expect((e) => e.type === 'worktree.create' && e.payload.taskKey === 'T-275');
+    expect(wc.payload).toMatchObject({ repo: 'apache/doris', baseBranch: 'master' });
+    const fresh = await app.db.one<any>(`SELECT attempt, state FROM sessions WHERE task_id=$1 AND kind='implement' AND id<>$2 ORDER BY created_at DESC LIMIT 1`, [taskId, old]);
+    expect(fresh).toMatchObject({ attempt: 2, state: 'planned' });
+    expect(await app.db.one(`SELECT 1 FROM messages WHERE task_id=$1 AND text LIKE $2`, [taskId, `重来：apache/doris · 基线 master · 已停止 1 个会话 · 作废审批 ${ap.key}%`])).not.toBeNull();
+    // worker 随后回报旧会话 stopped：不能把新一轮暂停
+    await app.dispatch.onSessionState('dev', { sessionId: old, state: 'stopped', source: 'exit' });
+    expect((await app.tasks.byKey('T-275')).state).toBe('queued');
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');

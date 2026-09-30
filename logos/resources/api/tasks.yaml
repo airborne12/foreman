@@ -268,6 +268,44 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
+  /api/tasks/{taskKey}/restart:
+    parameters:
+      - $ref: '#/components/parameters/taskKey'
+    post:
+      operationId: restartTask
+      tags: [tasks]
+      summary: "换仓库 / 基线 / agent 重来"
+      description: "来源：2026-09-30 T-83（影响版本 5.0.0 应在 apache/doris master 修，却在 selectdb-core 上做了）。已拍板的实现任务（非 triaging / pending_decision / done）：在跑的会话先在库里标 stopped 再通知 worker 停止；旧会话挂着的待批审批（分流卡除外）置 expired；任务改用给定仓库（来源记 manual）与基线，pick 目标按版本规则重算；然后派一个全新的实现会话（不续接旧会话，另建对应仓库的 worktree）。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                repo: { type: string, description: "owner/name，须有 runtime 登记" }
+                baseBranch: { type: string }
+                agent: { $ref: '#/components/schemas/AgentName' }
+                reason: { type: string, maxLength: 500 }
+      responses:
+        '202':
+          description: "已重新派发"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: "任务未拍板或已完成（INVALID_STATE）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: "仓库没有 runtime 登记（REPO_UNAVAILABLE）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
   /api/tasks/{taskKey}/refresh-source:
     parameters:
       - $ref: '#/components/parameters/taskKey'
