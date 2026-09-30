@@ -274,7 +274,8 @@ export class Worker {
   }
 
   private jiraClient() {
-    if (this.jira === undefined) { const c = this.opts.jira !== undefined ? this.opts.jira : (() => { const cfg = loadJiraConfig(); return cfg ? new JiraClient(cfg) : null; })(); this.jira = c; }
+    // 没读到凭据不缓存：补上 ~/.jira.conf 后下一次作业就能用，不必重启（2026-09-30 迁家目录漏拷 .jira.conf）
+    if (!this.jira) { const c = this.opts.jira !== undefined ? this.opts.jira : (() => { const cfg = loadJiraConfig(); return cfg ? new JiraClient(cfg) : null; })(); this.jira = c; }
     return this.jira;
   }
 
