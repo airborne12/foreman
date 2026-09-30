@@ -56,6 +56,8 @@ export const CenterConfig = z.object({
       jql: z.string().default('assignee = currentUser() AND resolution = Unresolved'),
       run_on_label: z.string().default('vpn:jira'),
       project_repo_map: z.record(z.string()).default({}),
+      /** 内部 Jira 项目前缀：公开仓库的 PR 文案里不能出现这些单号 */
+      internal_projects: z.array(z.string()).default(['CIR', 'CORE', 'DORIS', 'SDBSEC', 'OPENSOURCE']),
       /** 影响版本 → 仓库 / 基线 / pick（versionTarget.ts）；按顺序匹配第一条 */
       version_rules: z.array(z.object({ match: z.string(), repo: z.string(), base: z.string(), pick: z.array(z.string()).optional() })).default(DEFAULT_VERSION_RULES),
     }).default({}),
@@ -67,6 +69,8 @@ export const CenterConfig = z.object({
   }),
   source_channels: z.record(z.string()).default({ jira: 'jira', feishu: 'feishu', cli: 'inbox', channel: 'inbox' }),
   /** 各仓库的基线分支（worktree.create 用），缺省 master */
+  /** 公开仓库：create_pr 的标题 / 描述必须是英文、不能带内部 Jira 单号（2026-09-30 T-83 的 apache/doris PR 描述是中文且写了 DORIS-29301） */
+  public_repos: z.array(z.string()).default(['apache/doris']),
   repo_base_branch: z.record(z.string()).default({ 'selectdb/selectdb-core': 'selectdb-cloud-4.0', 'apache/doris': 'master' }),
   agent_concurrency: z.record(z.number().int()).default({ claude: 3, codex: 3, opencode: 3 }),
   trust: z.object({

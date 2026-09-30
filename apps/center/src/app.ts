@@ -90,6 +90,8 @@ export async function createApp(config: CenterConfig, opts?: { clock?: Clock; fe
   const dispatch = new Dispatch(db, clock, events, config, workerHub, tasks, approvals, intake, notifications);
   const mcp = new McpService(db, clock, events, tasks, approvals, dispatch, intake);
   mcp.repoBase = config.repo_base_branch;
+  mcp.publicRepos = config.public_repos;
+  mcp.jiraProjects = [...new Set([...config.sources.jira.internal_projects, ...Object.keys(config.sources.jira.project_repo_map)])];
   const questions = new Questions(db, clock, events, config, notifications, workerHub);
   dispatch.questions = questions; mcp.questions = questions;
   const feishuIntake = new FeishuIntake(db, clock, events, config, feishu, tasks, intake, notifications, dispatch);

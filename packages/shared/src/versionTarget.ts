@@ -80,3 +80,19 @@ export function resolveVersionTarget(versions: string[], rules: VersionRule[] = 
   const pickTargets = [...new Set(mine.flatMap((h) => [h.base, ...h.pick]))].filter((b) => b !== baseBranch);
   return { repo, baseBranch, pickTargets, versions: mine.map((h) => h.version), unmatched: [...unmatched, ...hits.filter((h) => h.repo !== repo).map((h) => h.version)] };
 }
+
+/**
+ * 公开仓库 PR 文案检查：不能有中文（含全角标点），不能带内部 Jira 单号。返回问题清单，空数组表示通过。
+ * internalProjects：内部 Jira 项目前缀（如 CIR、CORE、DORIS）。
+ */
+export function publicPrProblems(text: string, internalProjects: string[]): string[] {
+  const out: string[] = [];
+  const cjk = text.match(/[\u3000-\u303f\u3400-\u9fff\uff00-\uffef]+/g);
+  if (cjk) out.push(`含中文：${[...new Set(cjk)].slice(0, 3).join('、')}`);
+  const projects = [...new Set(internalProjects.filter((p) => /^[A-Z][A-Z0-9_]*$/.test(p)))];
+  if (projects.length) {
+    const keys = text.match(new RegExp(`\\b(?:${projects.join('|')})-\\d+\\b`, 'g'));
+    if (keys) out.push(`含内部 Jira 单号：${[...new Set(keys)].slice(0, 3).join('、')}`);
+  }
+  return out;
+}

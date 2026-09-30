@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-63（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-64（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -1010,6 +1010,25 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     // worker 随后回报旧会话 stopped：不能把新一轮暂停
     await app.dispatch.onSessionState('dev', { sessionId: old, state: 'stopped', source: 'exit' });
     expect((await app.tasks.byKey('T-275')).state).toBe('queued');
+  }));
+  it('UT-S03-64: 公开仓库的 create_pr 文案必须英文、不带内部单号，否则退回改写', () => withReport('UT-S03-64', async () => {
+    const { token, taskId } = await mcpSession('T-277', 'claude');
+    await app.db.query(`UPDATE tasks SET repo_name='apache/doris', source_ref='DORIS-29301' WHERE id=$1`, [taskId]);
+    const req = (title: string, body: string) => mcpCall(token, 'request_approval', { taskKey: 'T-277', actionType: 'create_pr', title, body, timeoutMinutes: 0.01 });
+    const zh = await req('[fix](fe) Check index jobs', '### 问题\n轻量 Schema Change 路径下 DROP INDEX 报错');
+    expect(JSON.stringify(zh.error ?? zh.result)).toContain('含中文');
+    const key = await req('[fix](fe) Check index jobs', 'Fixes DORIS-29301 and CORE-6212: DROP INDEX drops metadata before the conflict check.');
+    expect(JSON.stringify(key.error ?? key.result)).toContain('含内部 Jira 单号');
+    expect(await app.db.one(`SELECT 1 FROM approvals WHERE task_id=$1 AND action_type='create_pr'`, [taskId])).toBeNull();
+    const okCall = req('[fix](fe) Check conflicting index change jobs before dropping index metadata', '### What problem does this PR solve?\n\nProblem Summary: DROP INDEX removed index metadata before checking conflicting IndexChangeJobs.\n\n### Release note\n\nNone');
+    await new Promise((r) => setTimeout(r, 300)); await app.fakeClock.advance(1_000);
+    const ok = await okCall;
+    expect(ok.error).toBeUndefined(); expect(ok.result.structuredContent.approvalKey).toMatch(/^A-\d+$/);
+    // 非公开仓库不限制
+    const s2 = await mcpSession('T-278', 'claude');
+    const zhCall = mcpCall(s2.token, 'request_approval', { taskKey: 'T-278', actionType: 'create_pr', title: '修复', body: '中文描述', timeoutMinutes: 0.01 });
+    await new Promise((r) => setTimeout(r, 300)); await app.fakeClock.advance(1_000);
+    expect((await zhCall).error).toBeUndefined();
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');

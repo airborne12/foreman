@@ -15,7 +15,7 @@ import type { FeishuIntake } from './feishuIntake.js';
 import type { Channels } from './channels.js';
 import { QUESTION_WAIT_MINUTES } from './questions.js';
 import { Intake as IntakeStatics } from './intake.js';
-import { ACTION_TYPES, APPROVAL_WAIT_MINUTES, TASK_PATHS } from '@foreman/shared';
+import { ACTION_TYPES, APPROVAL_WAIT_MINUTES, TASK_PATHS, publicPrProblems } from '@foreman/shared';
 
 /** mcp.yaml → TriageArtifact（tier 必填；codeLocations 由 emitTriage 截断到 8） */
 const TriageArtifact = z.object({
@@ -100,6 +100,9 @@ export class McpService {
 
   private baseBranch(repo: string) { return this.repoBase[repo] ?? 'master'; }
   repoBase: Record<string, string> = {};
+  /** 公开仓库与内部 Jira 项目前缀（create_pr 文案检查） */
+  publicRepos: string[] = [];
+  jiraProjects: string[] = [];
 
   private async call(session: any, name: string, args: Record<string, any>): Promise<Record<string, unknown>> {
     const now = this.clock.now();
@@ -131,6 +134,15 @@ export class McpService {
         const a = z.object({ taskKey: z.string(), actionType: z.enum(ACTION_TYPES), title: z.string().max(200), body: z.string().max(20000), payload: z.record(z.unknown()).optional(), timeoutMinutes: z.number().max(APPROVAL_WAIT_MINUTES).optional() }).parse(args);
         // 同一会话对同一类动作已有待批审批（多半是客户端超时后重试）：接着等那条，不再建重复审批（T-81 的 A-90/A-91）
         const dup = await this.db.one<{ id: string }>(`SELECT id FROM approvals WHERE session_id=$1 AND action_type=$2 AND status='pending' ORDER BY created_at DESC LIMIT 1`, [session.id, a.actionType]);
+        // 公开仓库的 PR 文案：英文、不带内部单号（2026-09-30 T-83 的 apache/doris PR 描述是中文且写了 DORIS-29301）
+        if (!dup && a.actionType === 'create_pr') {
+          const t = await this.db.one<{ repo_name: string | null; source_ref: string | null }>('SELECT repo_name, source_ref FROM tasks WHERE id=$1', [session.task_id]);
+          if (t?.repo_name && this.publicRepos.includes(t.repo_name)) {
+            const projects = [...this.jiraProjects, ...(t.source_ref && /^[A-Z][A-Z0-9_]*-\d+$/.test(t.source_ref) ? [t.source_ref.split('-')[0]!] : [])];
+            const problems = publicPrProblems(`${a.title}\n${a.body}`, projects);
+            if (problems.length) throw new Error(`${t.repo_name} 是公开仓库，PR 标题与描述必须是英文、按 .github/PULL_REQUEST_TEMPLATE.md 填写，且不能出现内部 Jira 单号 / 客户名 / 内网地址。问题：${problems.join('；')}。请改写后重新调用 request_approval`);
+          }
+        }
         // create_pr：worker 支持 git-publish 时由平台提交、推送、建 PR（codex 沙箱里 .git 只读，agent 做不了）
         const plan = !dup && a.actionType === 'create_pr' ? await this.dispatch.publishPlan(session.id) : null;
         const row = dup ? (await this.approvals.byId(dup.id))! : await this.approvals.request({ taskId: session.task_id, sessionId: session.id, actionType: a.actionType, title: a.title, body: a.body, payload: { ...(a.payload ?? {}), taskKey: session.task_key, executor: 'agent', ...(plan ?? {}) } });

@@ -227,7 +227,7 @@ export class Dispatch {
 - suggestions：建议修的清单，同上
 - content：完整 review 意见（中文 markdown）
 - url：被 review 的 PR 链接`;
-      default: return `${base}\n本会话按路径 ${path ?? 'fix'} 实现修复：复现、修改、跑相关 UT。改完后不要 git commit / push，也不要 gh pr create——调用 request_approval(create_pr)，title 写 PR 标题，body 写 PR 描述（中文，说明问题、改动、测试）。批准后由平台提交、推送到 fork 并建 PR，你收到批准结果就可以结束本轮，不用再 deliver。`;
+      default: return `${base}\n本会话按路径 ${path ?? 'fix'} 实现修复：复现、修改、跑相关 UT。改完后不要 git commit / push，也不要 gh pr create——调用 request_approval(create_pr)，title 写 PR 标题（英文，按仓库惯例如 [fix](fe) ...），body 写 PR 描述：一律英文，按仓库 .github/PULL_REQUEST_TEMPLATE.md 的结构填写（问题、原因、改动、测试、勾选清单）；公开仓库（如 apache/doris）的标题与描述里不要出现内部 Jira 单号、客户名、内网地址，平台会拒绝。批准后由平台提交、推送到 fork 并建 PR，你收到批准结果就可以结束本轮，不用再 deliver。`;
     }
   }
 

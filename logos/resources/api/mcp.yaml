@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: "foreman API — MCP（agent 会话调用的工具端点）"
   version: 0.1.0
-  description: "来源：S01 Step 20–22、S03 Step 20–27、S04 Step 18–27、S07 Step 1 / 13 / 28、S02 Step 26。传输为 MCP Streamable HTTP（JSON-RPC 2.0 over POST /mcp），鉴权用任务级一次性 token。工具的入参与出参以 components 定义；ask_user 与 request_approval 为阻塞工具，HTTP 层挂起最长 30 分钟，超时返回结构化结果而非错误。客户端的 MCP 工具调用超时必须大于 30 分钟（worker 按服务器设为 35 分钟：claude 的 mcpServers.foreman.timeout、codex 的 mcp_servers.foreman.tool_timeout_sec；两家默认 60 秒）。同一会话对同一 actionType 已有待批审批时，request_approval 接着等原审批、返回原 approvalKey，不新建。create_pr：会话所在 runtime 声明了 git-publish 能力时由平台执行（payload.executor=center，中心补全 repo / base / head / pushRemote），批准后 worker 在工作区提交、推送到 fork 并建 PR，产物由中心回写；agent 不要自己 git commit / push / gh pr create，审批返回 approved 即可结束本轮。"
+  description: "来源：S01 Step 20–22、S03 Step 20–27、S04 Step 18–27、S07 Step 1 / 13 / 28、S02 Step 26。传输为 MCP Streamable HTTP（JSON-RPC 2.0 over POST /mcp），鉴权用任务级一次性 token。工具的入参与出参以 components 定义；ask_user 与 request_approval 为阻塞工具，HTTP 层挂起最长 30 分钟，超时返回结构化结果而非错误。客户端的 MCP 工具调用超时必须大于 30 分钟（worker 按服务器设为 35 分钟：claude 的 mcpServers.foreman.timeout、codex 的 mcp_servers.foreman.tool_timeout_sec；两家默认 60 秒）。同一会话对同一 actionType 已有待批审批时，request_approval 接着等原审批、返回原 approvalKey，不新建。create_pr：会话所在 runtime 声明了 git-publish 能力时由平台执行（payload.executor=center，中心补全 repo / base / head / pushRemote），批准后 worker 在工作区提交、推送到 fork 并建 PR，产物由中心回写；agent 不要自己 git commit / push / gh pr create，审批返回 approved 即可结束本轮。公开仓库（center.yaml public_repos，默认 apache/doris）的 create_pr：标题与正文必须是英文、不得出现内部 Jira 单号（sources.jira.internal_projects 与 project_repo_map 的前缀、任务自身来源单的前缀），否则返回错误要求改写，不建审批。"
 servers:
   - url: http://127.0.0.1:7801
 security:
