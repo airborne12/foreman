@@ -173,6 +173,15 @@ function pollClaude(bin: string, s: TrackedSession, onExit: OnExit, opts: Adapte
 
 // ---------------- codex exec ----------------
 
+/**
+ * 沙箱里 /etc/ssh/ssh_config.d/*.conf 的属主显示为 nobody，ssh 以「Bad owner or permissions」拒绝运行，
+ * git@github.com 形式的远端 fetch 不了（T-77）。codex 会话里把 GitHub 的 ssh 地址改写成 https：
+ * 公开仓库无需登录，推 fork 走 gh 凭据。
+ */
+export function codexEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+  return cleanEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'url.https://github.com/.insteadOf', GIT_CONFIG_VALUE_0: 'git@github.com:', ...(extra ?? {}) });
+}
+
 function codexCommon(mcp: { url: string; token: string } | undefined, sandbox?: string | null) {
   return [
     '--json', '--skip-git-repo-check',
@@ -207,7 +216,7 @@ export const codexAdapter: AgentAdapter = {
   },
   async start(input, bin, onExit, opts = {}) {
     const log = logPath(input.cwd, input.sessionId);
-    const p = spawnDetached(bin, codexStartArgs(input, opts.sandbox), input.cwd, cleanEnv(input.env), log, (code, err) => { s.state = code === 0 ? 'done' : 'failed'; s.exitCode = code; onExit(code, err); });
+    const p = spawnDetached(bin, codexStartArgs(input, opts.sandbox), input.cwd, codexEnv(input.env), log, (code, err) => { s.state = code === 0 ? 'done' : 'failed'; s.exitCode = code; onExit(code, err); });
     if (!p.pid) throw new SessionStartError('codex exec 未能启动');
     await new Promise((r) => setTimeout(r, 1500));
     if (p.exitCode !== null && p.exitCode !== 0) throw new SessionStartError(`codex exec 启动即退出（${p.exitCode}）：${tail(log, 5)}`);
@@ -217,7 +226,7 @@ export const codexAdapter: AgentAdapter = {
   async resume(s, text, bin, onExit, opts = {}) {
     const id = s.agentSessionId.startsWith('pid-') ? readCodexThreadId(s.logFile) : s.agentSessionId;
     if (!id) throw new SessionStartError('找不到 codex 线程 id，无法续接', false);
-    const p = spawnDetached(bin, codexResumeArgs(s, id, text, opts.sandbox), s.cwd, cleanEnv(), s.logFile, (code, err) => { s.state = code === 0 ? 'done' : 'failed'; s.exitCode = code; onExit(code, err); });
+    const p = spawnDetached(bin, codexResumeArgs(s, id, text, opts.sandbox), s.cwd, codexEnv(), s.logFile, (code, err) => { s.state = code === 0 ? 'done' : 'failed'; s.exitCode = code; onExit(code, err); });
     s.pid = p.pid ?? null; s.state = 'running';
   },
   async stop(s) { if (s.pid) { try { process.kill(-s.pid, 'SIGTERM'); } catch { try { process.kill(s.pid, 'SIGTERM'); } catch { /* ignore */ } } } s.state = 'stopped'; },
