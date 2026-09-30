@@ -12,7 +12,9 @@ case "$RT" in
     CENTER_SSH="${CENTER_SSH:-jiangkai2@172.17.2.13}"
     # worker 的家目录以 systemd 用户实例为准，不能用 ssh 登录后的 ~：2026-09-29 账号 home 从 /mnt/disk1 迁到
     # /mnt/disk14，ssh 进去的 ~ 变了而在跑的 worker 还在老目录，两次发布都落空、跑的仍是旧版
-    WHOME="$(ssh "$DEV_SSH" 'systemctl --user show-environment 2>/dev/null | sed -n "s/^HOME=//p"')"
+    # 优先取 worker 单元里写死的 HOME（WORKER_HOME 可显式指定），其次 systemd 实例的 HOME，最后 ssh 的 ~
+    WHOME="${WORKER_HOME:-$(ssh "$DEV_SSH" 'systemctl --user show foreman-worker -p Environment --value 2>/dev/null | tr " " "\n" | sed -n "s/^HOME=//p"')}"
+    [ -n "$WHOME" ] || WHOME="$(ssh "$DEV_SSH" 'systemctl --user show-environment 2>/dev/null | sed -n "s/^HOME=//p"')"
     [ -n "$WHOME" ] || WHOME="$(ssh "$DEV_SSH" 'echo $HOME')"
     echo "worker 家目录：$WHOME"
     ssh "$DEV_SSH" "mkdir -p '$WHOME/.foreman/bin' '$WHOME/.config/systemd/user' && chmod 700 '$WHOME/.foreman'"
@@ -59,7 +61,13 @@ YAML
 else echo "worker.yaml 已存在，保留"; fi
 REMOTE
     scp -q "$SRC" "$DEV_SSH:$WHOME/.foreman/bin/foreman-worker.mjs.new"
-    scp -q "$ROOT/scripts/systemd/foreman-worker.service" "$DEV_SSH:$WHOME/.config/systemd/user/foreman-worker.service"
+    # 单元按 worker 家目录渲染；装进 systemd 当前实例读取的单元目录（它的 HOME 可能与 worker 的不同）
+    UNIT_DIR="$(ssh "$DEV_SSH" 'echo "$(systemctl --user show-environment 2>/dev/null | sed -n "s/^HOME=//p")/.config/systemd/user"')"
+    sed "s|__HOME__|$WHOME|g" "$ROOT/scripts/systemd/foreman-worker.service" | ssh "$DEV_SSH" "mkdir -p '$UNIT_DIR' && cat > '$UNIT_DIR/foreman-worker.service'"
+    # 机器重启 / 重新登录后 systemd 实例的 HOME 会变成账号当前 home：在 worker 家目录下也放一份并启用，重启后照样拉起
+    if [ "$UNIT_DIR" != "$WHOME/.config/systemd/user" ]; then
+      ssh "$DEV_SSH" "d='$WHOME/.config/systemd/user'; mkdir -p \$d/default.target.wants && cp '$UNIT_DIR/foreman-worker.service' \$d/ && ln -sfn ../foreman-worker.service \$d/default.target.wants/foreman-worker.service"
+    fi
     ssh "$DEV_SSH" "cd '$WHOME/.foreman/bin' && md5sum foreman-worker.mjs.new | cut -c1-32" | grep -qx "$(md5 -q "$SRC" 2>/dev/null || md5sum "$SRC" | cut -c1-32)" || { echo "新 bundle 校验不一致"; exit 1; }
     ssh "$DEV_SSH" 'set -e
       export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"

@@ -182,20 +182,30 @@ case "$RT" in
 esac
 ```
 
-开发机 systemd 单元 `~/.config/systemd/user/foreman-worker.service`：
+开发机 systemd 单元 `~/.config/systemd/user/foreman-worker.service`（模板 `scripts/systemd/foreman-worker.service`，`__HOME__` 由 `deploy-worker.sh` 渲染为 worker 家目录，当前为 `/mnt/disk14/jiangkai`）：
 
 ```
 [Unit]
 Description=foreman worker (dev)
 After=network-online.target
 [Service]
-EnvironmentFile=%h/.foreman/env
-ExecStart=/mnt/disk6/common/node-v24.14.1-linux-x64/bin/node %h/.foreman/bin/foreman-worker.mjs --config %h/.foreman/worker.yaml
+Environment=HOME=__HOME__
+WorkingDirectory=__HOME__
+EnvironmentFile=__HOME__/.foreman/env
+ExecStart=/mnt/disk6/common/node-v24.14.1-linux-x64/bin/node __HOME__/.foreman/bin/foreman-worker.mjs
 Restart=always
 RestartSec=5
 [Install]
 WantedBy=default.target
 ```
+
+**worker 家目录写死，不用 `%h`**（2026-09-30 调整）：开发机账号 home 于 2026-09-29 从 `/mnt/disk1/jiangkai` 迁到 `/mnt/disk14/jiangkai`，而在跑的 systemd 用户实例仍带老 HOME、重登或重启后才换新 HOME。用 `%h` 时，worker 的配置、会话记录（`sessions.json`）、claude 工作区信任（`~/.claude.json`）、gh 凭据都会随 systemd 实例漂移。`deploy-worker.sh` 的做法：
+
+- worker 家目录取单元里写死的 `HOME`（可用 `WORKER_HOME` 显式指定），其次 systemd 实例的 HOME，最后 ssh 的 `~`；bundle 与配置全部按绝对路径投递。
+- 单元装进 systemd 当前实例读取的单元目录；若与 worker 家目录下的 `~/.config/systemd/user` 不同，在后者也放一份并建 `default.target.wants` 链接，机器重启后照样拉起。
+- 发布后自检：systemd 实际执行的 bundle 必须与本次构建 md5 一致，否则报错。
+
+迁移记录（2026-09-30）：worker 的 env、worker.yaml、sessions.json、bundle 从老 home 拷到新 home；agent 程序改用新 home 下同版本的 claude 2.1.284 / codex 0.158.0（订阅登录）；新 home 缺的 gh 凭据与 `.gitconfig` 从老 home 拷入（不覆盖已有）；老 home 原样保留作备份；9/29 误投递到新 home 的文件挪到 `~/.foreman.stray-<时间>`。
 
 **版本兼容**：worker 注册时上报版本，中心按 `minWorkerVersion` 拒绝过旧 worker（S05 EX-10.1 的 `VERSION_UNSUPPORTED`）。发布顺序固定为**先中心后 worker**，中心必须兼容前一个 worker 版本。
 
