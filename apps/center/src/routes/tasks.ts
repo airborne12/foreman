@@ -93,13 +93,23 @@ export function taskRoutes(app: AppContext) {
     const active = await app.db.one(`SELECT 1 FROM sessions WHERE task_id=$1 AND kind='code_locate' AND state IN ('planned','running','waiting_input')`, [t.id]);
     if (!active) {
       await app.db.query(`INSERT INTO messages (channel_id, task_id, kind, author, text, created_at) VALUES ($1,$2,'system','system',$3,$4)`, [t.channel_id, t.id, '已从面板发起重新定位', app.clock.now()]);
-      // 重新定位 = 重新判断：旧的基线结论清掉，否则新结论判不出基线时会沿用旧值（入库是 COALESCE）
-      await app.db.query(`UPDATE triage_cards SET base_branch=NULL WHERE task_id=$1`, [t.id]);
-      await app.db.query(`UPDATE tasks SET base_branch=NULL WHERE id=$1`, [t.id]);
-      await app.intake.scheduleCodeLocate(t.id);
+      // 先按最近一次轮询存下的 Jira 单重算仓库与基线（不现查 Jira，免得被它卡住），再清掉 agent 旧的基线结论重新定位
+      const raw = await app.db.one<{ raw: any }>(`SELECT raw FROM source_items WHERE source_type='jira' AND task_id=$1`, [t.id]);
+      if (raw?.raw) await app.intake.applyJiraVersions(t.id, raw.raw, { updateCard: false });
+      await app.intake.relocate(t.id);
     }
     const fresh = await app.tasks.byKey(t.key);
     return c.json(await app.tasks.serialize(fresh, fresh.channel_slug), 202);
+  });
+
+  // 从 Jira 重新拉单、按影响版本重算仓库与基线（未拍板的任务）；仓库变了会自动重新定位
+  r.post('/api/tasks/:key/refresh-source', async (c) => {
+    const t = await app.tasks.byKey(c.req.param('key'));
+    if (!['triaging', 'pending_decision'].includes(t.state)) throw new ApiError(409, 'INVALID_STATE', `任务 ${t.key} 已拍板，不再按版本调整`);
+    const r = await app.intake.refreshJira(t.id);
+    if (!r) throw new ApiError(503, 'SOURCE_UNAVAILABLE', `取不到 ${t.source_ref} 的 Jira 信息（非 Jira 任务或 Jira 不可达）`);
+    const fresh = await app.tasks.byKey(t.key);
+    return c.json({ ...r, task: await app.tasks.serialize(fresh, fresh.channel_slug) });
   });
 
   // implementFromPlan（S03 Step 30）

@@ -2,6 +2,7 @@
  * worker.yaml / center.yaml 结构（来源：core-03-runtime-cli-design.md §3）
  */
 import { z } from 'zod';
+import { DEFAULT_VERSION_RULES } from './versionTarget.js';
 import { AgentConfig, RepoConfig } from './protocol.js';
 import { TRANSPORTS } from './constants.js';
 
@@ -55,6 +56,8 @@ export const CenterConfig = z.object({
       jql: z.string().default('assignee = currentUser() AND resolution = Unresolved'),
       run_on_label: z.string().default('vpn:jira'),
       project_repo_map: z.record(z.string()).default({}),
+      /** 影响版本 → 仓库 / 基线 / pick（versionTarget.ts）；按顺序匹配第一条 */
+      version_rules: z.array(z.object({ match: z.string(), repo: z.string(), base: z.string(), pick: z.array(z.string()).optional() })).default(DEFAULT_VERSION_RULES),
     }).default({}),
   }).default({}),
   routing: z.record(z.object({ require: z.array(z.string()).default([]), prefer: z.string().optional() })).default({

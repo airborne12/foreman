@@ -1,5 +1,5 @@
 /**
- * S01 单元测试：UT-S01-01 ~ UT-S01-22（来源：logos/resources/test/core-S01-test-cases.md）
+ * S01 单元测试：UT-S01-01 ~ UT-S01-27（来源：logos/resources/test/core-S01-test-cases.md）
  * 直接驱动进程内 center 的领域对象（Intake / Approvals / Notifications / Tasks），Jira 与 agent 不参与。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -7,7 +7,8 @@ import { withReport } from '../helpers/reporter.js';
 import { bootTestApp, http, TEST_TOKEN, type TestApp } from '../helpers/testApp.js';
 import { FakeWorker } from '../helpers/fakeWorker.js';
 import { seedTask, seedRuntime, seedSession } from '../helpers/seed.js';
-import { WORKER_TO_CENTER } from '@foreman/shared';
+import { WORKER_TO_CENTER, resolveVersionTarget } from '@foreman/shared';
+import { normalizeIssue } from '../../apps/worker/src/jira.js';
 import { Intake, jqlDate, type JiraIssue } from '../../apps/center/src/domain/intake.js';
 
 let app: TestApp;
@@ -281,5 +282,86 @@ describe('S01 1.4 降级与通知', () => {
     const card2 = await app.db.one<any>('SELECT degraded, code_locations FROM triage_cards WHERE task_id=$1', [t2]);
     expect(card2.degraded).toBe(false); expect(card2.code_locations).toHaveLength(1);
     expect((await app.db.one<any>('SELECT status FROM questions WHERE session_id=$1', [s2])).status).toBe('timeout');
+  }));
+});
+
+describe('S01 1.5 影响版本定仓库与基线（2026-09-30）', () => {
+  it('UT-S01-24: 影响版本按规则算出仓库 / 基线 / pick；worker 取的是影响版本字段', () => withReport('UT-S01-24', async () => {
+    const t = (vs: string[]) => resolveVersionTarget(vs);
+    const DORIS = 'apache/doris'; const CORE = 'selectdb/selectdb-core';
+    expect(t(['4.1.3'])).toMatchObject({ repo: DORIS, baseBranch: 'master', pickTargets: ['branch-4.1'] });
+    expect(t(['2.1.7'])).toMatchObject({ repo: DORIS, baseBranch: 'master', pickTargets: ['branch-2.1'] });
+    expect(t(['doris-3.1.0'])).toMatchObject({ repo: DORIS, baseBranch: 'master', pickTargets: ['branch-3.1'] });
+    expect(t(['5.0.0'])).toMatchObject({ repo: DORIS, baseBranch: 'master', pickTargets: [] });
+    expect(t(['enter-3.1.5'])).toMatchObject({ repo: CORE, baseBranch: 'branch-selectdb-doris-3.1', pickTargets: [] });
+    expect(t(['selectdb-4.0.4'])).toMatchObject({ repo: CORE, baseBranch: 'branch-selectdb-doris-4.0' });
+    expect(t(['cloud-4.0.8'])).toMatchObject({ repo: CORE, baseBranch: 'selectdb-cloud-4.0' });
+    expect(t(['cloud-4.1.7'])).toMatchObject({ repo: CORE, baseBranch: 'branch-selectdb-doris-3.1' });
+    expect(t(['cloud-26.1.3'])).toMatchObject({ repo: CORE, baseBranch: 'branch-selectdb-doris-4.1' });
+    expect(t(['26.1.2'])).toMatchObject({ repo: CORE, baseBranch: 'branch-selectdb-doris-4.1' });
+    // 多个版本：基线取最高版本，其余进 pick
+    expect(t(['4.0.7', '4.1.3'])).toMatchObject({ repo: DORIS, baseBranch: 'master', pickTargets: ['branch-4.1', 'branch-4.0'] });
+    expect(t(['enter-3.1.5', 'enter-4.1.3'])).toMatchObject({ repo: CORE, baseBranch: 'branch-selectdb-doris-4.1', pickTargets: ['branch-selectdb-doris-3.1'] });
+    // 跨产品：取匹配多的仓库，另一边列为 unmatched
+    expect(t(['4.1.3', 'cloud-26.1.3', 'cloud-4.1.7'])).toMatchObject({ repo: CORE, baseBranch: 'branch-selectdb-doris-4.1', pickTargets: ['branch-selectdb-doris-3.1'], unmatched: ['4.1.3'] });
+    // 规则外的交回 agent
+    expect(t(['cloud-26.0.3'])).toBeNull(); expect(t(['文档优化'])).toBeNull(); expect(t([])).toBeNull();
+    const n = normalizeIssue({ key: 'DORIS-1', fields: { summary: 's', versions: [{ name: '4.1.3' }], fixVersions: [{ name: '4.1.5' }] } }, 'http://j');
+    expect(n).toMatchObject({ affectsVersions: ['4.1.3'], fixVersions: ['4.1.5'], version: '4.1.3' });
+  }));
+  it('UT-S01-25: 入库按影响版本定仓库与基线；分流时 agent 给的仓库 / 分支不能覆盖', () => withReport('UT-S01-25', async () => {
+    const r = await app.intake.intakeJiraIssue(issue({ key: 'DORIS-29566', project: 'DORIS', affectsVersions: ['4.1.3'] }));
+    const t = await app.tasks.byKey(r.taskKey);
+    expect(t.repo_name).toBe('apache/doris'); expect(t.repo_source).toBe('version'); expect(t.base_branch).toBe('master'); expect(t.pick_targets).toEqual(['branch-4.1']);
+    const cp = await app.db.one<any>('SELECT jira FROM context_packs WHERE task_id=$1', [t.id]);
+    expect(cp.jira.affectsVersions).toEqual(['4.1.3']); expect(cp.jira.versionTarget).toMatchObject({ repo: 'apache/doris', baseBranch: 'master' });
+    expect(await app.db.one(`SELECT 1 FROM messages WHERE task_id=$1 AND text LIKE '影响版本 4.1.3 → apache/doris · 基线 master · pick branch-4.1%'`, [t.id])).not.toBeNull();
+    // agent 照旧提示词的示例填了 selectdb-core / branch-selectdb-doris-4.1
+    await app.intake.emitTriage(t.id, null, { tier: 'fix', effort: 'small', repo: { name: 'selectdb/selectdb-core', confidence: 0.9 }, targetBranch: 'branch-selectdb-doris-4.1', codeLocations: [] });
+    const card = await app.db.one<any>('SELECT repo_name, base_branch FROM triage_cards WHERE task_id=$1', [t.id]);
+    expect(card).toEqual({ repo_name: 'apache/doris', base_branch: 'master' });
+    const a = await app.db.one<any>(`SELECT payload FROM approvals WHERE task_id=$1 AND action_type='triage_confirm'`, [t.id]);
+    expect(a.payload).toMatchObject({ baseBranch: 'master', baseSource: 'version', versions: ['4.1.3'], pickTargets: ['branch-4.1'], repo: { name: 'apache/doris', source: 'version' } });
+    expect(a.payload.summaryLine).toContain('pick branch-4.1'); expect(a.payload.summaryLine).toContain('影响版本 4.1.3');
+    // 没填影响版本：沿用项目映射，交给 agent 判断
+    const r2 = await app.intake.intakeJiraIssue(issue({ key: 'CIR-20002' }));
+    const t2 = await app.tasks.byKey(r2.taskKey);
+    expect(t2.repo_source).not.toBe('version'); expect(t2.base_branch).toBeNull();
+  }));
+  it('UT-S01-26: 影响版本变了：仓库不变原地改卡、不重跑定位；仓库变了重新定位', () => withReport('UT-S01-26', async () => {
+    const t1 = await seedTask(app.db, { key: 'T-730', state: 'pending_decision', repo: 'apache/doris' });
+    await app.intake.emitTriage(t1, null, { tier: 'fix', effort: 'small', repo: { name: 'apache/doris', confidence: 0.9 }, targetBranch: 'branch-4.1', codeLocations: [{ file: 'a.cpp', line: 1 }] });
+    const r1 = await app.intake.applyJiraVersions(t1, issue({ key: 'DORIS-1', affectsVersions: ['4.1.3', '4.0.7'] }));
+    expect(r1).toMatchObject({ changed: true, relocated: false });
+    const c1 = await app.db.one<any>('SELECT base_branch FROM triage_cards WHERE task_id=$1', [t1]);
+    expect(c1.base_branch).toBe('master');
+    const a1 = await app.db.one<any>(`SELECT payload FROM approvals WHERE task_id=$1 AND action_type='triage_confirm' AND status='pending'`, [t1]);
+    expect(a1.payload).toMatchObject({ baseSource: 'version', pickTargets: ['branch-4.1', 'branch-4.0'] });
+    expect(a1.payload.codeLocations).toHaveLength(1); // 定位结果保留
+    expect(await app.db.one(`SELECT 1 FROM jobs WHERE kind='code-locate' AND args->>'taskId'=$1`, [t1])).toBeNull();
+    // 仓库变了：旧的定位结果作废，重新定位（此时无开发机 → 降级卡排队）
+    const t2 = await seedTask(app.db, { key: 'T-731', state: 'pending_decision', repo: 'selectdb/selectdb-core' });
+    await app.intake.emitTriage(t2, null, { tier: 'fix', effort: 'small', repo: { name: 'selectdb/selectdb-core', confidence: 0.9 }, targetBranch: 'branch-selectdb-doris-4.1', codeLocations: [{ file: 'b.cpp', line: 2 }] });
+    const r2 = await app.intake.applyJiraVersions(t2, issue({ key: 'DORIS-2', affectsVersions: ['2.1.7'] }));
+    expect(r2).toMatchObject({ changed: true, relocated: true });
+    const t2r = await app.db.one<any>('SELECT repo_name, base_branch, pick_targets FROM tasks WHERE id=$1', [t2]);
+    expect(t2r).toEqual({ repo_name: 'apache/doris', base_branch: 'master', pick_targets: ['branch-2.1'] });
+    expect(await app.db.one(`SELECT 1 FROM jobs WHERE kind='code-locate' AND args->>'taskId'=$1`, [t2])).not.toBeNull();
+    // 没变化：什么都不做
+    expect(await app.intake.applyJiraVersions(t1, issue({ key: 'DORIS-1', affectsVersions: ['4.1.3', '4.0.7'] }))).toMatchObject({ changed: false });
+  }));
+  it('UT-S01-27: refresh-source 从 Jira 重新拉单按版本重算；已拍板返回 409', () => withReport('UT-S01-27', async () => {
+    const w = await fw('dev');
+    const t = await seedTask(app.db, { key: 'T-732', state: 'pending_decision', repo: 'selectdb/selectdb-core', source: 'DORIS-29369' });
+    await app.intake.emitTriage(t, null, { tier: 'fix', effort: 'small', repo: { name: 'selectdb/selectdb-core', confidence: 0.9 }, targetBranch: 'branch-selectdb-doris-4.1', codeLocations: [{ file: 'c.cpp', line: 3 }] });
+    const p = http(app, 'POST', '/api/tasks/T-732/refresh-source');
+    const job = await w.expect((e) => e.type === 'job.run' && e.payload.kind === 'jira-lookup');
+    expect(job.payload.args).toEqual({ key: 'DORIS-29369' });
+    w.send('job.result', { ok: true, result: { key: 'DORIS-29369', summary: 's', project: 'DORIS', affectsVersions: ['cloud-4.0.8'], fixVersions: [] } }, job.id);
+    const r = await p;
+    expect(r.status).toBe(200); expect(r.body).toMatchObject({ changed: true, relocated: false, target: { repo: 'selectdb/selectdb-core', baseBranch: 'selectdb-cloud-4.0' } });
+    expect((await app.db.one<any>('SELECT base_branch FROM triage_cards WHERE task_id=$1', [t])).base_branch).toBe('selectdb-cloud-4.0');
+    await seedTask(app.db, { key: 'T-733', state: 'running', source: 'DORIS-3' });
+    expect((await http(app, 'POST', '/api/tasks/T-733/refresh-source')).status).toBe(409);
   }));
 });

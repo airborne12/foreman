@@ -254,7 +254,7 @@ paths:
       operationId: relocateTask
       tags: [tasks]
       summary: "重新代码定位"
-      description: "来源：core-02 §5.1 #6。分流卡降级（定位失败 / 开发机离线）时从面板重跑代码定位，结果原地更新待拍板的分流卡。已有定位会话在跑时不重复派。"
+      description: "来源：core-02 §5.1 #6。分流卡降级（定位失败 / 开发机离线）时从面板重跑代码定位，结果原地更新待拍板的分流卡。已有定位会话在跑时不重复派。发起前按最近一次轮询存下的 Jira 单重算仓库与基线（不现查 Jira；要现查用 refresh-source）；agent 旧的基线结论清掉，版本规则算出的保留。"
       responses:
         '202':
           description: "已发起（或已在定位中）"
@@ -264,6 +264,38 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: "任务已拍板（INVALID_STATE）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/tasks/{taskKey}/refresh-source:
+    parameters:
+      - $ref: '#/components/parameters/taskKey'
+    post:
+      operationId: refreshTaskSource
+      tags: [tasks]
+      summary: "从 Jira 重新拉单并按影响版本重算仓库与基线"
+      description: "来源：2026-09-30 分流卡基线全被猜成 branch-selectdb-doris-4.1。仅未拍板任务（triaging / pending_decision）。按 center.yaml sources.jira.version_rules 算出仓库、基线、pick；仓库变了且已有定位结果 → 重新定位；仓库没变 → 分流卡原地更新基线，不再跑 agent。"
+      responses:
+        '200':
+          description: "已重算"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  target: { type: object, nullable: true, description: "ContextPack.jira.versionTarget；影响版本匹配不上规则时为 null" }
+                  changed: { type: boolean }
+                  relocated: { type: boolean }
+                  task: { $ref: '#/components/schemas/Task' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: "任务已拍板（INVALID_STATE）"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503':
+          description: "非 Jira 任务或 Jira 不可达（SOURCE_UNAVAILABLE）"
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -496,7 +528,7 @@ components:
         name: { type: string, nullable: true, description: "owner/name，如 selectdb/selectdb-core" }
         source:
           type: string
-          enum: [mapping, llm, manual, unresolved]
+          enum: [mapping, llm, manual, unresolved, version]
         confidence: { type: number, minimum: 0, maximum: 1, nullable: true }
         candidates:
           type: array
@@ -608,7 +640,19 @@ components:
             key: { type: string }
             project: { type: string }
             component: { type: string }
-            version: { type: string }
+            version: { type: string, description: "首个影响版本（没有则首个修复版本）" }
+            affectsVersions: { type: array, items: { type: string }, description: "Jira 影响版本（versions 字段）；2026-09-30 起用它定仓库与基线" }
+            fixVersions: { type: array, items: { type: string }, description: "Jira 修复版本" }
+            versionTarget:
+              type: object
+              nullable: true
+              description: "按 center.yaml sources.jira.version_rules 从影响版本算出的仓库、基线与 pick 目标；有值时分流卡以它为准，agent 不能覆盖"
+              properties:
+                repo: { type: string }
+                baseBranch: { type: string }
+                pickTargets: { type: array, items: { type: string } }
+                versions: { type: array, items: { type: string } }
+                unmatched: { type: array, items: { type: string } }
             priority: { type: string }
             commentsSummary: { type: string }
             attachments:
@@ -640,6 +684,10 @@ components:
         tier: { $ref: '#/components/schemas/TaskPath' }
         effort: { type: string, enum: [small, medium, large] }
         repo: { $ref: '#/components/schemas/RepoRef' }
+        baseBranch: { type: string, nullable: true, description: "基线分支" }
+        baseSource: { type: string, nullable: true, enum: [version, agent, task], description: "基线来源：version 按 Jira 影响版本规则（agent 不能覆盖）/ agent 代码定位判断 / task 任务上已有" }
+        versions: { type: array, items: { type: string }, description: "Jira 影响版本（没有则修复版本）" }
+        pickTargets: { type: array, items: { type: string }, description: "pick 目标分支（Apache Doris：修 master 后 pick 到 branch-X.Y）" }
         suggestedPath: { type: string }
         codeLocations:
           type: array

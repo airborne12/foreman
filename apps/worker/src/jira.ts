@@ -43,18 +43,22 @@ export class JiraClient {
   }
 
   async search(jql: string, maxResults = 50) {
-    const r = await this.req('POST', '/rest/api/2/search', { jql, maxResults, fields: ['summary', 'description', 'project', 'components', 'fixVersions', 'priority', 'assignee', 'status', 'updated', 'comment', 'attachment'] });
+    const r = await this.req('POST', '/rest/api/2/search', { jql, maxResults, fields: ['summary', 'description', 'project', 'components', 'versions', 'fixVersions', 'priority', 'assignee', 'status', 'updated', 'comment', 'attachment'] });
     return { issues: (r.issues ?? []).map((i: any) => normalizeIssue(i, this.cfg.url)), total: r.total ?? 0 };
   }
-  async getIssue(key: string) { return normalizeIssue(await this.req('GET', `/rest/api/2/issue/${encodeURIComponent(key)}?fields=summary,description,project,components,fixVersions,priority,assignee,status,updated,comment,attachment`), this.cfg.url); }
+  async getIssue(key: string) { return normalizeIssue(await this.req('GET', `/rest/api/2/issue/${encodeURIComponent(key)}?fields=summary,description,project,components,versions,fixVersions,priority,assignee,status,updated,comment,attachment`), this.cfg.url); }
   async addComment(key: string, body: string) { const r = await this.req('POST', `/rest/api/2/issue/${encodeURIComponent(key)}/comment`, { body }); return { commentId: String(r.id ?? ''), url: `${this.cfg.url}/browse/${key}?focusedCommentId=${r.id ?? ''}` }; }
 }
+
+const names = (xs: any): string[] => (Array.isArray(xs) ? xs.map((x) => String(x?.name ?? '')).filter(Boolean) : []);
 
 export function normalizeIssue(i: any, base: string) {
   const f = i.fields ?? {};
   return {
     key: i.key, summary: f.summary ?? '', description: f.description ?? '', project: f.project?.key ?? String(i.key ?? '').split('-')[0],
-    component: f.components?.[0]?.name ?? null, version: f.fixVersions?.[0]?.name ?? null, priority: f.priority?.name ?? null,
+    // 版本写在「影响版本」（versions）；修复版本几乎没人填（2026-09-30 统计 77 张里 72 张为空）
+    component: f.components?.[0]?.name ?? null, affectsVersions: names(f.versions), fixVersions: names(f.fixVersions),
+    version: names(f.versions)[0] ?? names(f.fixVersions)[0] ?? null, priority: f.priority?.name ?? null,
     assignee: f.assignee?.name ?? f.assignee?.key ?? null, status: f.status?.name ?? null, updated: f.updated ?? null,
     comments: (f.comment?.comments ?? []).slice(-5).map((c: any) => ({ author: c.author?.displayName ?? c.author?.name ?? '', body: c.body ?? '' })),
     attachments: (f.attachment ?? []).map((a: any) => ({ name: a.filename, url: a.content })),

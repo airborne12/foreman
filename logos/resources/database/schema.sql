@@ -106,7 +106,7 @@ CREATE TABLE tasks (
   source_ref       TEXT NOT NULL,
   source_url       TEXT,
   repo_name        TEXT,
-  repo_source      TEXT NOT NULL DEFAULT 'unresolved' CHECK (repo_source IN ('mapping', 'llm', 'manual', 'unresolved')),
+  repo_source      TEXT NOT NULL DEFAULT 'unresolved' CHECK (repo_source IN ('mapping', 'llm', 'manual', 'unresolved', 'version')),
   repo_confidence  NUMERIC(4,3) CHECK (repo_confidence IS NULL OR (repo_confidence >= 0 AND repo_confidence <= 1)),
   repo_candidates  TEXT[] NOT NULL DEFAULT '{}',
   runtime_name     TEXT,
@@ -137,7 +137,7 @@ COMMENT ON COLUMN tasks.source_type IS '需求来源类型';
 COMMENT ON COLUMN tasks.source_ref IS '来源引用：Jira key / 飞书 messageId / 频道消息 id / CLI 文本';
 COMMENT ON COLUMN tasks.source_url IS '来源链接';
 COMMENT ON COLUMN tasks.repo_name IS '目标仓库 owner/name；待确认时为 NULL';
-COMMENT ON COLUMN tasks.repo_source IS '仓库来源：mapping 映射 / llm 猜测 / manual 手动 / unresolved 待确认';
+COMMENT ON COLUMN tasks.repo_source IS '仓库来源：mapping 映射 / llm 猜测 / manual 手动 / unresolved 待确认 / version 按 Jira 影响版本规则算出（0005）';
 COMMENT ON COLUMN tasks.repo_confidence IS 'LLM 猜测置信度 0–1；<0.6 视为待确认';
 COMMENT ON COLUMN tasks.repo_candidates IS 'LLM 给出的候选仓库';
 COMMENT ON COLUMN tasks.runtime_name IS '最终路由到的 runtime';

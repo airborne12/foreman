@@ -208,7 +208,9 @@ function ApprovalDetail({ a, title, head, runtimes, reload }: { a: any; title: s
     { k: '档位', v: PATH_LABEL[ov.path ?? p.tier] ?? (ov.path ?? p.tier ?? '-'), key: 'path' },
     { k: '工作量', v: EFFORT_LABEL[p.effort] ?? p.effort ?? '-' },
     { k: '仓库', v: repoName || '待确认', key: 'repo', mono: !!repoName, missing: !repoName },
-    { k: '基线分支', v: ov.baseBranch ?? p.baseBranch ?? '仓库默认', key: 'baseBranch', mono: true },
+    { k: '影响版本', v: (p.versions ?? []).join('、') || 'Jira 未填', missing: !(p.versions ?? []).length },
+    { k: '基线分支', v: `${ov.baseBranch ?? p.baseBranch ?? '仓库默认'}${!ov.baseBranch && p.baseSource === 'version' ? '（按版本）' : ''}`, key: 'baseBranch', mono: true },
+    ...((p.pickTargets ?? []).length ? [{ k: 'pick', v: (p.pickTargets as string[]).join('、'), mono: true }] : []),
     { k: '执行', v: `${ov.runtime ?? p.defaultRuntime ?? '按路由'} · ${ov.agent ?? p.defaultAgent ?? '轮换'}`, key: ov.runtime ? 'runtime' : 'agent' },
   ] : ([
     ['仓库', p.repo ?? p.publish?.repo], ['源分支', p.head ?? p.publish?.branch], ['目标分支', p.base ?? p.publish?.base], ['推送到', p.pushRemote ?? p.pushUrl ?? p.publish?.pushRemote],

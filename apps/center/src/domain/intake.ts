@@ -10,10 +10,10 @@ import type { Notifications } from './notifications.js';
 import type { Approvals } from './approvals.js';
 import type { WorkerHub } from '../hub/workerHub.js';
 import type { Tasks } from './tasks.js';
-import { AGENTS, CODE_LOCATE_TIMEOUT_MINUTES, type CenterConfig, type AgentName } from '@foreman/shared';
+import { AGENTS, CODE_LOCATE_TIMEOUT_MINUTES, resolveVersionTarget, type CenterConfig, type AgentName, type VersionTarget } from '@foreman/shared';
 import { sha256 } from './approvals.js';
 
-export interface JiraIssue { key: string; summary: string; description?: string; project?: string; component?: string | null; version?: string | null; priority?: string | null; assignee?: string | null; status?: string; updated?: string; comments?: Array<{ author: string; body: string }>; attachments?: Array<{ name: string; url: string }>; url?: string }
+export interface JiraIssue { key: string; summary: string; description?: string; project?: string; component?: string | null; version?: string | null; affectsVersions?: string[]; fixVersions?: string[]; priority?: string | null; assignee?: string | null; status?: string; updated?: string; comments?: Array<{ author: string; body: string }>; attachments?: Array<{ name: string; url: string }>; url?: string }
 
 /**
  * JQL 日期字面量：Jira 只认 'yyyy-MM-dd HH:mm' 这类格式，ISO 8601（带 T 与 Z）会被判为无效日期。
@@ -128,6 +128,8 @@ export class Intake {
       const t = await this.db.one<any>(`SELECT t.*, c.slug AS channel_slug FROM tasks t JOIN channels c ON c.id=t.channel_id WHERE t.id=$1`, [existing.task_id]);
       const prevAssignee = existing.raw?.assignee ?? null;
       await this.db.query(`UPDATE source_items SET raw=$2, external_updated_at=$3, seen_at=$4 WHERE id=$1`, [existing.id, JSON.stringify(issue), issue.updated ? new Date(issue.updated) : null, now]);
+      // 影响版本改了（或旧数据没取过影响版本）且还没拍板：按新版本重算仓库与基线
+      if (t && ['triaging', 'pending_decision'].includes(t.state) && JSON.stringify(existing.raw?.affectsVersions ?? null) !== JSON.stringify(issue.affectsVersions ?? null)) await this.applyJiraVersions(t.id, issue);
       if (prevAssignee !== (issue.assignee ?? null) && t) {
         await this.db.tx(async (c) => {
           await c.query(`INSERT INTO messages (channel_id, task_id, kind, author, text, created_at) VALUES ($1,$2,'system','system',$3,$4)`, [t.channel_id, t.id, `来源重新分配：${prevAssignee ?? '-'} → ${issue.assignee ?? '-'}`, now]);
@@ -138,25 +140,99 @@ export class Intake {
       }
       return { taskKey: t?.key, created: false };
     }
-    const repo = this.cfg.sources.jira.project_repo_map[issue.project ?? issue.key.split('-')[0]!] ?? null;
+    // 仓库与基线：影响版本规则优先（确定性），其次项目映射，都没有再交给代码定位 agent
+    const vt = this.versionTargetOf(issue);
+    const repo = vt?.repo ?? this.cfg.sources.jira.project_repo_map[issue.project ?? issue.key.split('-')[0]!] ?? null;
     const task = await this.db.tx(async (c) => {
       const ch = await this.tasks.ensureChannel(this.cfg.source_channels.jira ?? 'jira', { kind: 'source_default', sourceType: 'jira', title: 'Jira' }, c);
       const key = (await this.db.one<{ k: string }>(`SELECT 'T-' || nextval('task_key_seq') AS k`, [], c))!.k;
       const t = await this.db.one<any>(
-        `INSERT INTO tasks (key, channel_id, title, state, kind, source_type, source_ref, source_url, repo_name, repo_source, last_activity_at, created_at, updated_at)
-         VALUES ($1,$2,$3,'triaging','code','jira',$4,$5,$6,$7,$8,$8,$8) RETURNING *`,
-        [key, ch.id, `${issue.key} · ${issue.summary}`.slice(0, 200), issue.key, issue.url ?? null, repo, repo ? 'mapping' : 'unresolved', now], c);
+        `INSERT INTO tasks (key, channel_id, title, state, kind, source_type, source_ref, source_url, repo_name, repo_source, base_branch, pick_targets, last_activity_at, created_at, updated_at)
+         VALUES ($1,$2,$3,'triaging','code','jira',$4,$5,$6,$7,$8,$9,$10,$10,$10) RETURNING *`,
+        [key, ch.id, `${issue.key} · ${issue.summary}`.slice(0, 200), issue.key, issue.url ?? null, repo, vt ? 'version' : repo ? 'mapping' : 'unresolved', vt?.baseBranch ?? null, vt?.pickTargets ?? [], now], c);
       await c.query(`INSERT INTO source_items (source_type, external_id, task_id, raw, external_updated_at, seen_at) VALUES ('jira',$1,$2,$3,$4,$5) ON CONFLICT (source_type, external_id) DO UPDATE SET task_id=EXCLUDED.task_id, raw=EXCLUDED.raw, external_updated_at=EXCLUDED.external_updated_at, seen_at=EXCLUDED.seen_at`,
         [issue.key, t.id, JSON.stringify(issue), issue.updated ? new Date(issue.updated) : null, now]);
-      const jira = { key: issue.key, project: issue.project ?? issue.key.split('-')[0], component: issue.component ?? null, version: issue.version ?? null, priority: issue.priority ?? null, commentsSummary: (issue.comments ?? []).slice(-5).map((x) => `${x.author}: ${x.body.slice(0, 200)}`).join('\n'), attachments: issue.attachments ?? [] };
+      const jira = { key: issue.key, project: issue.project ?? issue.key.split('-')[0], component: issue.component ?? null, version: issue.version ?? null, affectsVersions: issue.affectsVersions ?? [], fixVersions: issue.fixVersions ?? [], versionTarget: vt, priority: issue.priority ?? null, commentsSummary: (issue.comments ?? []).slice(-5).map((x) => `${x.author}: ${x.body.slice(0, 200)}`).join('\n'), attachments: issue.attachments ?? [] };
       await c.query(`INSERT INTO context_packs (task_id, summary, source_text, jira, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$5)`, [t.id, issue.summary, `${issue.summary}\n\n${issue.description ?? ''}`.trim(), JSON.stringify(jira), now]);
       await c.query(`INSERT INTO messages (channel_id, task_id, kind, author, text, created_at) VALUES ($1,$2,'system','system',$3,$4)`, [ch.id, t.id, `来自 Jira · ${issue.key} · assignee 变更为我`, now]);
       await this.events.record(c, { type: 'thread.created', taskId: t.id, channelId: ch.id, payload: { task: await this.tasks.serializeSummary(t, ch.slug), channel: ch.slug } });
       return t;
     });
     this.events.flush();
+    if (vt) await this.threadNote(task.id, `影响版本 ${vt.versions.join('、')} → ${vt.repo} · 基线 ${vt.baseBranch}${vt.pickTargets.length ? ` · pick ${vt.pickTargets.join('、')}` : ''}`);
     await this.scheduleCodeLocate(task.id);
     return { taskKey: task.key, created: true };
+  }
+
+  /** 影响版本（没有则修复版本）按规则算仓库 / 基线 / pick */
+  versionTargetOf(issue: Pick<JiraIssue, 'affectsVersions' | 'fixVersions'>): VersionTarget | null {
+    const vs = issue.affectsVersions?.length ? issue.affectsVersions : (issue.fixVersions ?? []);
+    return resolveVersionTarget(vs, this.cfg.sources.jira.version_rules);
+  }
+
+  private async threadNote(taskId: string, text: string) {
+    const t = await this.db.one<{ key: string; channel_id: string }>('SELECT key, channel_id FROM tasks WHERE id=$1', [taskId]);
+    if (!t) return;
+    await this.db.tx(async (c) => {
+      await c.query(`INSERT INTO messages (channel_id, task_id, kind, author, text, created_at) VALUES ($1,$2,'system','system',$3,$4)`, [t.channel_id, taskId, text, this.clock.now()]);
+      await this.events.record(c, { type: 'thread.event', taskId, payload: { taskKey: t.key, text } });
+    });
+    this.events.flush();
+  }
+
+  /**
+   * 按 Jira 最新的版本信息重算未拍板任务的仓库与基线（S01；2026-09-30 基线全被猜成 branch-selectdb-doris-4.1）。
+   * 仓库变了且已有定位结果 → 定位作废、重新定位；仓库没变 → 分流卡原地改基线，不再跑 agent。
+   */
+  async applyJiraVersions(taskId: string, issue: JiraIssue, opts?: { updateCard?: boolean }): Promise<{ target: VersionTarget | null; relocated: boolean; changed: boolean }> {
+    const t = await this.db.one<any>('SELECT * FROM tasks WHERE id=$1', [taskId]);
+    if (!t || !['triaging', 'pending_decision'].includes(t.state)) return { target: null, relocated: false, changed: false };
+    const vt = this.versionTargetOf(issue);
+    const now = this.clock.now();
+    await this.db.query(`UPDATE context_packs SET jira = COALESCE(jira, '{}'::jsonb) || $2::jsonb, updated_at=$3, version=version+1 WHERE task_id=$1`,
+      [taskId, JSON.stringify({ version: issue.version ?? null, affectsVersions: issue.affectsVersions ?? [], fixVersions: issue.fixVersions ?? [], versionTarget: vt }), now]);
+    if (!vt) return { target: null, relocated: false, changed: false };
+    const changed = t.repo_name !== vt.repo || t.base_branch !== vt.baseBranch || JSON.stringify(t.pick_targets ?? []) !== JSON.stringify(vt.pickTargets);
+    const repoChanged = t.repo_name !== vt.repo;
+    await this.db.query(`UPDATE tasks SET repo_name=$2, repo_source='version', base_branch=$3, pick_targets=$4, updated_at=$5 WHERE id=$1`, [taskId, vt.repo, vt.baseBranch, vt.pickTargets, now]);
+    if (!changed || opts?.updateCard === false) return { target: vt, relocated: false, changed };
+    const card = await this.db.one<any>('SELECT * FROM triage_cards WHERE task_id=$1', [taskId]);
+    const note = `影响版本 ${vt.versions.join('、')} → ${vt.repo} · 基线 ${vt.baseBranch}${vt.pickTargets.length ? ` · pick ${vt.pickTargets.join('、')}` : ''}`;
+    if (card && repoChanged && !card.degraded) {
+      // 在别的仓库里做的代码定位不能用：重新定位（新 worktree 按新仓库与基线建）
+      await this.threadNote(taskId, `${note}（仓库变了，重新定位）`);
+      await this.relocate(taskId);
+      return { target: vt, relocated: true, changed: true };
+    }
+    await this.threadNote(taskId, note);
+    if (card) {
+      await this.emitTriage(taskId, card.session_id ?? null, {
+        tier: card.tier ?? undefined, effort: card.effort ?? undefined,
+        repo: { name: vt.repo, confidence: 1, candidates: card.repo_candidates ?? [] },
+        targetBranch: vt.baseBranch, suggestedPath: card.suggested_path ?? undefined, codeLocations: card.code_locations ?? [],
+        degraded: card.degraded, degradedReason: card.degraded_reason ?? undefined,
+      }, { note: `分流卡按影响版本更新：${vt.repo} · 基线 ${vt.baseBranch}` });
+    }
+    return { target: vt, relocated: false, changed: true };
+  }
+
+  /** 从 Jira 重新拉单并按版本重算（面板「重新定位」前、存量卡回填用）；Jira 不可达时返回 null，不影响后续 */
+  async refreshJira(taskId: string, opts?: { updateCard?: boolean }) {
+    const t = await this.db.one<{ source_type: string; source_ref: string }>('SELECT source_type, source_ref FROM tasks WHERE id=$1', [taskId]);
+    if (t?.source_type !== 'jira') return null;
+    let issue: JiraIssue;
+    try { issue = (await this.runJob('jira-lookup', { key: t.source_ref })) as unknown as JiraIssue; } catch { return null; }
+    await this.db.query(`UPDATE source_items SET raw=$2, seen_at=$3 WHERE source_type='jira' AND external_id=$1`, [t.source_ref, JSON.stringify(issue), this.clock.now()]);
+    return this.applyJiraVersions(taskId, issue, opts);
+  }
+
+  /** 重新定位：旧的基线结论清掉（版本规则算出的保留），重新跑代码定位 */
+  async relocate(taskId: string) {
+    const cp = await this.db.one<{ jira: any }>('SELECT jira FROM context_packs WHERE task_id=$1', [taskId]);
+    const vt = (cp?.jira?.versionTarget ?? null) as VersionTarget | null;
+    await this.db.query(`UPDATE triage_cards SET base_branch=$2 WHERE task_id=$1`, [taskId, vt?.baseBranch ?? null]);
+    await this.db.query(`UPDATE tasks SET base_branch=$2 WHERE id=$1`, [taskId, vt?.baseBranch ?? null]);
+    await this.scheduleCodeLocate(taskId);
   }
 
   // ---------------- 代码定位（Step 12–23；EX-12.1/17.1/22.1） ----------------
@@ -280,14 +356,18 @@ export class Intake {
     return [...set].sort();
   }
 
-  async emitTriage(taskId: string, sessionId: string | null, input: { tier?: string; effort?: string; repo?: { name: string | null; confidence: number; candidates?: string[] }; targetBranch?: string | null; suggestedPath?: string; codeLocations?: any[]; degraded?: boolean; degradedReason?: string }) {
+  async emitTriage(taskId: string, sessionId: string | null, input: { tier?: string; effort?: string; repo?: { name: string | null; confidence: number; candidates?: string[] }; targetBranch?: string | null; suggestedPath?: string; codeLocations?: any[]; degraded?: boolean; degradedReason?: string }, opts?: { note?: string }) {
     const triage = normalizeTriage(input, await this.knownRepos());
     const now = this.clock.now();
     const t = await this.db.one<any>(`SELECT t.*, c.slug AS channel_slug FROM tasks t JOIN channels c ON c.id=t.channel_id WHERE t.id=$1`, [taskId]);
     if (!t) return;
-    const repoName = triage.repo && triage.repo.confidence >= 0.6 ? triage.repo.name : (t.repo_source === 'mapping' || t.repo_source === 'manual' ? t.repo_name : null);
+    const cpJira = (await this.db.one<{ jira: any }>('SELECT jira FROM context_packs WHERE task_id=$1', [taskId]))?.jira ?? null;
+    // 影响版本规则算出的仓库 / 基线是确定的，agent 的判断不能覆盖（2026-09-30：agent 看不到版本，照示例填了 4.1）
+    const vt = (cpJira?.versionTarget ?? null) as VersionTarget | null;
+    if (vt) { triage.repo = { name: vt.repo, confidence: 1, candidates: triage.repo?.candidates ?? [] }; triage.targetBranch = vt.baseBranch; }
+    const repoName = vt ? vt.repo : triage.repo && triage.repo.confidence >= 0.6 ? triage.repo.name : (t.repo_source === 'mapping' || t.repo_source === 'manual' ? t.repo_name : null);
     // 降级卡（还没跑过代码定位）不下调来源：入库时标的 llm/mapping 保留，等补齐后再定
-    const repoSource = t.repo_source === 'mapping' || t.repo_source === 'manual' ? t.repo_source : repoName ? 'llm' : triage.degraded ? t.repo_source : 'unresolved';
+    const repoSource = vt ? 'version' : t.repo_source === 'mapping' || t.repo_source === 'manual' ? t.repo_source : repoName ? 'llm' : triage.degraded ? t.repo_source : 'unresolved';
     const tier = triage.tier ?? (t.path ?? 'fix'); const effort = triage.effort ?? (triage.degraded ? 'medium' : 'small');
     const defaultRuntime = (await this.tasks.routeFor(t.kind ?? 'code', null, repoName)).runtime;
     const defaultAgent = await this.nextAgent();
@@ -298,7 +378,9 @@ export class Intake {
     // 目标分支：定位会话判断出来的优先，其次沿用任务上已有的（补齐降级卡时不要丢掉先前的判断）
     // 沿用任务上已有的基线前也要确认是一条合法分支（2026-09-29 之前入库的卡里有「3.1 or 4.0」这种）
     const targetBranch = triage.targetBranch ?? (t.base_branch && isBranchName(t.base_branch) ? t.base_branch : null);
-    const payload = { taskKey: t.key, tier, effort, repo: { name: repoName, source: repoSource, confidence: triage.repo?.confidence ?? null, candidates: triage.repo?.candidates ?? [] }, baseBranch: targetBranch, suggestedPath: triage.suggestedPath ?? '', codeLocations: allLocations.slice(0, 8), defaultRuntime, defaultAgent, degraded: !!triage.degraded, degradedReason: triage.degradedReason ?? null, summaryLine: `档位 ${tier} · 预估 ${effort} · 仓库 ${repoName ?? '待确认'} · 基线 ${targetBranch ?? '仓库默认'} · runtime ${defaultRuntime ?? '-'} · agent ${defaultAgent}` };
+    const versions: string[] = cpJira?.affectsVersions?.length ? cpJira.affectsVersions : (cpJira?.fixVersions ?? []);
+    const pickTargets: string[] = vt?.pickTargets ?? t.pick_targets ?? [];
+    const payload = { taskKey: t.key, tier, effort, repo: { name: repoName, source: repoSource, confidence: triage.repo?.confidence ?? null, candidates: triage.repo?.candidates ?? [] }, baseBranch: targetBranch, baseSource: vt ? 'version' : triage.targetBranch ? 'agent' : targetBranch ? 'task' : null, versions, pickTargets, suggestedPath: triage.suggestedPath ?? '', codeLocations: allLocations.slice(0, 8), defaultRuntime, defaultAgent, degraded: !!triage.degraded, degradedReason: triage.degradedReason ?? null, summaryLine: `档位 ${tier} · 预估 ${effort} · 仓库 ${repoName ?? '待确认'} · 基线 ${targetBranch ?? '仓库默认'}${pickTargets.length ? ` · pick ${pickTargets.join('、')}` : ''}${versions.length ? ` · 影响版本 ${versions.join('、')}` : ''} · runtime ${defaultRuntime ?? '-'} · agent ${defaultAgent}` };
     await this.db.tx(async (c) => {
       await c.query(`INSERT INTO triage_cards (task_id, tier, effort, repo_name, repo_confidence, repo_candidates, base_branch, suggested_path, code_locations, default_runtime, default_agent, degraded, degraded_reason, session_id, created_at, updated_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)
@@ -310,7 +392,7 @@ export class Intake {
       if (existing) {
         await c.query(`UPDATE approvals SET payload=$2, updated_at=$3 WHERE id=$1`, [existing.id, JSON.stringify(payload), now]);
         await c.query(`UPDATE triage_cards SET approval_id=$2 WHERE task_id=$1`, [taskId, existing.id]);
-        const note = payload.degraded ? `代码定位未完成：${payload.degradedReason ?? '原因未知'}` : '代码定位已补齐';
+        const note = opts?.note ?? (payload.degraded ? `代码定位未完成：${payload.degradedReason ?? '原因未知'}` : '代码定位已补齐');
         await c.query(`INSERT INTO messages (channel_id, task_id, kind, author, text, created_at) VALUES ($1,$2,'system','system',$3,$4)`, [t.channel_id, taskId, note, now]);
         await this.events.record(c, { type: 'thread.event', taskId, payload: { taskKey: t.key, text: note } });
         await this.events.record(c, { type: 'inbox.new', taskId, payload: { itemType: 'approval', item: { ...this.approvals.serialize(existing), payload }, updated: true } });

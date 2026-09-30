@@ -213,7 +213,8 @@ export class Dispatch {
 - tier：fix（简单修复）/ plan（出方案）/ proto（出原型）
 - effort：small（<2h）/ medium（半天）/ large（>1 天）
 - repo：{ name, confidence（0–1）, candidates }。name 必须是 owner/name 全名，从已登记仓库中选：${(knownRepos ?? []).join('、') || '（无）'}；拿不准就把 name 置 null，可能的放进 candidates
-- targetBranch：要改的那一条具体分支名（如 branch-selectdb-doris-4.1）；判断不了就填 null，不要写多个分支或写说明
+- targetBranch：要改的那一条具体分支名；判断不了就填 null，不要写多个分支或写说明
+- 上下文包 jira.versionTarget 有值时，是平台按 Jira 影响版本算出的仓库与基线（纯数字版本 = Apache Doris，修 master 再 pick 到 branch-X.Y；enter-/selectdb- = SelectDB 企业版；cloud- = SelectDB Cloud），repo.name 与 targetBranch 照它填，只在它的基线上定位代码；没有时参考 jira.affectsVersions 判断，不要默认某一条分支
 - suggestedPath：一两句中文，说明建议怎么改、为什么
 - codeLocations：最相关的 ≤8 处，每处 { file, line, symbol, why }，why 用中文写这处为什么相关`;
       case 'plan': return `${base}\n本会话产出方案文档：写到 docs/plan-${taskKey}.md 并 deliver({kind:"doc", path, title, content})。不要改业务代码。`;
