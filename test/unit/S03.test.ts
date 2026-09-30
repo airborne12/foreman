@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-64（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-65（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -1029,6 +1029,19 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     const zhCall = mcpCall(s2.token, 'request_approval', { taskKey: 'T-278', actionType: 'create_pr', title: '修复', body: '中文描述', timeoutMinutes: 0.01 });
     await new Promise((r) => setTimeout(r, 300)); await app.fakeClock.advance(1_000);
     expect((await zhCall).error).toBeUndefined();
+  }));
+  it('UT-S03-65: 工作区的 custom_env.sh 以主仓库的为底，再叠加 build_env 覆盖项', () => withReport('UT-S03-65', async () => {
+    const repo = gitRepo();
+    writeFileSync(resolve(repo.main, 'custom_env.sh'), 'export JAVA_HOME=/opt/jdk17\nexport DORIS_TOOLCHAIN=clang\n  export DORIS_THIRDPARTY=/old/tp\n');
+    const out = await createWorktree({ taskKey: 'T-279', repo: 'x/y', baseBranch: 'master', buildEnv: { DORIS_THIRDPARTY: '/main/thirdparty' } }, repo);
+    const env = readFileSync(resolve(out.path, 'custom_env.sh'), 'utf8');
+    expect(env).toContain('export JAVA_HOME=/opt/jdk17'); expect(env).toContain('export DORIS_TOOLCHAIN=clang');
+    expect(env.match(/DORIS_THIRDPARTY=/g)).toHaveLength(1); expect(env).toContain('export DORIS_THIRDPARTY="/main/thirdparty"');
+    // 主仓库环境改了：复用工作区时跟着刷新，覆盖项仍只有一份
+    writeFileSync(resolve(repo.main, 'custom_env.sh'), 'export JAVA_HOME=/opt/jdk21\n');
+    await createWorktree({ taskKey: 'T-279', repo: 'x/y', baseBranch: 'master', buildEnv: { DORIS_THIRDPARTY: '/main/thirdparty' } }, repo);
+    const env2 = readFileSync(resolve(out.path, 'custom_env.sh'), 'utf8');
+    expect(env2).toContain('export JAVA_HOME=/opt/jdk21'); expect(env2).not.toContain('jdk17'); expect(env2.match(/DORIS_THIRDPARTY=/g)).toHaveLength(1);
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');

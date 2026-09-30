@@ -107,7 +107,7 @@ export async function createWorktree(input: WorktreeCreateInput, repo: { main: s
     }
   }
   await excludeForemanDir(path, git);
-  writeContextFiles(path, input);
+  writeContextFiles(path, input, repo.main);
   return { taskKey: input.taskKey, path, branchName, reused };
 }
 
@@ -127,16 +127,20 @@ export async function excludeForemanDir(path: string, git: GitRunner = realGit) 
 }
 
 /** 上下文文件（每次都刷新，保证 context.md 为最新版本） */
-export function writeContextFiles(path: string, input: Pick<WorktreeCreateInput, 'contextMarkdown' | 'taskJson' | 'hooks' | 'taskKey' | 'buildEnv'>) {
+export function writeContextFiles(path: string, input: Pick<WorktreeCreateInput, 'contextMarkdown' | 'taskJson' | 'hooks' | 'taskKey' | 'buildEnv'>, main?: string) {
   mkdirSync(resolve(path, '.foreman'), { recursive: true });
   writeFileSync(resolve(path, '.foreman/context.md'), input.contextMarkdown ?? `# ${input.taskKey}\n`);
   writeFileSync(resolve(path, '.foreman/task.json'), JSON.stringify(input.taskJson ?? { key: input.taskKey }, null, 2));
   // 编译环境：Doris 的 env.sh 会 source 仓库根的 custom_env.sh（已被 .gitignore 忽略）；thirdparty/installed 不随 worktree 带过去
-  if (input.buildEnv && Object.keys(input.buildEnv).length) {
-    const envPath = resolve(path, 'custom_env.sh');
-    const keys = Object.keys(input.buildEnv);
-    const keep = existsSync(envPath) ? readFileSync(envPath, 'utf8').split('\n').filter((l) => l && !keys.some((k) => l.startsWith(`export ${k}=`))) : [];
-    writeFileSync(envPath, [...keep, ...Object.entries(input.buildEnv).map(([k, v]) => `export ${k}=${JSON.stringify(v)}`)].join('\n') + '\n');
+  // 以主仓库的 custom_env.sh 为底（JAVA_HOME / Maven / 工具链 / BUILD_TYPE 等都在里面，worktree 里没有这个被忽略的文件；
+  // 2026-09-30 之前工作区只写了 DORIS_THIRDPARTY 一行，agent 编译缺环境），再叠加 build_env 的覆盖项
+  const envPath = resolve(path, 'custom_env.sh');
+  const mainEnv = main ? resolve(main, 'custom_env.sh') : null;
+  const base = mainEnv && existsSync(mainEnv) ? readFileSync(mainEnv, 'utf8') : existsSync(envPath) ? readFileSync(envPath, 'utf8') : null;
+  if (base != null || (input.buildEnv && Object.keys(input.buildEnv).length)) {
+    const keys = Object.keys(input.buildEnv ?? {});
+    const keep = (base ?? '').split('\n').filter((l) => l && !keys.some((k) => new RegExp(`^\\s*export\\s+${k}=`).test(l)));
+    writeFileSync(envPath, [...keep, ...Object.entries(input.buildEnv ?? {}).map(([k, v]) => `export ${k}=${JSON.stringify(v)}`)].join('\n') + '\n');
   }
   // 需要输入改由 worker 轮询 claude state=blocked 发现；只有显式传入 hooks 才写 .claude/settings.json
   if (!input.hooks) return;
