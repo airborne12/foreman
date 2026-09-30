@@ -19,7 +19,7 @@ export const WorkerConfig = z.object({
     disk_path: z.string().optional(),
   }).default({}),
   heartbeat_seconds: z.number().int().default(30),
-  capabilities: z.array(z.enum(['jira-poll', 'jira-lookup', 'gh', 'merge-tree', 'rg'])).default([]),
+  capabilities: z.array(z.enum(['jira-poll', 'jira-lookup', 'gh', 'merge-tree', 'rg', 'git-publish'])).default([]),
   state_file: z.string().optional(),
 });
 export type WorkerConfig = z.infer<typeof WorkerConfig>;

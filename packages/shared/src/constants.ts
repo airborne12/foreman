@@ -22,7 +22,7 @@ export type SessionState = (typeof SESSION_STATES)[number];
 
 export const SESSION_KINDS = ['implement', 'review', 'code_locate', 'plan', 'proto', 'dispatcher', 'candidate_scan'] as const;
 
-export const JOB_KINDS = ['jira-poll', 'jira-lookup', 'jira-comment', 'gh-pr-view', 'merge-tree-check'] as const;
+export const JOB_KINDS = ['jira-poll', 'jira-lookup', 'jira-comment', 'gh-pr-view', 'merge-tree-check', 'git-publish'] as const;
 export type JobKind = (typeof JOB_KINDS)[number];
 
 export const ACTION_TYPES = ['triage_confirm', 'start_implement', 'create_pr', 'start_pick', 'resolve_conflict_push', 'reply_review', 'rerun_ci', 'merge_master', 'merge_release', 'jira_transition_in_progress', 'jira_done', 'feishu_reply', 'jira_comment'] as const;

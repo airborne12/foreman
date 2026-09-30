@@ -123,6 +123,27 @@ paths:
               schema: { $ref: '#/components/schemas/Approval' }
         '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
 
+  /api/approvals/{approvalKey}/retry:
+    parameters:
+      - $ref: '#/components/parameters/approvalKey'
+    post:
+      operationId: retryApproval
+      tags: [approvals]
+      summary: "重试执行失败的审批动作"
+      description: "来源：S06 EX-20.1。批准后由中心执行的动作（如平台代建 PR、Jira 评论）失败时审批进入 failed（retryable），面板「重试执行」调用此接口；信任计数不变。"
+      responses:
+        '200':
+          description: "已重新执行，返回动作记录"
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
+        '409':
+          description: "审批不是失败状态（APPROVAL_NOT_PENDING）"
+          content:
+            application/json:
+              schema: { $ref: 'tasks.yaml#/components/schemas/ErrorResponse' }
+
   /api/approvals/{approvalKey}/decide:
     parameters:
       - $ref: '#/components/parameters/approvalKey'

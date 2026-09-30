@@ -70,10 +70,13 @@ export class Intake {
   }
 
   /** 派一个系统作业并等待结果（MCP lookup_jira、jira_comment 执行器用） */
-  async runJob(kind: 'jira-lookup' | 'jira-comment' | 'gh-pr-view', args: Record<string, unknown>, timeoutMs = 60_000): Promise<Record<string, unknown>> {
-    const label = kind.startsWith('jira') ? this.cfg.sources.jira.run_on_label : 'agent:claude';
-    const rt = await this.findRuntime(label);
-    if (!rt) throw Object.assign(new Error('SOURCE_UNAVAILABLE'), { code: 'SOURCE_UNAVAILABLE' });
+  async runJob(kind: 'jira-lookup' | 'jira-comment' | 'gh-pr-view' | 'git-publish', args: Record<string, unknown>, timeoutMs = 60_000, opts?: { runtime?: string }): Promise<Record<string, unknown>> {
+    const label = kind.startsWith('jira') ? this.cfg.sources.jira.run_on_label : kind === 'git-publish' ? null : 'agent:claude';
+    // 指定 runtime（git-publish 必须在任务工作区所在的机器上跑）
+    const rt = opts?.runtime
+      ? await this.db.one<{ id: string; name: string }>('SELECT id, name FROM runtimes WHERE name=$1 AND online', [opts.runtime]).then((r) => (r && this.hub.isOnline(r.name) ? r : null))
+      : await this.findRuntime(label!);
+    if (!rt) throw Object.assign(new Error(opts?.runtime ? `RUNTIME_OFFLINE：${opts.runtime} 不在线` : 'SOURCE_UNAVAILABLE'), { code: opts?.runtime ? 'RUNTIME_OFFLINE' : 'SOURCE_UNAVAILABLE' });
     const now = this.clock.now();
     const job = await this.db.one<{ id: string }>(`INSERT INTO jobs (kind, status, runtime_id, required_label, args, scheduled_at, dispatched_at, created_at) VALUES ($1,'dispatched',$2,$3,$4,$5,$5,$5) RETURNING id`, [kind, rt.id, label, JSON.stringify(args), now]);
     const p = new Promise<Record<string, unknown>>((resolve, reject) => {

@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-58（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-61（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -21,6 +21,7 @@ import { isManagedPath, setClaudeTrust } from '../../apps/worker/src/claudeTrust
 import { runGc } from '../../apps/worker/src/gc.js';
 import { statSync, mkdirSync } from 'node:fs';
 import { SessionStartError } from '../../apps/worker/src/sessions.js';
+import { gitPublish, GitPublishError } from '../../apps/worker/src/gitPublish.js';
 
 let app: TestApp;
 const workers: FakeWorker[] = [];
@@ -847,6 +848,107 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     await app.dispatch.onWorktreeReady('dev', { taskKey: 'T-269', path: '/tmp/fx/wt/T-269', branchName: 'foreman/T-269', reused: false, repo: 'selectdb/selectdb-core' });
     expect(await app.db.one(`SELECT 1 FROM sessions WHERE task_id=$1 AND kind='code_locate'`, [t1])).toBeNull();
     expect(await app.db.one(`SELECT 1 FROM messages WHERE task_id=$1 AND text LIKE '%等它的会话已不在%'`, [t1])).not.toBeNull();
+  }));
+  it('UT-S03-59: git-publish 在工作区提交、推到 fork、建 PR；子模块指针不提交；PR 已存在取回链接；无改动报 NOTHING_TO_PUBLISH', () => withReport('UT-S03-59', async () => {
+    const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x' };
+    const sh = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', env }).trim();
+    const { main } = gitRepo();
+    mkdirSync(resolve(main, 'sub')); writeFileSync(resolve(main, 'sub/f'), 'v1');
+    writeFileSync(resolve(main, '.gitmodules'), '[submodule "sub"]\n\tpath = sub\n\turl = https://example.com/sub.git\n');
+    sh(main, 'add', '.'); sh(main, 'commit', '-q', '-m', 'sub');
+    const root = mkdtempSync(resolve(tmpdir(), 'gp-'));
+    sh(root, 'clone', '-q', '--bare', main, 'origin.git'); sh(root, 'init', '-q', '--bare', 'fork.git');
+    const clone = (name: string) => {
+      sh(root, 'clone', '-q', resolve(root, 'origin.git'), name);
+      const w = resolve(root, name);
+      sh(w, 'config', 'user.name', 't'); sh(w, 'config', 'user.email', 't@x');
+      // fork 远端写成 GitHub 地址（取 owner 用），推送改写到本地裸库
+      sh(w, 'remote', 'add', 'fork', 'https://github.com/me/r.git');
+      sh(w, 'config', `url.${resolve(root, 'fork.git')}.pushInsteadOf`, 'https://github.com/me/r.git');
+      sh(w, 'checkout', '-q', '-b', 'foreman/T-271');
+      return w;
+    };
+    const wt = clone('wt');
+    writeFileSync(resolve(wt, 'README'), 'fixed'); writeFileSync(resolve(wt, 'sub/f'), 'v2');
+    const gh: string[][] = [];
+    let ghOut: () => string = () => 'https://github.com/o/r/pull/7\n';
+    const run = (bin: string, args: string[], cwd: string) => (bin === 'gh' ? (gh.push(args), ghOut()) : execFileSync(bin, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+    const args = { path: wt, repo: 'o/r', base: 'master', branch: 'foreman/T-271', pushRemote: 'fork', title: 'fix: T-271', body: '说明' };
+    const r1 = gitPublish(args, run);
+    expect(r1).toMatchObject({ url: 'https://github.com/o/r/pull/7', created: true, committed: true, branch: 'foreman/T-271' });
+    expect(sh(resolve(root, 'fork.git'), 'show', '--name-only', '--format=%s', 'foreman/T-271').split('\n').filter(Boolean)).toEqual(['fix: T-271', 'README']);
+    expect(sh(wt, 'status', '--porcelain')).toContain('sub/f'); // 子模块指针留在工作区，不进提交
+    expect(gh[0]).toEqual(['pr', 'create', '--repo', 'o/r', '--base', 'master', '--head', 'me:foreman/T-271', '--title', 'fix: T-271', '--body', '说明']);
+    // 再推一次：PR 已存在 → 取回链接
+    ghOut = () => { throw Object.assign(new Error('exit 1'), { stderr: 'a pull request for branch "me:foreman/T-271" into branch "master" already exists:\nhttps://github.com/o/r/pull/7\n' }); };
+    expect(gitPublish(args, run)).toMatchObject({ url: 'https://github.com/o/r/pull/7', created: false, committed: false });
+    // 只有子模块指针变化 → 没东西可建 PR
+    const wt2 = clone('wt2'); writeFileSync(resolve(wt2, 'sub/f'), 'v3');
+    let err: unknown; try { gitPublish({ ...args, path: wt2, branch: 'foreman/T-271b' }, run); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(GitPublishError); expect((err as GitPublishError).code).toBe('NOTHING_TO_PUBLISH');
+  }));
+  /** 平台代做 git 的会话：dev 声明 git-publish、仓库配了 pushRemote，会话绑定就绪的 worktree */
+  async function publishSession(key: string) {
+    const w = await fw('dev', { capabilities: ['git-publish'], repos: { 'selectdb/selectdb-core': { main: '/tmp/fx/core', worktreeRoot: '/tmp/fx/wt', pushRemote: 'fork' } } });
+    const taskId = await seedTask(app.db, { key, state: 'running', runtime: 'dev', agent: 'codex', authorAgent: 'codex' });
+    const wtId = await seedWorktree(app.db, { taskId, runtime: 'dev', path: `/tmp/fx/wt/${key}` });
+    const sessionId = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'codex', kind: 'implement' });
+    const token = Intake.newToken();
+    await app.db.query('UPDATE sessions SET mcp_token_hash=$2, worktree_id=$3 WHERE id=$1', [sessionId, Intake.hash(token), wtId]);
+    return { w, taskId, sessionId, token };
+  }
+  const settle = async () => { await new Promise((r) => setTimeout(r, 100)); await Promise.all([...app.approvals.running]); };
+  it('UT-S03-60: 平台代做 git：create_pr 审批带执行参数，批准后派 git-publish、交付 PR，不续接会话', () => withReport('UT-S03-60', async () => {
+    const { w, taskId, sessionId, token } = await publishSession('T-272');
+    const call = mcpCall(token, 'request_approval', { taskKey: 'T-272', actionType: 'create_pr', title: 'fix: 修 T-272', body: 'PR 描述', timeoutMinutes: 0.01 });
+    await new Promise((r) => setTimeout(r, 300)); await app.fakeClock.advance(1_000);
+    const key = (await call).result.structuredContent.approvalKey;
+    const ap = await app.db.one<any>('SELECT payload, body_hash FROM approvals WHERE key=$1', [key]);
+    expect(ap.payload.executor).toBe('center');
+    expect(ap.payload.publish).toEqual({ runtime: 'dev', path: '/tmp/fx/wt/T-272', repo: 'selectdb/selectdb-core', base: 'main', branch: 'foreman/T-272', pushRemote: 'fork' });
+    // 会话等审批超时退出：任务等审批，不算没产物
+    await app.dispatch.onSessionState('dev', { sessionId, state: 'done', source: 'exit' });
+    expect((await app.tasks.byKey('T-272')).state).toBe('waiting_approval');
+    expect((await http(app, 'POST', `/api/approvals/${key}/decide`, { decision: 'approve', bodyHash: ap.body_hash })).status).toBe(200);
+    const job = await w.expect((e) => e.type === 'job.run' && e.payload.kind === 'git-publish');
+    expect(job.payload.args).toMatchObject({ path: '/tmp/fx/wt/T-272', branch: 'foreman/T-272', pushRemote: 'fork', base: 'main', title: 'fix: 修 T-272', body: 'PR 描述' });
+    w.send('job.result', { ok: true, result: { url: 'https://github.com/selectdb/selectdb-core/pull/9', branch: 'foreman/T-272', commit: 'abc', created: true, committed: true } }, job.id);
+    await settle();
+    const t = await app.tasks.byKey('T-272');
+    expect(t.state).toBe('delivered'); expect(t.pr_url).toBe('https://github.com/selectdb/selectdb-core/pull/9'); expect(t.branch_name).toBe('foreman/T-272');
+    const kids = await app.db.query<any>('SELECT key, kind FROM tasks WHERE parent_id=$1 ORDER BY key', [taskId]);
+    expect(kids.rows.map((k) => k.kind)).toEqual(['pr', 'review']);
+    expect((await app.db.one<any>('SELECT x.status FROM approvals a JOIN actions x ON x.id=a.action_id WHERE a.key=$1', [key])).status).toBe('succeeded');
+    // 会话已结束 → 交付后的动作由执行器补上：review 子任务派出、Jira 回写待批
+    await w.expect((e) => e.type === 'worktree.create' && e.payload.taskKey === 'T-272.2');
+    expect(await app.db.one(`SELECT 1 FROM approvals WHERE task_id=$1 AND action_type='jira_comment'`, [taskId])).not.toBeNull();
+    expect(w.received.some((e) => e.type === 'session.resume')).toBe(false);
+  }));
+  it('UT-S03-61: 平台建 PR 失败 → 审批可重试、带错误；重试接口重新执行成功', () => withReport('UT-S03-61', async () => {
+    const { w, token } = await publishSession('T-273');
+    const call = mcpCall(token, 'request_approval', { taskKey: 'T-273', actionType: 'create_pr', title: 'fix: 修 T-273', body: 'PR 描述' });
+    await new Promise((r) => setTimeout(r, 300));
+    const ap = await app.db.one<any>(`SELECT key, body_hash FROM approvals WHERE action_type='create_pr' AND status='pending' ORDER BY created_at DESC LIMIT 1`);
+    expect((await http(app, 'POST', `/api/approvals/${ap.key}/decide`, { decision: 'approve', bodyHash: ap.body_hash })).status).toBe(200);
+    const out = (await call).result.structuredContent;
+    expect(out.approved).toBe(true); expect(out.note).toContain('不用做任何 git 操作');
+    const job = await w.expect((e) => e.type === 'job.run' && e.payload.kind === 'git-publish');
+    w.send('job.result', { ok: false, error: { code: 'INTERNAL', message: 'PUSH_FAILED: 推送到 fork 失败' } }, job.id);
+    await settle();
+    const failed = await app.db.one<any>('SELECT status, payload FROM approvals WHERE key=$1', [ap.key]);
+    expect(failed.status).toBe('failed'); expect(failed.payload.retryable).toBe(true); expect(failed.payload.error).toContain('PUSH_FAILED');
+    expect((await http(app, 'GET', '/api/inbox')).body.approvals.map((a: any) => a.key)).toContain(ap.key);
+    expect(await app.db.one(`SELECT 1 FROM messages WHERE text LIKE $1`, [`${ap.key}（提交并建 PR）执行失败%`])).not.toBeNull();
+    // 重试：同步执行到结束
+    const retry = http(app, 'POST', `/api/approvals/${ap.key}/retry`);
+    const job2 = await w.expect((e) => e.type === 'job.run' && e.payload.kind === 'git-publish');
+    w.send('job.result', { ok: true, result: { url: 'https://github.com/selectdb/selectdb-core/pull/10', created: true, committed: false } }, job2.id);
+    const r = await retry;
+    expect(r.status).toBe(200); expect(r.body.status).toBe('succeeded');
+    const done = await app.db.one<any>('SELECT status, payload FROM approvals WHERE key=$1', [ap.key]);
+    expect(done.status).toBe('approved'); expect(done.payload.retryable).toBeUndefined(); expect(done.payload.error).toBeUndefined();
+    expect((await app.tasks.byKey('T-273')).pr_url).toBe('https://github.com/selectdb/selectdb-core/pull/10');
+    expect((await http(app, 'POST', `/api/approvals/${ap.key}/retry`)).status).toBe(409);
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');

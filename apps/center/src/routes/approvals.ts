@@ -41,6 +41,13 @@ export function approvalRoutes(app: AppContext) {
     return c.json(app.approvals.serialize(a));
   });
 
+  // S06 EX-20.1：中心执行的动作失败后重试（平台代建 PR、Jira 回写等）
+  r.post('/api/approvals/:key/retry', async (c) => {
+    const key = c.req.param('key');
+    if (!/^A-\d+$/.test(key)) throw new ApiError(404, 'NOT_FOUND', `审批 ${key} 不存在`);
+    return c.json(await app.approvals.retryAction(key));
+  });
+
   r.post('/api/approvals/:key/decide', async (c) => {
     const key = c.req.param('key');
     if (!/^A-\d+$/.test(key)) throw new ApiError(404, 'NOT_FOUND', `审批 ${key} 不存在`);

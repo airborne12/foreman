@@ -105,6 +105,8 @@ export async function createApp(config: CenterConfig, opts?: { clock?: Clock; fe
   approvals.afterDecided((a, d) => dispatch.onApprovalDecided(a, d));
   approvals.registerExecutor('jira_comment', (x) => dispatch.mirrorToJira(x));
   approvals.registerExecutor('feishu_reply', (x) => dispatch.mirrorToFeishu(x));
+  // 平台代做 git：只有 payload.executor='center' 的 create_pr 会走到这里（agent 自建 PR 的只记 actions）
+  approvals.registerExecutor('create_pr', (x) => dispatch.publishPr(x), { background: true });
 
   // worker → center 消息（S01 Step 8、S03 Step 12/17/31）
   workerHub.on('job.result', async (conn, env) => { const r = WORKER_TO_CENTER['job.result'].parse(env.payload); if (env.ref) await intake.onJobResult(env.ref, conn.name, r); });

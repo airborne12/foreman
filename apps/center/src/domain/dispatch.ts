@@ -37,7 +37,7 @@ export class Dispatch {
       await this.dispatchTask(a.task_id, { runtime: ov.runtime ?? null, agent: (ov.agent as AgentName | undefined) ?? null });
       return;
     }
-    if (a.action_type === 'create_pr' && d.approved && a.session_id) {
+    if (a.action_type === 'create_pr' && d.approved && a.session_id && (a.payload as any)?.executor !== 'center') {
       // EX-22.1：等待超时后会话已结束 → 续接送回批准
       const s = await this.db.one<any>(`SELECT s.*, r.name AS runtime FROM sessions s JOIN runtimes r ON r.id=s.runtime_id WHERE s.id=$1`, [a.session_id]);
       if (s && ['done', 'stopped', 'failed'].includes(s.state)) {
@@ -226,7 +226,7 @@ export class Dispatch {
 - suggestions：建议修的清单，同上
 - content：完整 review 意见（中文 markdown）
 - url：被 review 的 PR 链接`;
-      default: return `${base}\n本会话按路径 ${path ?? 'fix'} 实现修复：复现、修改、跑相关 UT，然后 request_approval(create_pr) 并在批准后用 create-doris-pr skill 建 PR，最后 deliver({kind:"pr", url, title, diffStat})。`;
+      default: return `${base}\n本会话按路径 ${path ?? 'fix'} 实现修复：复现、修改、跑相关 UT。改完后不要 git commit / push，也不要 gh pr create——调用 request_approval(create_pr)，title 写 PR 标题，body 写 PR 描述（中文，说明问题、改动、测试）。批准后由平台提交、推送到 fork 并建 PR，你收到批准结果就可以结束本轮，不用再 deliver。`;
     }
   }
 
@@ -269,10 +269,12 @@ export class Dispatch {
         // 本会话没交付任何产物（如建 PR 被否决后 agent 停下）：不算交付，暂停并进收件箱等人接手
         const produced = await this.db.one('SELECT 1 FROM artifacts WHERE session_id=$1 LIMIT 1', [s.id]);
         // 本会话还有待批审批：不是「没产物」，是在等人拍板——批准后 onApprovalDecided 会续接会话（EX-22.1）
-        const waiting = produced ? null : await this.db.one<{ key: string }>(`SELECT key FROM approvals WHERE session_id=$1 AND status='pending' ORDER BY created_at DESC LIMIT 1`, [s.id]);
+        // 平台代做 git 的建 PR 正在执行（已批准、动作 executing）也算在等：执行完会交付 PR 产物
+        const waiting = produced ? null : await this.db.one<{ key: string }>(`SELECT a.key FROM approvals a LEFT JOIN actions x ON x.id=a.action_id
+          WHERE a.session_id=$1 AND (a.status='pending' OR (a.status IN ('approved','auto_approved') AND x.status='executing')) ORDER BY a.created_at DESC LIMIT 1`, [s.id]);
         if (waiting && ['running', 'waiting_approval'].includes(t.state)) {
           await this.db.query(`UPDATE tasks SET state='waiting_approval', updated_at=$2 WHERE id=$1`, [t.id, now]);
-          await this.threadEvent(t.id, `会话已结束，等待 ${waiting.key} 审批：批准后自动续接会话继续`);
+          await this.threadEvent(t.id, `会话已结束，等待 ${waiting.key} 审批（批准并执行完后自动接着走）`);
         } else if (!produced && t.state === 'running') {
           const last = await this.db.one<{ text: string }>(`SELECT text FROM messages WHERE task_id=$1 AND kind='progress' ORDER BY created_at DESC, seq DESC LIMIT 1`, [t.id]);
           const reason = `人工处理：会话结束但没有产物${last ? `（最后进展：${last.text.slice(0, 80)}）` : ''}，在线程里回复即可让 agent 接着做`;
@@ -458,6 +460,36 @@ export class Dispatch {
     }
     const review = await this.db.one<any>(`SELECT * FROM tasks WHERE parent_id=$1 AND kind='review' AND state='queued'`, [taskId]);
     if (review) await this.dispatchTask(review.id, { kind: 'review', agent: review.agent });
+  }
+
+  /**
+   * 平台代做 git（2026-09-30）：会话所在 runtime 支持 git-publish 且任务工作区就绪时，
+   * create_pr 改由中心执行——批准后派 worker 在工作区提交、推送到 fork、建 PR。
+   * 返回要并进审批 payload 的执行参数；条件不满足返回 null（仍由 agent 自己建 PR）。
+   */
+  async publishPlan(sessionId: string): Promise<Record<string, unknown> | null> {
+    const r = await this.db.one<any>(`SELECT s.task_id, rt.name AS runtime, rt.capabilities, rt.repos, w.path, w.repo_name, w.base_branch, w.branch_name
+      FROM sessions s JOIN runtimes rt ON rt.id=s.runtime_id JOIN worktrees w ON w.id=s.worktree_id WHERE s.id=$1 AND w.state='ready'`, [sessionId]);
+    if (!r || !(r.capabilities ?? []).includes('git-publish')) return null;
+    const pushRemote = r.repos?.[r.repo_name]?.pushRemote;
+    if (!pushRemote) return null;
+    return { executor: 'center', publish: { runtime: r.runtime, path: r.path, repo: r.repo_name, base: r.base_branch, branch: r.branch_name, pushRemote } };
+  }
+
+  /** create_pr 中心执行器：git-publish 作业 → 交付 PR 产物（照常生成 PR / review 子任务与回写审批） */
+  async publishPr(input: { approval: ApprovalRow; finalBody: string; payload: Record<string, unknown> }) {
+    const a = input.approval;
+    const pub = (input.payload as any).publish as { runtime: string; path: string; repo: string; base: string; branch: string; pushRemote: string } | undefined;
+    if (!pub || !a.session_id) throw new Error('审批缺少执行参数（publish），无法由平台建 PR');
+    await this.threadEvent(a.task_id, `${a.key} 已批准：平台在 ${pub.runtime} 上提交改动、推送到 ${pub.pushRemote}/${pub.branch} 并建 PR`);
+    const title = String(a.title ?? '').trim() || `${(input.payload as any).taskKey ?? ''} fix`;
+    const r = await this.intake.runJob('git-publish', { ...pub, title, body: input.finalBody }, 10 * 60_000, { runtime: pub.runtime });
+    await this.db.query(`UPDATE tasks SET branch_name=$2, updated_at=$3 WHERE id=$1`, [a.task_id, pub.branch, this.clock.now()]);
+    await this.deliver(a.session_id, [{ kind: 'pr', url: r.url, title, branch: pub.branch }], `PR 已由平台创建：${r.url}${r.created === false ? '（PR 已存在，已推送新提交）' : ''}`);
+    // 会话已经结束（等审批时超时退出等）：没人会再触发交付后的动作，这里补上
+    const s = await this.db.one<{ state: string }>('SELECT state FROM sessions WHERE id=$1', [a.session_id]);
+    if (s && ['done', 'stopped', 'failed', 'lost'].includes(s.state)) await this.afterDelivered(a.task_id);
+    return r;
   }
 
   /** 镜像回写执行器（S06 Step 20；S03 Step 34 / EX-34.1） */

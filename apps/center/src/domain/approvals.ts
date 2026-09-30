@@ -28,18 +28,24 @@ export type ActionCompensator = (a: { action: any; approval: ApprovalRow }) => P
 /** 可撤回的动作类型（EX-32.1：PR 创建等不可逆动作只记录） */
 export const REVOCABLE_ACTIONS: ActionType[] = ['rerun_ci', 'reply_review', 'jira_comment', 'feishu_reply', 'jira_transition_in_progress'];
 
+const ACTION_LABEL: Partial<Record<ActionType, string>> = { jira_comment: '回写 Jira', feishu_reply: '回帖飞书', create_pr: '提交并建 PR' };
+
 export function sha256(s: string) { return createHash('sha256').update(s).digest('hex'); }
 
 export class Approvals {
   private waiters = new Map<string, { resolve: (d: ApprovalDecision) => void; cancel: () => void }>();
   private executors = new Map<ActionType, ActionExecutor>();
   private compensators = new Map<ActionType, ActionCompensator>();
+  private background = new Set<ActionType>();
+  /** 后台执行中的动作（测试等它们跑完） */
+  readonly running = new Set<Promise<void>>();
   /** 决定后的钩子（如 triage_confirm → 派发） */
   private onDecided: Array<(a: ApprovalRow, d: ApprovalDecision) => Promise<void>> = [];
 
   constructor(private db: Db, private clock: Clock, private events: EventBus, private cfg: CenterConfig, private notifications: Notifications) {}
 
-  registerExecutor(type: ActionType, fn: ActionExecutor) { this.executors.set(type, fn); }
+  /** background：执行耗时（如平台代做 git 推送、建 PR），决定接口不等它跑完，结果照常落 actions / 失败卡 */
+  registerExecutor(type: ActionType, fn: ActionExecutor, opts?: { background?: boolean }) { this.executors.set(type, fn); if (opts?.background) this.background.add(type); else this.background.delete(type); }
   registerCompensator(type: ActionType, fn: ActionCompensator) { this.compensators.set(type, fn); }
   hasExecutor(type: ActionType) { return this.executors.has(type); }
   afterDecided(fn: (a: ApprovalRow, d: ApprovalDecision) => Promise<void>) { this.onDecided.push(fn); }
@@ -192,7 +198,7 @@ export class Approvals {
   }
 
   /** S06 Step 20：执行动作（center 执行器）；agent 执行的动作只记 actions */
-  private async execute(a: ApprovalRow, finalBody: string, auto: boolean) {
+  private async execute(a: ApprovalRow, finalBody: string, auto: boolean, opts?: { wait?: boolean }) {
     const now = this.clock.now();
     const executor = (a.payload as any)?.executor === 'agent' || ((a.payload as any)?.executor !== 'center' && a.session_id) ? 'agent' : 'center';
     const action = await this.db.one<{ id: string }>(`INSERT INTO actions (approval_id, task_id, action_type, executor, status, auto, revocable_until, created_at, updated_at) VALUES ($1,$2,$3,$4,'executing',$5,$6,$7,$7) RETURNING id`,
@@ -200,6 +206,14 @@ export class Approvals {
     await this.db.query(`UPDATE approvals SET action_id=$2 WHERE id=$1`, [a.id, action!.id]);
     const fn = this.executors.get(a.action_type);
     if (executor === 'agent' || !fn) { await this.db.query(`UPDATE actions SET status='succeeded', result='{}'::jsonb, updated_at=$2 WHERE id=$1`, [action!.id, now]); return; }
+    const run = this.runExecutor(a, action!.id, fn, finalBody);
+    if (!this.background.has(a.action_type) || opts?.wait) return run;
+    const p = run.catch(() => undefined).finally(() => this.running.delete(p));
+    this.running.add(p);
+  }
+
+  private async runExecutor(a: ApprovalRow, actionId: string, fn: ActionExecutor, finalBody: string) {
+    const action = { id: actionId };
     try {
       const result = await fn({ approval: a, finalBody, payload: a.payload, taskId: a.task_id });
       await this.db.query(`UPDATE actions SET status='succeeded', result=$2, updated_at=$3 WHERE id=$1`, [action!.id, JSON.stringify(result), this.clock.now()]);
@@ -207,9 +221,9 @@ export class Approvals {
       // EX-20.1 / S03 EX-34.1：执行失败 → approval failed，信任不回退，收件箱重试项
       await this.db.tx(async (c) => {
         await c.query(`UPDATE actions SET status='failed', error=$2, updated_at=$3 WHERE id=$1`, [action!.id, String(e), this.clock.now()]);
-        await c.query(`UPDATE approvals SET status='failed', payload = payload || '{"retryable":true}'::jsonb, updated_at=$2 WHERE id=$1`, [a.id, this.clock.now()]);
+        await c.query(`UPDATE approvals SET status='failed', payload = payload || jsonb_build_object('retryable', true, 'error', $3::text), updated_at=$2 WHERE id=$1`, [a.id, this.clock.now(), String((e as Error).message ?? e).slice(0, 500)]);
         const task = await this.db.one<{ key: string; channel_id: string }>('SELECT key, channel_id FROM tasks WHERE id=$1', [a.task_id], c);
-        await c.query(`INSERT INTO messages (channel_id, task_id, kind, author, text, ref_type, ref_id, created_at) VALUES ($1,$2,'system','system',$3,'approval',$4,$5)`, [task!.channel_id, a.task_id, `回写失败：${String((e as Error).message ?? e).slice(0, 200)}`, a.id, this.clock.now()]);
+        await c.query(`INSERT INTO messages (channel_id, task_id, kind, author, text, ref_type, ref_id, created_at) VALUES ($1,$2,'system','system',$3,'approval',$4,$5)`, [task!.channel_id, a.task_id, `${a.key}（${ACTION_LABEL[a.action_type] ?? a.action_type}）${a.action_type === 'create_pr' ? '执行' : '回写'}失败：${String((e as Error).message ?? e).slice(0, 300)}，可在收件箱重试`, a.id, this.clock.now()]);
         await this.events.record(c, { type: 'inbox.new', taskId: a.task_id, payload: { itemType: 'approval', item: this.serialize((await this.byKey(a.key, c))!), retry: true } });
       });
       this.events.flush();
@@ -221,9 +235,9 @@ export class Approvals {
     const a = await this.byKey(key);
     if (!a) throw new ApiError(404, 'NOT_FOUND', `审批 ${key} 不存在`);
     if (a.status !== 'failed') throw new ApiError(409, 'APPROVAL_NOT_PENDING', '审批不是失败状态，无需重试');
-    await this.db.query(`UPDATE approvals SET status='approved', payload = payload - 'retryable', updated_at=$2 WHERE id=$1`, [a.id, this.clock.now()]);
+    await this.db.query(`UPDATE approvals SET status='approved', payload = payload - 'retryable' - 'error', updated_at=$2 WHERE id=$1`, [a.id, this.clock.now()]);
     const fresh = (await this.byKey(key))!;
-    await this.execute(fresh, fresh.final_body ?? fresh.body, false);
+    await this.execute(fresh, fresh.final_body ?? fresh.body, false, { wait: true });
     const done = (await this.byKey(key))!;
     if (done.status !== 'failed') { await this.events.record(this.db.pool, { type: 'inbox.removed', taskId: a.task_id, payload: { itemType: 'approval', key: a.key, reason: 'retried' } }); this.events.flush(); }
     const action = await this.db.one<any>('SELECT * FROM actions WHERE id=$1', [done.action_id]);

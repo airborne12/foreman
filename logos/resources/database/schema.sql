@@ -50,7 +50,7 @@ COMMENT ON COLUMN runtimes.transport IS 'direct 直连 / reverse-tunnel 经 ssh 
 COMMENT ON COLUMN runtimes.labels IS '能力标签，如 agent:claude、build:doris、repo:apache/doris、vpn:jira';
 COMMENT ON COLUMN runtimes.agents IS '各家 agent 配置 {claude: {bin, version, maxConcurrent}}';
 COMMENT ON COLUMN runtimes.repos IS '仓库路径 {"apache/doris": {main, worktreeRoot, pushRemote}}';
-COMMENT ON COLUMN runtimes.capabilities IS '可执行的系统作业种类：jira-poll、jira-lookup、gh、merge-tree、rg';
+COMMENT ON COLUMN runtimes.capabilities IS '可执行的系统作业种类：jira-poll、jira-lookup、gh、merge-tree、rg、git-publish（平台代做 git）';
 COMMENT ON COLUMN runtimes.worker_version IS 'worker 版本';
 COMMENT ON COLUMN runtimes.disk_used_ratio IS '磁盘使用率 0–1，来自心跳；≥0.85 触发高水位回收';
 COMMENT ON COLUMN runtimes.disk_free_bytes IS '磁盘剩余字节';
@@ -645,7 +645,7 @@ COMMENT ON COLUMN candidates.decided_at IS '入库或忽略时间';
 -- ---------------------------------------------------------------------
 CREATE TABLE jobs (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  kind           TEXT NOT NULL CHECK (kind IN ('jira-poll', 'jira-lookup', 'jira-comment', 'gh-pr-view', 'merge-tree-check', 'candidate-scan', 'worktree-gc', 'dispatcher-idle', 'heartbeat-check', 'progress-watch', 'feishu-digest', 'notification-retry', 'code-locate', 'context-retry', 'dispatch')),
+  kind           TEXT NOT NULL CHECK (kind IN ('jira-poll', 'jira-lookup', 'jira-comment', 'gh-pr-view', 'merge-tree-check', 'candidate-scan', 'worktree-gc', 'dispatcher-idle', 'heartbeat-check', 'progress-watch', 'feishu-digest', 'notification-retry', 'code-locate', 'context-retry', 'dispatch', 'git-publish')),
   status         TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'dispatched', 'running', 'succeeded', 'failed', 'skipped')),
   runtime_id     UUID REFERENCES runtimes(id) ON DELETE SET NULL,
   required_label TEXT,

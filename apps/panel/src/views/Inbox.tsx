@@ -211,8 +211,9 @@ function ApprovalDetail({ a, title, head, runtimes, reload }: { a: any; title: s
     { k: '基线分支', v: ov.baseBranch ?? p.baseBranch ?? '仓库默认', key: 'baseBranch', mono: true },
     { k: '执行', v: `${ov.runtime ?? p.defaultRuntime ?? '按路由'} · ${ov.agent ?? p.defaultAgent ?? '轮换'}`, key: ov.runtime ? 'runtime' : 'agent' },
   ] : ([
-    ['仓库', p.repo], ['源分支', p.head], ['目标分支', p.base], ['推送到', p.pushRemote ?? p.pushUrl],
-    ['提交', typeof p.commit === 'string' ? p.commit.slice(0, 12) : null], ['执行方', p.executor === 'agent' ? 'agent 会话内执行' : p.executor === 'center' ? '中心代执行' : p.executor],
+    ['仓库', p.repo ?? p.publish?.repo], ['源分支', p.head ?? p.publish?.branch], ['目标分支', p.base ?? p.publish?.base], ['推送到', p.pushRemote ?? p.pushUrl ?? p.publish?.pushRemote],
+    ['提交', typeof p.commit === 'string' ? p.commit.slice(0, 12) : null],
+    ['执行方', p.executor === 'agent' ? 'agent 会话内执行' : p.executor === 'center' ? (a.actionType === 'create_pr' ? `平台提交并建 PR${p.publish?.runtime ? `（${p.publish.runtime}）` : ''}` : '中心代执行') : p.executor],
   ] as Array<[string, unknown]>).filter(([, v]) => typeof v === 'string' && v).map(([k, v]) => ({ k, v: String(v), mono: k !== '执行方' }));
 
   return (
@@ -329,6 +330,12 @@ function ApprovalDetail({ a, title, head, runtimes, reload }: { a: any; title: s
             <Btn onClick={() => setRejecting(false)}>取消</Btn>
             <Btn className="danger solid" busy={busy === a.key} onClick={() => decide('reject')}>确认否决</Btn>
           </div>
+        ) : a.status === 'failed' ? (
+          <>
+            {err && <span className="err-inline"><Icon name="alert" size="sm" />{err}</span>}
+            <span className="spacer" />
+            <Btn className="go" icon="refresh" busy={busy === a.key} disabled={!!busy} onClick={() => act(a.key, () => api(`/api/approvals/${a.key}/retry`, { method: 'POST' }), `${a.key} 已重新执行`, a.taskKey ? `/c/${p.channel ?? 'jira'}/t/${a.taskKey}` : null)}>重试执行</Btn>
+          </>
         ) : (
           <>
             <span className="small muted row" style={{ gap: 6 }} title="连续原样确认达到阈值后，该类动作自动执行">

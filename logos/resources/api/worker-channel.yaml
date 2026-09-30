@@ -93,7 +93,7 @@ components:
         disk: { $ref: '#/components/schemas/DiskInfo' }
         capabilities:
           type: array
-          items: { type: string, enum: [jira-poll, jira-lookup, gh, merge-tree, rg] }
+          items: { type: string, enum: [jira-poll, jira-lookup, gh, merge-tree, rg, git-publish], description: "git-publish：worker 能在任务工作区代做提交、推送到 fork、建 PR（平台代做 git，2026-09-30）" }
           description: "可执行的系统作业种类"
     RegisterAck:
       type: object
@@ -126,11 +126,11 @@ components:
       type: object
       required: [kind, args, timeoutSeconds]
       properties:
-        kind: { type: string, enum: [jira-poll, jira-lookup, gh-pr-view, merge-tree-check] }
+        kind: { type: string, enum: [jira-poll, jira-lookup, gh-pr-view, merge-tree-check, git-publish] }
         args:
           type: object
           additionalProperties: true
-          description: "jira-poll: {jql, since}; jira-lookup: {key}; gh-pr-view: {repo, number}"
+          description: "jira-poll: {jql, since}; jira-lookup: {key}; gh-pr-view: {repo, number}; git-publish: {path, repo, base, branch, pushRemote, title, body}——在任务工作区里提交未提交的改动、推到 pushRemote（用户 fork）的 branch、向 repo 的 base 建 PR（已有则取回），结果 {url, branch, commit, created, committed}；失败时 error.code=INTERNAL，message 以 NOT_MANAGED / WORKTREE_MISSING / NO_PUSH_REMOTE / COMMIT_FAILED / NOTHING_TO_PUBLISH / PUSH_FAILED / PR_FAILED 开头；子模块指针不提交。2026-09-30 起建 PR 由平台代做：codex 的 workspace-write 沙箱把 .git 设为只读，agent 无法提交推送；worker 注册时在 capabilities 里声明 git-publish"
         timeoutSeconds: { type: integer, default: 60 }
     JobResult:
       type: object

@@ -50,7 +50,7 @@ export const Register = z.object({
   agents: z.record(AgentConfig),
   repos: z.record(RepoConfig),
   disk: DiskInfo.optional(),
-  capabilities: z.array(z.enum(['jira-poll', 'jira-lookup', 'gh', 'merge-tree', 'rg'])).default([]),
+  capabilities: z.array(z.enum(['jira-poll', 'jira-lookup', 'gh', 'merge-tree', 'rg', 'git-publish'])).default([]),
 });
 export type Register = z.infer<typeof Register>;
 

@@ -12,6 +12,7 @@ import { execFile } from 'node:child_process';
 import { Envelope, makeEnvelope, CENTER_TO_WORKER, type WorkerConfig } from '@foreman/shared';
 import { runGc, diskUsedRatio } from './gc.js';
 import { foremanHome } from './config.js';
+import { gitPublish, GitPublishError, type GitPublishArgs } from './gitPublish.js';
 import { isManagedPath, setClaudeTrust, isUntrustedError, type TrustScope } from './claudeTrust.js';
 
 /**
@@ -133,7 +134,7 @@ export class Worker {
     const disk = this.diskInfo();
     const env = makeEnvelope('register', {
       name: cfg.name, instanceId: this.instanceId, version: WORKER_VERSION, transport: cfg.transport,
-      labels: cfg.labels, agents: cfg.agents, repos: cfg.repos, disk, capabilities: cfg.capabilities,
+      labels: cfg.labels, agents: cfg.agents, repos: cfg.repos, disk, capabilities: [...new Set([...cfg.capabilities, 'git-publish'])],
     });
     this.ws?.send(JSON.stringify(env));
   }
@@ -205,7 +206,9 @@ export class Worker {
         }
         case 'job.run': {
           const input = CENTER_TO_WORKER['job.run'].parse(env.payload);
-          const result = input.kind.startsWith('jira') ? await runJiraJob(input.kind, input.args, this.jiraClient()) : await this.runGhJob(input.kind, input.args);
+          const result = input.kind.startsWith('jira') ? await runJiraJob(input.kind, input.args, this.jiraClient())
+            : input.kind === 'git-publish' ? this.runGitPublish(input.args as unknown as GitPublishArgs)
+            : await this.runGhJob(input.kind, input.args);
           reply = makeEnvelope('job.result', result as unknown as Record<string, unknown>, { ref: env.id });
           break;
         }
@@ -273,6 +276,20 @@ export class Worker {
   private jiraClient() {
     if (this.jira === undefined) { const c = this.opts.jira !== undefined ? this.opts.jira : (() => { const cfg = loadJiraConfig(); return cfg ? new JiraClient(cfg) : null; })(); this.jira = c; }
     return this.jira;
+  }
+
+  /** 平台代做 git（2026-09-30）：只处理本 worker 管理的工作区，错误码放进 message 前缀（JobResult 的 code 枚举不扩） */
+  private runGitPublish(a: GitPublishArgs): { ok: boolean; result?: Record<string, unknown>; error?: { code: 'INTERNAL'; message: string } } {
+    const roots = Object.values(this.opts.config.repos).map((r) => resolve(r.worktreeRoot) + '/');
+    if (!roots.some((r) => resolve(a.path).startsWith(r))) return { ok: false, error: { code: 'INTERNAL', message: `NOT_MANAGED: ${a.path} 不在本 worker 管理的工作区内` } };
+    try {
+      const r = gitPublish(a);
+      this.log(`git-publish ${a.branch} → ${r.url}（${r.created ? '新建' : '已存在'}，${r.committed ? '有新提交' : '无新提交'}）`);
+      return { ok: true, result: r as unknown as Record<string, unknown> };
+    } catch (e) {
+      const code = e instanceof GitPublishError ? e.code : 'INTERNAL';
+      return { ok: false, error: { code: 'INTERNAL', message: `${code}: ${String((e as Error).message).slice(0, 480)}` } };
+    }
   }
 
   private runGhJob(kind: string, args: Record<string, unknown>): Promise<{ ok: boolean; result?: Record<string, unknown>; error?: { code: 'SOURCE_UNREACHABLE' | 'NOT_FOUND' | 'TIMEOUT' | 'INTERNAL'; message: string } }> {
