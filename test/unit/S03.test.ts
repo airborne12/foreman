@@ -1,5 +1,5 @@
 /**
- * S03 单元测试：UT-S03-01 ~ UT-S03-61（来源：logos/resources/test/core-S03-test-cases.md）
+ * S03 单元测试：UT-S03-01 ~ UT-S03-62（来源：logos/resources/test/core-S03-test-cases.md）
  * 拍板校验、先到先得与信任、路由/选家/并发、worktree 与会话指令、产物与子任务。
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
@@ -205,9 +205,9 @@ describe('S03 1.4 worktree 与会话指令', () => {
     expect(r.success).toBe(false);
     expect(r.success ? '' : r.error.issues.map((i) => i.path.join('.'))).toContain('baseBranch');
   }));
-  it('UT-S03-20: 默认 branchName = foreman/<taskKey>', () => withReport('UT-S03-20', () => {
+  it('UT-S03-20: 默认 branchName = foreman/<taskKey>', () => withReport('UT-S03-20', async () => {
     const repo = gitRepo();
-    const out = createWorktree({ taskKey: 'T-231', repo: 'x/y', baseBranch: 'master' }, repo);
+    const out = await createWorktree({ taskKey: 'T-231', repo: 'x/y', baseBranch: 'master' }, repo);
     expect(out.branchName).toBe('foreman/T-231'); expect(out.reused).toBe(false);
     expect(execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: out.path, encoding: 'utf8' }).trim()).toBe('foreman/T-231');
   }));
@@ -234,16 +234,16 @@ describe('S03 1.4 worktree 与会话指令', () => {
     expect(executed).toBe(1); expect(replies).toBe(2);
     w.stop();
   }));
-  it('UT-S03-23: 同任务重试复用已有 worktree', () => withReport('UT-S03-23', () => {
+  it('UT-S03-23: 同任务重试复用已有 worktree', () => withReport('UT-S03-23', async () => {
     const repo = gitRepo();
-    const a = createWorktree({ taskKey: 'T-231', repo: 'x/y', baseBranch: 'master' }, repo);
-    const b = createWorktree({ taskKey: 'T-231', repo: 'x/y', baseBranch: 'master', reuseIfExists: true }, repo);
+    const a = await createWorktree({ taskKey: 'T-231', repo: 'x/y', baseBranch: 'master' }, repo);
+    const b = await createWorktree({ taskKey: 'T-231', repo: 'x/y', baseBranch: 'master', reuseIfExists: true }, repo);
     expect(a.reused).toBe(false); expect(b.reused).toBe(true); expect(b.path).toBe(a.path);
   }));
-  it('UT-S03-24: worker 写入 .foreman/context.md、task.json，并把 buildEnv 写进 custom_env.sh', () => withReport('UT-S03-24', () => {
+  it('UT-S03-24: worker 写入 .foreman/context.md、task.json，并把 buildEnv 写进 custom_env.sh', () => withReport('UT-S03-24', async () => {
     const repo = gitRepo();
     const tp = '/mnt/disk6/common/doris-thirdparties/doris-thirdparty-3.0';
-    const out = createWorktree({ taskKey: 'T-231', repo: 'x/y', baseBranch: 'master', contextMarkdown: '# T-231 上下文', taskJson: { key: 'T-231', kind: 'code' }, buildEnv: { DORIS_THIRDPARTY: tp } }, repo);
+    const out = await createWorktree({ taskKey: 'T-231', repo: 'x/y', baseBranch: 'master', contextMarkdown: '# T-231 上下文', taskJson: { key: 'T-231', kind: 'code' }, buildEnv: { DORIS_THIRDPARTY: tp } }, repo);
     expect(existsSync(resolve(out.path, '.foreman/context.md'))).toBe(true);
     expect(readFileSync(resolve(out.path, '.foreman/context.md'), 'utf8')).toContain('T-231');
     expect(JSON.parse(readFileSync(resolve(out.path, '.foreman/task.json'), 'utf8')).key).toBe('T-231');
@@ -275,27 +275,27 @@ describe('S03 1.4 worktree 与会话指令', () => {
 
   const gitIn = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x' } });
 
-  it('UT-S03-34: 基线变了就按新基线重建 worktree；有未提交改动时拒绝', () => withReport('UT-S03-34', () => {
+  it('UT-S03-34: 基线变了就按新基线重建 worktree；有未提交改动时拒绝', () => withReport('UT-S03-34', async () => {
     const repo = gitRepo();
     gitIn(repo.main, 'checkout', '-q', '-b', 'rel'); writeFileSync(resolve(repo.main, 'REL'), 'r'); gitIn(repo.main, 'add', '.'); gitIn(repo.main, 'commit', '-q', '-m', 'rel'); gitIn(repo.main, 'checkout', '-q', 'master');
-    const a = createWorktree({ taskKey: 'T-240', repo: 'x/y', baseBranch: 'master' }, repo);
+    const a = await createWorktree({ taskKey: 'T-240', repo: 'x/y', baseBranch: 'master' }, repo);
     expect(existsSync(resolve(a.path, 'REL'))).toBe(false);
     // 代码定位阶段按 master 建的；拍板把基线定成 rel → 重建
-    const b = createWorktree({ taskKey: 'T-240', repo: 'x/y', baseBranch: 'rel', resetToBase: true }, repo);
+    const b = await createWorktree({ taskKey: 'T-240', repo: 'x/y', baseBranch: 'rel', resetToBase: true }, repo);
     expect(b.reused).toBe(false);
     expect(existsSync(resolve(b.path, 'REL'))).toBe(true);
     // 工作区有未提交改动：拒绝重建，绝不丢改动
     writeFileSync(resolve(b.path, 'README'), 'changed');
-    expect(() => createWorktree({ taskKey: 'T-240', repo: 'x/y', baseBranch: 'master', resetToBase: true }, repo)).toThrow(/未提交/);
+    await expect(createWorktree({ taskKey: 'T-240', repo: 'x/y', baseBranch: 'master', resetToBase: true }, repo)).rejects.toThrow(/未提交/);
     expect(readFileSync(resolve(b.path, 'README'), 'utf8')).toBe('changed');
   }));
 
-  it('UT-S03-35: 主仓库只有远端跟踪分支时，基线解析为 origin/<分支> 且能建出 worktree', () => withReport('UT-S03-35', () => {
+  it('UT-S03-35: 主仓库只有远端跟踪分支时，基线解析为 origin/<分支> 且能建出 worktree', () => withReport('UT-S03-35', async () => {
     const repo = gitRepo();
     gitIn(repo.main, 'update-ref', 'refs/remotes/origin/branch-x', 'HEAD');
-    expect(resolveBaseRef('master', repo.main)).toBe('master');
-    expect(resolveBaseRef('branch-x', repo.main)).toBe('origin/branch-x');
-    const w = createWorktree({ taskKey: 'T-241', repo: 'x/y', baseBranch: 'branch-x' }, repo);
+    expect(await resolveBaseRef('master', repo.main)).toBe('master');
+    expect(await resolveBaseRef('branch-x', repo.main)).toBe('origin/branch-x');
+    const w = await createWorktree({ taskKey: 'T-241', repo: 'x/y', baseBranch: 'branch-x' }, repo);
     expect(existsSync(resolve(w.path, 'README'))).toBe(true);
   }));
 
@@ -577,10 +577,10 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     expect(readFileSync(f, 'utf8')).toBe('{ broken');
     // 回收回调
     const removed: string[] = [];
-    runGc({ policy: 'retain_days', dryRun: false, highWatermark: 0.85, protectedTaskKeys: [], candidates: [{ taskKey: 'T-9', path: resolve(dir, 'wt-T-9'), terminalAt: null }] }, { remove: () => undefined, onRemoved: (p) => removed.push(p) });
+    await runGc({ policy: 'retain_days', dryRun: false, highWatermark: 0.85, protectedTaskKeys: [], candidates: [{ taskKey: 'T-9', path: resolve(dir, 'wt-T-9'), terminalAt: null }] }, { remove: () => undefined, onRemoved: (p) => removed.push(p) });
     expect(removed).toEqual([]); // 目录不存在时不算删除，不回调
     mkdirSync(resolve(dir, 'wt-T-9'));
-    runGc({ policy: 'retain_days', dryRun: false, highWatermark: 0.85, protectedTaskKeys: [], candidates: [{ taskKey: 'T-9', path: resolve(dir, 'wt-T-9'), terminalAt: null }] }, { remove: () => undefined, onRemoved: (p) => removed.push(p) });
+    await runGc({ policy: 'retain_days', dryRun: false, highWatermark: 0.85, protectedTaskKeys: [], candidates: [{ taskKey: 'T-9', path: resolve(dir, 'wt-T-9'), terminalAt: null }] }, { remove: () => undefined, onRemoved: (p) => removed.push(p) });
     expect(removed).toEqual([resolve(dir, 'wt-T-9')]);
   }));
   it('UT-S03-48: worker 起 claude 前自动信任自己建的 worktree；被冲掉时补标重试；管理范围外的目录不碰', () => withReport('UT-S03-48', async () => {
@@ -812,13 +812,13 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     // worker：同一 worktreeRoot 下，T-267 已由仓库 A 建出；按仓库 B 建时另起路径
     const a = gitRepo(); const b = gitRepo();
     const root = mkdtempSync(resolve(tmpdir(), 'wt57-'));
-    const wa = createWorktree({ taskKey: 'T-267', repo: 'x/a', baseBranch: 'master' }, { main: a.main, worktreeRoot: root });
-    expect(belongsTo(wa.path, a.main)).toBe(true); expect(belongsTo(wa.path, b.main)).toBe(false);
-    const wb = createWorktree({ taskKey: 'T-267', repo: 'x/b', baseBranch: 'master' }, { main: b.main, worktreeRoot: root });
+    const wa = await createWorktree({ taskKey: 'T-267', repo: 'x/a', baseBranch: 'master' }, { main: a.main, worktreeRoot: root });
+    expect(await belongsTo(wa.path, a.main)).toBe(true); expect(await belongsTo(wa.path, b.main)).toBe(false);
+    const wb = await createWorktree({ taskKey: 'T-267', repo: 'x/b', baseBranch: 'master' }, { main: b.main, worktreeRoot: root });
     expect(wb.reused).toBe(false); expect(wb.path).not.toBe(wa.path);
-    expect(belongsTo(wb.path, b.main)).toBe(true);
+    expect(await belongsTo(wb.path, b.main)).toBe(true);
     // 再按 B 建一次：复用 B 自己那个
-    const wb2 = createWorktree({ taskKey: 'T-267', repo: 'x/b', baseBranch: 'master' }, { main: b.main, worktreeRoot: root });
+    const wb2 = await createWorktree({ taskKey: 'T-267', repo: 'x/b', baseBranch: 'master' }, { main: b.main, worktreeRoot: root });
     expect(wb2.path).toBe(wb.path);
     // 中心：任务仓库是 apache/doris，已有的 ready 工作区记的是 selectdb-core → 不复用，发 worktree.create
     const w = await fw('dev', { repos: { 'selectdb/selectdb-core': { main: '/tmp/fx/core', worktreeRoot: '/tmp/fx/wt' }, 'apache/doris': { main: '/tmp/fx/doris', worktreeRoot: '/tmp/fx/wt' } } });
@@ -872,19 +872,19 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     writeFileSync(resolve(wt, 'README'), 'fixed'); writeFileSync(resolve(wt, 'sub/f'), 'v2');
     const gh: string[][] = [];
     let ghOut: () => string = () => 'https://github.com/o/r/pull/7\n';
-    const run = (bin: string, args: string[], cwd: string) => (bin === 'gh' ? (gh.push(args), ghOut()) : execFileSync(bin, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+    const run = async (bin: string, args: string[], cwd: string) => (bin === 'gh' ? (gh.push(args), ghOut()) : execFileSync(bin, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
     const args = { path: wt, repo: 'o/r', base: 'master', branch: 'foreman/T-271', pushRemote: 'fork', title: 'fix: T-271', body: '说明' };
-    const r1 = gitPublish(args, run);
+    const r1 = await gitPublish(args, run);
     expect(r1).toMatchObject({ url: 'https://github.com/o/r/pull/7', created: true, committed: true, branch: 'foreman/T-271' });
     expect(sh(resolve(root, 'fork.git'), 'show', '--name-only', '--format=%s', 'foreman/T-271').split('\n').filter(Boolean)).toEqual(['fix: T-271', 'README']);
     expect(sh(wt, 'status', '--porcelain')).toContain('sub/f'); // 子模块指针留在工作区，不进提交
     expect(gh[0]).toEqual(['pr', 'create', '--repo', 'o/r', '--base', 'master', '--head', 'me:foreman/T-271', '--title', 'fix: T-271', '--body', '说明']);
     // 再推一次：PR 已存在 → 取回链接
     ghOut = () => { throw Object.assign(new Error('exit 1'), { stderr: 'a pull request for branch "me:foreman/T-271" into branch "master" already exists:\nhttps://github.com/o/r/pull/7\n' }); };
-    expect(gitPublish(args, run)).toMatchObject({ url: 'https://github.com/o/r/pull/7', created: false, committed: false });
+    expect(await gitPublish(args, run)).toMatchObject({ url: 'https://github.com/o/r/pull/7', created: false, committed: false });
     // 只有子模块指针变化 → 没东西可建 PR
     const wt2 = clone('wt2'); writeFileSync(resolve(wt2, 'sub/f'), 'v3');
-    let err: unknown; try { gitPublish({ ...args, path: wt2, branch: 'foreman/T-271b' }, run); } catch (e) { err = e; }
+    let err: unknown; try { await gitPublish({ ...args, path: wt2, branch: 'foreman/T-271b' }, run); } catch (e) { err = e; }
     expect(err).toBeInstanceOf(GitPublishError); expect((err as GitPublishError).code).toBe('NOTHING_TO_PUBLISH');
   }));
   /** 平台代做 git 的会话：dev 声明 git-publish、仓库配了 pushRemote，会话绑定就绪的 worktree */
@@ -949,6 +949,38 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     expect(done.status).toBe('approved'); expect(done.payload.retryable).toBeUndefined(); expect(done.payload.error).toBeUndefined();
     expect((await app.tasks.byKey('T-273')).pr_url).toBe('https://github.com/selectdb/selectdb-core/pull/10');
     expect((await http(app, 'POST', `/api/approvals/${ap.key}/retry`)).status).toBe(409);
+  }));
+  it('UT-S03-62: git-publish 执行期间 worker 不被卡住，取日志照常秒回', () => withReport('UT-S03-62', async () => {
+    const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x' };
+    const sh = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', env }).trim();
+    const { main, worktreeRoot } = gitRepo();
+    const root = mkdtempSync(resolve(tmpdir(), 'gp62-'));
+    sh(root, 'clone', '-q', '--bare', main, 'origin.git'); sh(root, 'init', '-q', '--bare', 'fork.git');
+    sh(worktreeRoot, 'clone', '-q', resolve(root, 'origin.git'), 'T-274');
+    const wt = resolve(worktreeRoot, 'T-274');
+    sh(wt, 'config', 'user.name', 't'); sh(wt, 'config', 'user.email', 't@x');
+    sh(wt, 'remote', 'add', 'fork', 'https://github.com/me/r.git');
+    sh(wt, 'config', `url.${resolve(root, 'fork.git')}.pushInsteadOf`, 'https://github.com/me/r.git');
+    sh(wt, 'checkout', '-q', '-b', 'foreman/T-274'); writeFileSync(resolve(wt, 'README'), 'fixed');
+    // 慢 gh：模拟推送 / 建 PR 耗时
+    const bin = mkdtempSync(resolve(tmpdir(), 'gh62-'));
+    writeFileSync(resolve(bin, 'gh'), '#!/bin/sh\nsleep 3\necho https://github.com/o/r/pull/8\n'); chmodSync(resolve(bin, 'gh'), 0o755);
+    const oldPath = process.env.PATH; process.env.PATH = `${bin}:${oldPath}`;
+    const cfg = WorkerConfig.parse({ name: 'w62', center: { url: app.ws, token: TEST_TOKEN }, transport: 'direct', labels: [], agents: {}, repos: { 'o/r': { main, worktreeRoot, pushRemote: 'fork' } } });
+    const w = new Worker({ config: cfg, log: () => undefined, stateFile: resolve(mkdtempSync(resolve(tmpdir(), 'w62-')), 'state.json') });
+    w.start();
+    try {
+      for (let i = 0; i < 50 && !app.workerHub.isOnline('w62'); i++) await new Promise((r) => setTimeout(r, 100));
+      expect((await app.db.one<any>(`SELECT capabilities FROM runtimes WHERE name='w62'`)).capabilities).toContain('git-publish');
+      app.workerHub.send('w62', 'job.run', { kind: 'git-publish', args: { path: wt, repo: 'o/r', base: 'master', branch: 'foreman/T-274', pushRemote: 'fork', title: 'fix: T-274', body: 'b' }, timeoutSeconds: 60 });
+      await new Promise((r) => setTimeout(r, 800)); // 此时 gh 正在 sleep
+      const t0 = Date.now();
+      const reply = await app.workerHub.request('w62', 'session.logs', { sessionId: crypto.randomUUID(), limit: 5 }, 10_000);
+      expect(reply.type).toBe('session.logs.result');
+      expect(Date.now() - t0).toBeLessThan(1500);
+      for (let i = 0; i < 60; i++) { try { sh(resolve(root, 'fork.git'), 'rev-parse', '--verify', '--quiet', 'refs/heads/foreman/T-274'); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
+      expect(sh(resolve(root, 'fork.git'), 'log', '--format=%s', '-1', 'foreman/T-274')).toBe('fix: T-274');
+    } finally { w.stop(); process.env.PATH = oldPath; }
   }));
   it('UT-S03-42: 收件箱与任务带出 Jira 优先级；runtime 列表带出登记的仓库', () => withReport('UT-S03-42', async () => {
     await fw('dev');

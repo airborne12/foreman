@@ -273,13 +273,15 @@ export class Dispatch {
         const waiting = produced ? null : await this.db.one<{ key: string }>(`SELECT a.key FROM approvals a LEFT JOIN actions x ON x.id=a.action_id
           WHERE a.session_id=$1 AND (a.status='pending' OR (a.status IN ('approved','auto_approved') AND x.status='executing')) ORDER BY a.created_at DESC LIMIT 1`, [s.id]);
         if (waiting && ['running', 'waiting_approval'].includes(t.state)) {
-          await this.db.query(`UPDATE tasks SET state='waiting_approval', updated_at=$2 WHERE id=$1`, [t.id, now]);
-          await this.threadEvent(t.id, `会话已结束，等待 ${waiting.key} 审批（批准并执行完后自动接着走）`);
+          // 条件更新：平台建 PR 的交付可能恰好同时落库（任务已 delivered），不能被这里改回等待（2026-09-30 T-77 / A-96）
+          const r = await this.db.query(`UPDATE tasks SET state='waiting_approval', updated_at=$2 WHERE id=$1 AND state IN ('running','waiting_approval') AND NOT EXISTS (SELECT 1 FROM artifacts WHERE session_id=$3)`, [t.id, now, s.id]);
+          if (r.rowCount) await this.threadEvent(t.id, `会话已结束，等待 ${waiting.key} 审批（批准并执行完后自动接着走）`);
+          else await this.threadEvent(t.id, `会话完成（${s.agent}）`);
         } else if (!produced && t.state === 'running') {
           const last = await this.db.one<{ text: string }>(`SELECT text FROM messages WHERE task_id=$1 AND kind='progress' ORDER BY created_at DESC, seq DESC LIMIT 1`, [t.id]);
           const reason = `人工处理：会话结束但没有产物${last ? `（最后进展：${last.text.slice(0, 80)}）` : ''}，在线程里回复即可让 agent 接着做`;
-          await this.db.query(`UPDATE tasks SET state='paused', state_before_pause='running', queue_reason=$2, updated_at=$3 WHERE id=$1`, [t.id, reason, now]);
-          await this.threadEvent(t.id, `会话结束（${s.agent}），没有交付产物 · 任务已暂停，回复即在原会话继续`);
+          const r = await this.db.query(`UPDATE tasks SET state='paused', state_before_pause='running', queue_reason=$2, updated_at=$3 WHERE id=$1 AND state='running' AND NOT EXISTS (SELECT 1 FROM artifacts WHERE session_id=$4)`, [t.id, reason, now, s.id]);
+          await this.threadEvent(t.id, r.rowCount ? `会话结束（${s.agent}），没有交付产物 · 任务已暂停，回复即在原会话继续` : `会话完成（${s.agent}）`);
         } else {
           if (t.state === 'running') await this.db.query(`UPDATE tasks SET state='delivered', updated_at=$2 WHERE id=$1`, [t.id, now]);
           await this.threadEvent(t.id, `会话完成（${s.agent}）`);

@@ -187,7 +187,7 @@ export class Worker {
       switch (env.type) {
         case 'worktree.gc': {
           const input = CENTER_TO_WORKER['worktree.gc'].parse(env.payload);
-          const result = runGc(input, { diskPath: this.opts.config.worktree.disk_path, onRemoved: (p) => this.trustClaude(p, false) });
+          const result = await runGc(input, { diskPath: this.opts.config.worktree.disk_path, onRemoved: (p) => this.trustClaude(p, false) });
           reply = makeEnvelope('worktree.gc.result', result as unknown as Record<string, unknown>, { ref: env.id });
           break;
         }
@@ -197,7 +197,7 @@ export class Worker {
           if (!repo) { reply = makeEnvelope('error', { code: 'WORKTREE_FAILED', message: `本 runtime 未配置仓库 ${input.repo}`, retryable: false }, { ref: env.id }); break; }
           try {
             const picked = pickBuildEnv(this.opts.config.build_env[input.repo], input.baseBranch);
-            const out = createWorktree({ ...input, buildEnv: input.buildEnv ?? picked.env ?? undefined }, repo, this.opts.git);
+            const out = await createWorktree({ ...input, buildEnv: input.buildEnv ?? picked.env ?? undefined }, repo, this.opts.git);
             reply = makeEnvelope('worktree.ready', { ...out, baseBranch: input.baseBranch, buildEnvMissing: !input.buildEnv && !picked.env, repo: input.repo } as unknown as Record<string, unknown>, { ref: env.id });
           } catch (e) {
             reply = makeEnvelope('error', { code: 'WORKTREE_FAILED', message: String((e as Error).message), retryable: e instanceof WorktreeError ? e.retryable : false }, { ref: env.id });
@@ -207,7 +207,7 @@ export class Worker {
         case 'job.run': {
           const input = CENTER_TO_WORKER['job.run'].parse(env.payload);
           const result = input.kind.startsWith('jira') ? await runJiraJob(input.kind, input.args, this.jiraClient())
-            : input.kind === 'git-publish' ? this.runGitPublish(input.args as unknown as GitPublishArgs)
+            : input.kind === 'git-publish' ? await this.runGitPublish(input.args as unknown as GitPublishArgs)
             : await this.runGhJob(input.kind, input.args);
           reply = makeEnvelope('job.result', result as unknown as Record<string, unknown>, { ref: env.id });
           break;
@@ -279,11 +279,11 @@ export class Worker {
   }
 
   /** 平台代做 git（2026-09-30）：只处理本 worker 管理的工作区，错误码放进 message 前缀（JobResult 的 code 枚举不扩） */
-  private runGitPublish(a: GitPublishArgs): { ok: boolean; result?: Record<string, unknown>; error?: { code: 'INTERNAL'; message: string } } {
+  private async runGitPublish(a: GitPublishArgs): Promise<{ ok: boolean; result?: Record<string, unknown>; error?: { code: 'INTERNAL'; message: string } }> {
     const roots = Object.values(this.opts.config.repos).map((r) => resolve(r.worktreeRoot) + '/');
     if (!roots.some((r) => resolve(a.path).startsWith(r))) return { ok: false, error: { code: 'INTERNAL', message: `NOT_MANAGED: ${a.path} 不在本 worker 管理的工作区内` } };
     try {
-      const r = gitPublish(a);
+      const r = await gitPublish(a);
       this.log(`git-publish ${a.branch} → ${r.url}（${r.created ? '新建' : '已存在'}，${r.committed ? '有新提交' : '无新提交'}）`);
       return { ok: true, result: r as unknown as Record<string, unknown> };
     } catch (e) {

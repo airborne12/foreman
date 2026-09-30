@@ -308,7 +308,7 @@ describe('S05 1.5 worktree 回收', () => {
   it('UT-S05-27: dryRun 只列不删', () => withReport('UT-S05-27', async () => {
     const w = await fw('dev');
     const paths = await seedWts([4, 4, 4, 4]);
-    w.expect((e) => e.type === 'worktree.gc').then((gc) => w.send('worktree.gc.result', runGc(gc.payload as any) as any, gc.id));
+    w.expect((e) => e.type === 'worktree.gc').then(async (gc) => w.send('worktree.gc.result', (await runGc(gc.payload as any)) as any, gc.id));
     const r = await http(app, 'POST', '/api/runtimes/dev/gc', { dryRun: true, policy: 'retain_days' });
     expect(r.status).toBe(200); expect(r.body.removed.length).toBe(4); expect(r.body.dryRun).toBe(true);
     expect(paths.every((p) => existsSync(p))).toBe(true);
@@ -322,9 +322,9 @@ describe('S05 1.5 worktree 回收', () => {
     expect(plan.candidates.map((c) => c.taskKey)).toEqual(['T-951']);
   }));
 
-  it('UT-S05-29: protectedTaskKeys 中的 worktree 永不删', () => withReport('UT-S05-29', () => {
+  it('UT-S05-29: protectedTaskKeys 中的 worktree 永不删', () => withReport('UT-S05-29', async () => {
     const removed: string[] = [];
-    const r = runGc({ policy: 'high_watermark', dryRun: false, highWatermark: 0.85, protectedTaskKeys: ['T-1'], candidates: [{ taskKey: 'T-1', path: '/nonexistent/a', terminalAt: null }, { taskKey: 'T-2', path: '/nonexistent/b', terminalAt: null }] }, { remove: (p) => removed.push(p) });
+    const r = await runGc({ policy: 'high_watermark', dryRun: false, highWatermark: 0.85, protectedTaskKeys: ['T-1'], candidates: [{ taskKey: 'T-1', path: '/nonexistent/a', terminalAt: null }, { taskKey: 'T-2', path: '/nonexistent/b', terminalAt: null }] }, { remove: (p) => { removed.push(p); } });
     expect(r.removed.map((x) => x.taskKey)).toEqual(['T-2']);
     expect(r.skippedRunning).toBe(1);
   }));
@@ -332,7 +332,7 @@ describe('S05 1.5 worktree 回收', () => {
   it('UT-S05-30: 删除后写任务线程事件与 worktrees.removed_at', () => withReport('UT-S05-30', async () => {
     const w = await fw('dev');
     const paths = await seedWts([4, 4]);
-    w.expect((e) => e.type === 'worktree.gc').then((gc) => w.send('worktree.gc.result', runGc(gc.payload as any) as any, gc.id));
+    w.expect((e) => e.type === 'worktree.gc').then(async (gc) => w.send('worktree.gc.result', (await runGc(gc.payload as any)) as any, gc.id));
     const r = await http(app, 'POST', '/api/runtimes/dev/gc', { dryRun: false, policy: 'retain_days' });
     expect(r.status).toBe(200); expect(r.body.removed.length).toBe(2);
     expect(paths.every((p) => !existsSync(p))).toBe(true);
