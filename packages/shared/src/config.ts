@@ -3,15 +3,15 @@
  */
 import { z } from 'zod';
 import { DEFAULT_VERSION_RULES } from './versionTarget.js';
-import { AgentConfig, RepoConfig } from './protocol.js';
+import { AgentConfigs, AgentLabels, RepoConfig } from './protocol.js';
 import { TRANSPORTS } from './constants.js';
 
 export const WorkerConfig = z.object({
   name: z.string().regex(/^[a-z0-9]+(-[a-z0-9]+)*$/),
   center: z.object({ url: z.string(), token: z.string() }),
   transport: z.enum(TRANSPORTS).default('direct'),
-  labels: z.array(z.string()).default([]),
-  agents: z.record(AgentConfig).default({}),
+  labels: AgentLabels.default([]),
+  agents: AgentConfigs.default({}),
   repos: z.record(RepoConfig).default({}),
   build_env: z.record(z.record(z.record(z.string()))).default({}),
   worktree: z.object({
@@ -72,7 +72,7 @@ export const CenterConfig = z.object({
   /** 公开仓库：create_pr 的标题 / 描述必须是英文、不能带内部 Jira 单号（2026-09-30 T-83 的 apache/doris PR 描述是中文且写了 DORIS-29301） */
   public_repos: z.array(z.string()).default(['apache/doris']),
   repo_base_branch: z.record(z.string()).default({ 'selectdb/selectdb-core': 'selectdb-cloud-4.0', 'apache/doris': 'master' }),
-  agent_concurrency: z.record(z.number().int()).default({ claude: 3, codex: 3, opencode: 3 }),
+  agent_concurrency: z.object({ codex: z.number().int().min(1).default(3) }).default({}),
   trust: z.object({
     threshold: z.number().int().default(5),
     locked_manual: z.array(z.string()).default(['merge_release', 'jira_done']),

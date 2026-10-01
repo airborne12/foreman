@@ -6,7 +6,6 @@
   "baseUrl": "{{env.CENTER_URL}}",
   "auth": { "panelToken": "{{env.FOREMAN_PANEL_TOKEN}}", "workerToken": "{{env.FOREMAN_TOKEN}}" },
   "dependencies": [
-    { "dependency": "Claude Code CLI", "strategy": "mock-service", "config": "假 claude 脚本模拟 --bg / agents --json / logs / --bg --resume，并按时间线调用 MCP 工具", "handle": "claude" },
     { "dependency": "Codex CLI", "strategy": "mock-service", "config": "假 codex 脚本模拟 exec / exec resume", "handle": "codex" },
     { "dependency": "GitHub", "strategy": "mock-service", "config": "假 gh 脚本按参数返回固定 JSON", "handle": "gh" },
     { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "FOREMAN_LARK_CLI 指向假 lark-cli", "handle": "lark" },
@@ -15,12 +14,12 @@
   "presets": {
     "clock": [{ "step": "setup", "action": "clock.freeze" }],
     "dev-online": [
-      { "step": "setup", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core", "vpn:jira"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt", "pushRemote": "jk" } }, "capabilities": ["jira-lookup"] } }
+      { "step": "setup", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:codex", "build:doris", "repo:selectdb/selectdb-core", "vpn:jira"], "agents": { "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt", "pushRemote": "jk" } }, "capabilities": ["jira-lookup"] } }
     ],
     "pending-triage": [
       { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.pendingDecision(key='T-231', repo='selectdb/selectdb-core', tier='fix', channel='jira', source='jira:CIR-20001')}}" } },
-      { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.done(key='T-100', author_agent='claude')}}" } },
-      { "step": "setup", "action": "note", "args": { "text": "fixture 同时写入 triage_cards 与 pending 的 triage_confirm 审批 A-87；上一实现任务 author=claude，故本次轮换到 codex" } }
+      { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.done(key='T-100', author_agent='codex')}}" } },
+      { "step": "setup", "action": "note", "args": { "text": "fixture 同时写入 triage_cards 与 pending 的 triage_confirm 审批 A-87；上一实现任务 author=codex，故本次轮换到 codex" } }
     ],
     "codex-implement-pr": [
       { "step": "setup", "action": "mock.set", "mock": { "dependency": "Codex CLI", "strategy": "mock-service", "config": "fake codex 脚本" }, "args": { "handle": "codex", "script": [{ "tool": "get_task" }, { "tool": "report_progress", "arguments": { "text": "复现成功" } }, { "tool": "report_progress", "arguments": { "text": "改动 2 个文件，UT 通过" } }, { "tool": "request_approval", "arguments": { "actionType": "create_pr", "title": "创建 PR", "body": "title: [fix](index) pass timeout\nbase: selectdb-cloud-4.0\nhead: airborne12:foreman/T-231", "payload": { "repo": "selectdb/selectdb-core", "base": "selectdb-cloud-4.0", "head": "airborne12:foreman/T-231", "title": "[fix](index) pass timeout" } }, "expect": { "approved": true } }, { "exec": "gh pr create --repo selectdb/selectdb-core --base selectdb-cloud-4.0 --head airborne12:foreman/T-231" }, { "tool": "deliver", "arguments": { "artifacts": [{ "kind": "pr", "url": "https://github.com/selectdb/selectdb-core/pull/6612", "title": "[fix](index) pass timeout", "diffStat": { "additions": 48, "deletions": 9, "files": 3 } }], "summary": "PR 已创建" } }, { "exit": 0 }] } },
@@ -48,7 +47,7 @@
         { "step": "Step 22", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-send", "match": { "text": "[审批] {{prApproval}}" } } },
         { "step": "Step 23", "method": "POST", "url": "/api/approvals/{{prApproval}}/decide", "body": { "decision": "approve", "bodyHash": "{{prHash}}" }, "expected_status": 200, "assert": [{ "path": "body.trust.actionType", "equals": "create_pr" }, { "path": "body.trust.streak", "equals": 1 }] },
         { "step": "Step 25-26", "action": "mock.expect", "mock": { "dependency": "GitHub", "strategy": "mock-service", "config": "假 gh pr create" }, "args": { "handle": "gh", "kind": "pr create", "match": { "args": "--base selectdb-cloud-4.0" } } },
-        { "step": "Step 27-30", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-231" }, "assert": [{ "path": "body.state", "equals": "delivered" }, { "path": "body.artifacts[0].kind", "equals": "pr" }, { "path": "body.artifacts[0].url", "contains": "/pull/6612" }, { "path": "body.children", "length": 2 }, { "path": "body.children[0].key", "equals": "T-231.1" }, { "path": "body.children[0].kind", "equals": "pr" }, { "path": "body.children[1].kind", "equals": "review" }, { "path": "body.children[1].agent", "equals": "claude" }] } },
+        { "step": "Step 27-30", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-231" }, "assert": [{ "path": "body.state", "equals": "delivered" }, { "path": "body.artifacts[0].kind", "equals": "pr" }, { "path": "body.artifacts[0].url", "contains": "/pull/6612" }, { "path": "body.children", "length": 2 }, { "path": "body.children[0].key", "equals": "T-231.1" }, { "path": "body.children[0].kind", "equals": "pr" }, { "path": "body.children[1].kind", "equals": "review" }, { "path": "body.children[1].agent", "equals": "codex" }] } },
         { "step": "Step 31-33", "action": "runtime.reply", "args": { "name": "dev", "type": "session.state", "payload": { "sessionId": "{{sessionId}}", "state": "done", "source": "exit", "exitCode": 0, "observedAt": "{{now}}" } } },
         { "step": "Step 34", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/approvals?taskKey=T-231&status=pending" }, "assert": [{ "path": "body.items[0].actionType", "in": ["jira_comment", "feishu_reply"] }] } },
         { "step": "Step 34", "action": "db.assert", "args": { "sql": "select state from sessions where id='{{sessionId}}'" }, "assert": [{ "path": "rows[0].state", "equals": "done" }] }
@@ -61,25 +60,25 @@
       "kind": "main",
       "use": ["clock", "dev-online"],
       "setup": [
-        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.pendingDecision(key='T-232', repo='selectdb/selectdb-core', tier='plan', channel='jira', source='jira:CIR-20002')}}" } },
-        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "get_task" }, { "tool": "deliver", "arguments": { "artifacts": [{ "kind": "doc", "path": "docs/plan.md", "title": "方案", "content": "# 方案\n方案二：删除旧接口" }], "summary": "方案已出" } }, { "exit": 0 }] } },
-        { "step": "setup", "action": "mock.set", "args": { "handle": "codex", "script": [{ "tool": "get_task", "expect": { "contextPack.planDoc": "contains:方案二" } }, { "tool": "report_progress", "arguments": { "text": "按方案实现中" } }, { "exit": 0 }] } }
+        {"step": "setup", "action": "db.seed", "args": {"table": "tasks", "rows": "{{fixture:task.pendingDecision(key='T-232', repo='selectdb/selectdb-core', tier='plan', channel='jira', source='jira:CIR-20002')}}"}},
+        {"step": "setup", "action": "mock.set", "args": {"handle": "codex", "script": [{"tool": "get_task"}, {"tool": "deliver", "arguments": {"artifacts": [{"kind": "doc", "path": "docs/plan.md", "title": "方案", "content": "# 方案\n方案二：删除旧接口"}], "summary": "方案已出"}}, {"exit": 0}]}}
       ],
       "steps": [
-        { "step": "Step 1-6", "method": "GET", "url": "/api/approvals?taskKey=T-232&status=pending", "expected_status": 200, "extract": { "ak": "body.items[0].key", "h": "body.items[0].bodyHash" } },
-        { "step": "Step 2-6", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 200 },
-        { "step": "Step 9-19", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create" }, "extract": { "wtCmd": "id" } },
-        { "step": "Step 12", "action": "runtime.reply", "args": { "name": "dev", "type": "worktree.ready", "ref": "{{wtCmd}}", "payload": { "taskKey": "T-232", "path": "/tmp/fx/wt/T-232", "branchName": "foreman/T-232", "reused": false } } },
-        { "step": "Step 13-17", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "assert": [{ "path": "payload.kind", "equals": "plan" }], "extract": { "s1": "payload.sessionId", "c1": "id" } },
-        { "step": "Step 17", "action": "runtime.reply", "args": { "name": "dev", "type": "session.started", "ref": "{{c1}}", "payload": { "sessionId": "{{s1}}", "agentSessionId": "x1", "startedAt": "{{now}}" } } },
-        { "step": "Step 27-30", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-232" }, "assert": [{ "path": "body.artifacts[0].kind", "equals": "doc" }, { "path": "body.state", "equals": "delivered" }] } },
-        { "step": "Step 30", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{ "path": "body.approvals[?(@.taskKey=='T-232')].title", "contains": "方案" }] },
-        { "step": "Step 30 → implement", "method": "POST", "url": "/api/tasks/T-232/implement", "expected_status": 202, "assert": [{ "path": "body.state", "in": ["queued", "running"] }] },
-        { "step": "implement", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "assert": [{ "path": "payload.kind", "equals": "implement" }, { "path": "payload.cwd", "equals": "/tmp/fx/wt/T-232" }], "extract": { "s2": "payload.sessionId", "c2": "id" } },
-        { "step": "implement", "action": "runtime.reply", "args": { "name": "dev", "type": "session.started", "ref": "{{c2}}", "payload": { "sessionId": "{{s2}}", "agentSessionId": "x2", "startedAt": "{{now}}" } } },
-        { "step": "implement", "action": "mcp.expectCall", "args": { "taskKey": "T-232", "tool": "get_task" } },
-        { "step": "implement", "method": "GET", "url": "/api/tasks/T-232", "expected_status": 200, "assert": [{ "path": "body.contextPack.planDoc", "contains": "方案二" }, { "path": "body.triageCard.approvalKey", "exists": true }], "extract": { "n": "body.pendingApprovals.length" } },
-        { "step": "implement", "method": "GET", "url": "/api/approvals?taskKey=T-232&actionType=triage_confirm", "expected_status": 200, "assert": [{ "path": "body.total", "equals": 1 }] }
+        {"step": "Step 1-6", "method": "GET", "url": "/api/approvals?taskKey=T-232&status=pending", "expected_status": 200, "extract": {"ak": "body.items[0].key", "h": "body.items[0].bodyHash"}},
+        {"step": "Step 2-6", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": {"decision": "approve", "bodyHash": "{{h}}"}, "expected_status": 200},
+        {"step": "Step 9-19", "action": "runtime.expectCommand", "args": {"name": "dev", "type": "worktree.create"}, "extract": {"wtCmd": "id"}},
+        {"step": "Step 12", "action": "runtime.reply", "args": {"name": "dev", "type": "worktree.ready", "ref": "{{wtCmd}}", "payload": {"taskKey": "T-232", "path": "/tmp/fx/wt/T-232", "branchName": "foreman/T-232", "reused": false}}},
+        {"step": "Step 13-17", "action": "runtime.expectCommand", "args": {"name": "dev", "type": "session.start"}, "assert": [{"path": "payload.kind", "equals": "plan"}], "extract": {"s1": "payload.sessionId", "c1": "id"}},
+        {"step": "Step 17", "action": "runtime.reply", "args": {"name": "dev", "type": "session.started", "ref": "{{c1}}", "payload": {"sessionId": "{{s1}}", "agentSessionId": "x1", "startedAt": "{{now}}"}}},
+        {"step": "Step 27-30", "action": "wait.until", "args": {"http": {"method": "GET", "url": "/api/tasks/T-232"}, "assert": [{"path": "body.artifacts[0].kind", "equals": "doc"}, {"path": "body.state", "equals": "delivered"}]}},
+        {"step": "Step 30", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{"path": "body.approvals[?(@.taskKey=='T-232')].title", "contains": "方案"}]},
+        {"step": "准备实现脚本", "action": "mock.set", "args": {"handle": "codex", "script": [{"tool": "get_task", "expect": {"contextPack.planDoc": "contains:方案二"}}, {"tool": "report_progress", "arguments": {"text": "按方案实现中"}}, {"exit": 0}]}},
+        {"step": "Step 30 → implement", "method": "POST", "url": "/api/tasks/T-232/implement", "expected_status": 202, "assert": [{"path": "body.state", "in": ["queued", "running"]}]},
+        {"step": "implement", "action": "runtime.expectCommand", "args": {"name": "dev", "type": "session.start"}, "assert": [{"path": "payload.kind", "equals": "implement"}, {"path": "payload.cwd", "equals": "/tmp/fx/wt/T-232"}], "extract": {"s2": "payload.sessionId", "c2": "id"}},
+        {"step": "implement", "action": "runtime.reply", "args": {"name": "dev", "type": "session.started", "ref": "{{c2}}", "payload": {"sessionId": "{{s2}}", "agentSessionId": "x2", "startedAt": "{{now}}"}}},
+        {"step": "implement", "action": "mcp.expectCall", "args": {"taskKey": "T-232", "tool": "get_task"}},
+        {"step": "implement", "method": "GET", "url": "/api/tasks/T-232", "expected_status": 200, "assert": [{"path": "body.contextPack.planDoc", "contains": "方案二"}, {"path": "body.triageCard.approvalKey", "exists": true}], "extract": {"n": "body.pendingApprovals.length"}},
+        {"step": "implement", "method": "GET", "url": "/api/approvals?taskKey=T-232&actionType=triage_confirm", "expected_status": 200, "assert": [{"path": "body.total", "equals": 1}]}
       ]
     },
     {
@@ -89,7 +88,7 @@
       "kind": "boundary",
       "use": ["clock", "dev-online", "pending-triage"],
       "setup": [
-        { "step": "setup", "action": "runtime.register", "args": { "name": "laptop", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/l/core", "worktreeRoot": "/tmp/fx/l/wt" } }, "capabilities": [] } }
+        { "step": "setup", "action": "runtime.register", "args": { "name": "laptop", "transport": "direct", "labels": ["agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/l/core", "worktreeRoot": "/tmp/fx/l/wt" } }, "capabilities": [] } }
       ],
       "steps": [
         { "step": "Step 1", "method": "GET", "url": "/api/approvals/A-87", "expected_status": 200, "extract": { "h": "body.bodyHash" } },
@@ -141,14 +140,14 @@
       "kind": "exception",
       "use": ["clock", "pending-triage"],
       "setup": [
-        { "step": "setup", "action": "runtime.register", "args": { "name": "laptop", "transport": "direct", "labels": ["agent:claude"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] } }
+        { "step": "setup", "action": "runtime.register", "args": { "name": "laptop", "transport": "direct", "labels": ["agent:codex"], "agents": { "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] } }
       ],
       "steps": [
         { "step": "Step 1", "method": "GET", "url": "/api/approvals/A-87", "expected_status": 200, "extract": { "h": "body.bodyHash" } },
         { "step": "Step 2-7", "method": "POST", "url": "/api/approvals/A-87/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 200 },
         { "step": "EX-7.1", "method": "GET", "url": "/api/tasks/T-231", "expected_status": 200, "assert": [{ "path": "body.state", "equals": "queued" }, { "path": "body.queueReason", "contains": "dev" }, { "path": "body.currentSession", "equals": null }] },
         { "step": "EX-7.1", "action": "runtime.expectCommand", "args": { "name": "laptop", "type": "session.start" }, "timeoutMs": 1500, "assert": [{ "path": "$none", "equals": true }] },
-        { "step": "EX-7.1", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": [] } },
+        { "step": "EX-7.1", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": [] } },
         { "step": "EX-7.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create", "match": { "payload.taskKey": "T-231" } }, "timeoutMs": 10000 }
       ]
     },
@@ -172,22 +171,20 @@
     },
     {
       "id": "ST-S03-08",
-      "title": "分析类任务并发满自动换家",
+      "title": "分析类任务 Codex 并发满时排队",
       "covers": "EX-7.2",
       "kind": "exception",
       "use": ["clock", "dev-online"],
       "setup": [
-        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.pendingDecision(key='T-234', repo='selectdb/selectdb-core', tier='plan', kind='analysis', channel='jira', source='jira:CIR-20004')}}" } },
-        { "step": "setup", "action": "db.seed", "args": { "table": "sessions", "rows": "{{fixture:sessions.running(runtime='dev', agent='codex', count=3)}}" } },
-        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.done(key='T-101', author_agent='claude')}}" } }
+        {"step": "setup", "action": "db.seed", "args": {"table": "tasks", "rows": "{{fixture:task.pendingDecision(key='T-234', repo='selectdb/selectdb-core', tier='plan', kind='analysis', channel='jira', source='jira:CIR-20004')}}"}},
+        {"step": "setup", "action": "db.seed", "args": {"table": "sessions", "rows": "{{fixture:sessions.running(runtime='dev', agent='codex', count=3)}}"}},
+        {"step": "setup", "action": "db.seed", "args": {"table": "tasks", "rows": "{{fixture:task.done(key='T-101', author_agent='codex')}}"}}
       ],
       "steps": [
-        { "step": "Step 1", "method": "GET", "url": "/api/approvals?taskKey=T-234&status=pending", "expected_status": 200, "extract": { "ak": "body.items[0].key", "h": "body.items[0].bodyHash" } },
-        { "step": "Step 2-7", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": { "decision": "approve", "bodyHash": "{{h}}" }, "expected_status": 200 },
-        { "step": "EX-7.2", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "worktree.create" }, "extract": { "c": "id" } },
-        { "step": "EX-7.2", "action": "runtime.reply", "args": { "name": "dev", "type": "worktree.ready", "ref": "{{c}}", "payload": { "taskKey": "T-234", "path": "/tmp/fx/wt/T-234", "branchName": "foreman/T-234", "reused": false } } },
-        { "step": "EX-7.2", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start", "match": { "payload.taskKey": "T-234" } }, "assert": [{ "path": "payload.agent", "equals": "claude" }] },
-        { "step": "EX-7.2", "method": "GET", "url": "/api/tasks/T-234/messages", "expected_status": 200, "assert": [{ "path": "body.items[-1].text", "contains": "已改派 claude" }] }
+        {"step": "Step 1", "method": "GET", "url": "/api/approvals?taskKey=T-234&status=pending", "expected_status": 200, "extract": {"ak": "body.items[0].key", "h": "body.items[0].bodyHash"}},
+        {"step": "Step 2-7", "method": "POST", "url": "/api/approvals/{{ak}}/decide", "body": {"decision": "approve", "bodyHash": "{{h}}"}, "expected_status": 200},
+        {"step": "EX-7.2", "method": "GET", "url": "/api/tasks/T-234", "expected_status": 200, "assert": [{"path": "body.state", "equals": "queued"}, {"path": "body.queueReason", "contains": "codex 队列"}]},
+        {"step": "EX-7.2", "action": "db.assert", "args": {"sql": "select count(*) as n from sessions s join tasks t on t.id=s.task_id where t.key='T-234'"}, "assert": [{"path": "rows[0].n", "equals": 0}]}
       ]
     },
     {
@@ -218,9 +215,9 @@
         { "step": "Step 1-12", "action": "note", "args": { "text": "include ST-S03-01 Step 1–12（worktree.ready 已回）" } },
         { "step": "Step 13-14", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "assert": [{ "path": "payload.agent", "equals": "codex" }], "extract": { "c1": "id" } },
         { "step": "EX-15.1", "action": "runtime.reply", "args": { "name": "dev", "type": "error", "ref": "{{c1}}", "payload": { "code": "AGENT_START_FAILED", "message": "codex: native binary missing", "retryable": true } } },
-        { "step": "EX-15.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "assert": [{ "path": "payload.agent", "equals": "claude" }, { "path": "payload.cwd", "equals": "/tmp/fx/wt/T-231-ngram" }], "extract": { "c2": "id", "s2": "payload.sessionId" } },
+        { "step": "EX-15.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "assert": [{ "path": "payload.agent", "equals": "codex" }, { "path": "payload.cwd", "equals": "/tmp/fx/wt/T-231-ngram" }], "extract": { "c2": "id", "s2": "payload.sessionId" } },
         { "step": "EX-15.1", "action": "runtime.reply", "args": { "name": "dev", "type": "session.started", "ref": "{{c2}}", "payload": { "sessionId": "{{s2}}", "agentSessionId": "cl-2", "startedAt": "{{now}}" } } },
-        { "step": "EX-15.1", "action": "db.assert", "args": { "sql": "select agent, state, attempt from sessions where task_id=(select id from tasks where key='T-231') order by attempt" }, "assert": [{ "path": "rows[0].agent", "equals": "codex" }, { "path": "rows[0].state", "equals": "failed" }, { "path": "rows[1].agent", "equals": "claude" }, { "path": "rows[1].attempt", "equals": 2 }] },
+        { "step": "EX-15.1", "action": "db.assert", "args": { "sql": "select agent, state, attempt from sessions where task_id=(select id from tasks where key='T-231') order by attempt" }, "assert": [{ "path": "rows[0].agent", "equals": "codex" }, { "path": "rows[0].state", "equals": "failed" }, { "path": "rows[1].agent", "equals": "codex" }, { "path": "rows[1].attempt", "equals": 2 }] },
         { "step": "EX-15.1", "method": "GET", "url": "/api/tasks/T-231/messages", "expected_status": 200, "assert": [{ "path": "body.items[*].text", "contains": "native binary missing" }] }
       ]
     },
@@ -290,7 +287,7 @@
         { "step": "EX-32.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-231" }, "assert": [{ "path": "body.state", "equals": "failed" }] } },
         { "step": "EX-32.1", "method": "GET", "url": "/api/inbox", "expected_status": 200, "assert": [{ "path": "body.failures[0].key", "equals": "T-231" }] },
         { "step": "EX-32.1", "method": "POST", "url": "/api/tasks/T-231/retry", "body": { "mode": "switch_agent" }, "expected_status": 202, "assert": [{ "path": "body.state", "in": ["queued", "running"] }] },
-        { "step": "EX-32.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "assert": [{ "path": "payload.agent", "equals": "claude" }, { "path": "payload.cwd", "equals": "/tmp/fx/wt/T-231-ngram" }] },
+        { "step": "EX-32.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.start" }, "assert": [{ "path": "payload.agent", "equals": "codex" }, { "path": "payload.cwd", "equals": "/tmp/fx/wt/T-231-ngram" }] },
         { "step": "EX-32.1", "action": "db.assert", "args": { "sql": "select count(*) as n from sessions where runtime_id=(select id from runtimes where name='dev') and state in ('planned','running','waiting_input')" }, "assert": [{ "path": "rows[0].n", "equals": 1 }] }
       ]
     },

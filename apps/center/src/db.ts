@@ -31,6 +31,16 @@ export class Db {
       c.release();
     }
   }
+  /** 锁住 runtime 行，把 Codex 名额检查与 planned 会话预约放在同一事务中。 */
+  async reserveCodex<T>(runtimeId: string, defaultCap: number, reserve: (client: pg.PoolClient) => Promise<T>): Promise<T | null> {
+    return this.tx(async (c) => {
+      const rt = await this.one<{ agents: Record<string, { maxConcurrent?: number }> }>('SELECT agents FROM runtimes WHERE id=$1 FOR UPDATE', [runtimeId], c);
+      if (!rt?.agents?.codex) return null;
+      const cap = Number(rt.agents.codex.maxConcurrent ?? defaultCap);
+      const n = Number((await this.one<{ n: string }>(`SELECT count(*) AS n FROM sessions WHERE runtime_id=$1 AND agent='codex' AND state IN ('planned','running','waiting_input')`, [runtimeId], c))?.n ?? 0);
+      return n < cap ? reserve(c) : null;
+    });
+  }
   async close() { await this.pool.end(); }
 
   /**

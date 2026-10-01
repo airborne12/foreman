@@ -11,12 +11,12 @@ import { bootTestApp, http, TEST_TOKEN, type TestApp } from '../helpers/testApp.
 import { FakeWorker } from '../helpers/fakeWorker.js';
 import { seedTask, seedRuntime, seedSession, seedWorktree } from '../helpers/seed.js';
 import { Intake } from '../../apps/center/src/domain/intake.js';
-import { claudeAdapter } from '../../apps/worker/src/sessions.js';
+import { codexAdapter } from '../../apps/worker/src/sessions.js';
 import type { Envelope } from '@foreman/shared';
 
 let app: TestApp;
 const workers: FakeWorker[] = [];
-const REG = { labels: ['agent:claude', 'agent:codex', 'build:doris'], agents: { claude: { bin: 'fake-claude', maxConcurrent: 3 }, codex: { bin: 'fake-codex', maxConcurrent: 3 } } };
+const REG = { labels: ['agent:codex', 'build:doris'], agents: { codex: { bin: 'fake-codex', maxConcurrent: 3 } } };
 async function fw(name = 'dev') {
   const w = new FakeWorker(app.ws, TEST_TOKEN); await w.connect(); workers.push(w);
   const ack = await w.register({ name, ...REG }); if (ack.type !== 'register.ack') throw new Error(JSON.stringify(ack.payload));
@@ -26,9 +26,9 @@ async function fw(name = 'dev') {
 async function running(opts: { key?: string; state?: string; sessionState?: string; agentSessionId?: string; online?: boolean } = {}) {
   const key = opts.key ?? 'T-231';
   if (!opts.online) await seedRuntime(app.db, { name: 'dev', labels: REG.labels, agents: REG.agents });
-  const taskId = await seedTask(app.db, { key, state: opts.state ?? 'running', runtime: 'dev', agent: 'claude', authorAgent: 'claude' });
+  const taskId = await seedTask(app.db, { key, state: opts.state ?? 'running', runtime: 'dev', agent: 'codex', authorAgent: 'codex' });
   const wt = await seedWorktree(app.db, { taskId, runtime: 'dev', path: `/tmp/fx/wt/${key}` });
-  const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'claude', kind: 'implement', state: opts.sessionState ?? 'running', agentSessionId: opts.agentSessionId ?? 'cl-231', cwd: `/tmp/fx/wt/${key}`, startedAt: app.clock.now() });
+  const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'codex', kind: 'implement', state: opts.sessionState ?? 'running', agentSessionId: opts.agentSessionId ?? 'cl-231', cwd: `/tmp/fx/wt/${key}`, startedAt: app.clock.now() });
   const token = Intake.newToken();
   await app.db.query('UPDATE sessions SET worktree_id=$2, mcp_token_hash=$3 WHERE id=$1', [sid, wt, Intake.hash(token)]);
   return { taskId, sid, token, key };
@@ -222,40 +222,16 @@ describe('S07 1.3 完成、续接、停止、无进展', () => {
     expect((await app.tasks.byKey('T-231')).state).toBe('delivered');
     expect(await app.db.one(`SELECT 1 FROM events WHERE type='task.updated' AND task_id=$1`, [taskId])).not.toBeNull();
   }));
-  it('UT-S07-22: 续接先 stop <短 id> 再 --bg --resume <完整 UUID>', () => withReport('UT-S07-22', async () => {
-    const dir = mkdtempSync(resolve(tmpdir(), 'fclaude-'));
-    const bin = resolve(dir, 'claude'); const log = resolve(dir, 'args.log');
-    writeFileSync(bin, `#!/bin/sh\necho "$@" >> "${log}"\nif [ "$1" = "agents" ]; then echo '[]'; fi\nif [ "$1" = "--bg" ]; then echo "backgrounded · 3f171235"; fi\n`); chmodSync(bin, 0o755);
-    const uuid = '3f171235-0ea7-40ae-b928-49c2b4445518';
-    const s = { sessionId: crypto.randomUUID(), agent: 'claude', agentSessionId: uuid, shortId: '3f171235', pid: null, cwd: dir, logFile: resolve(dir, 'session.log'), state: 'done' as 'done' | 'running' | 'failed' | 'stopped' };
-    await claudeAdapter.resume(s, '顺便改一下', bin, () => undefined, { pollMs: 3_600_000 });
-    const calls = readFileSync(log, 'utf8').split('\n');
-    expect(calls.indexOf('stop 3f171235')).toBeGreaterThanOrEqual(0);
-    expect(calls.indexOf(`--bg --resume ${uuid} 顺便改一下`)).toBeGreaterThan(calls.indexOf('stop 3f171235'));
-    expect(s.state).toBe('running');
-    s.state = 'stopped';
-    // 空闲进程没停掉时 claude 会开副本 → 视为续接失败
-    writeFileSync(bin, `#!/bin/sh\nif [ "$1" = "--bg" ]; then echo "note: session 3f171235 is already running in the background, so this started a copy as 73969ae8."; fi\n`);
-    await expect(claudeAdapter.resume({ ...s, state: 'done' }, '再改', bin, () => undefined, { pollMs: 3_600_000 })).rejects.toThrow(/副本/);
+  it('UT-S07-22: Codex 按原线程 UUID 续接', () => withReport('UT-S07-22', async () => {
+    const dir = mkdtempSync(resolve(tmpdir(), 'codex-resume-')); const bin = resolve(dir, 'codex'); const log = resolve(dir, 'args.json');
+    writeFileSync(bin, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)));`); chmodSync(bin, 0o755);
+    const uuid = crypto.randomUUID();
+    const s = { sessionId: crypto.randomUUID(), agent: 'codex', agentSessionId: uuid, pid: null, cwd: dir, logFile: resolve(dir, 'session.log'), state: 'done' as 'done' | 'running' | 'failed' | 'stopped' };
+    await new Promise<void>((res) => { void codexAdapter.resume(s, '顺便改一下', bin, () => res()); });
+    const calls = JSON.parse(readFileSync(log, 'utf8'));
+    expect(calls.slice(0, 2)).toEqual(['exec', 'resume']); expect(calls.slice(-2)).toEqual([uuid, '顺便改一下']); expect(s.state).toBe('done');
   }));
-  it('UT-S07-29: 轮询 blocked 上报一次需要输入，done 时先 stop 再报完成；中心对 source=poll 同样推断问题', () => withReport('UT-S07-29', async () => {
-    const dir = mkdtempSync(resolve(tmpdir(), 'fclaude-'));
-    const bin = resolve(dir, 'claude'); const log = resolve(dir, 'args.log'); const n = resolve(dir, 'n');
-    const uuid = '3f171235-0ea7-40ae-b928-49c2b4445518';
-    writeFileSync(bin, [
-      '#!/bin/sh', `echo "$@" >> "${log}"`,
-      'case "$1" in',
-      '  --bg) echo "backgrounded · 3f171235 · T-231-implement";;',
-      `  agents) c=$(cat "${n}" 2>/dev/null || echo 0); c=$((c+1)); echo $c > "${n}"; if [ $c -le 3 ]; then echo '[{"id":"3f171235","sessionId":"${uuid}","state":"blocked","status":"waiting"}]'; elif [ $c -le 4 ]; then echo '[{"id":"3f171235","sessionId":"${uuid}","state":"working","status":"busy"}]'; else echo '[{"id":"3f171235","sessionId":"${uuid}","state":"blocked","status":"idle"}]'; fi;;`,
-      'esac', '',
-    ].join('\n')); chmodSync(bin, 0o755);
-    let waits = 0;
-    const exited = new Promise<number | null>((res) => {
-      void claudeAdapter.start({ sessionId: crypto.randomUUID(), taskKey: 'T-231', kind: 'implement', agent: 'claude', prompt: 'p', cwd: dir, name: 'T-231-implement', mcp: { url: 'http://127.0.0.1:7801/mcp', token: 't' } }, bin, (code) => res(code), { pollMs: 50, onWaiting: () => { waits += 1; } });
-    });
-    expect(await exited).toBe(0);
-    expect(waits).toBe(1);
-    expect(readFileSync(log, 'utf8').split('\n')).toContain('stop 3f171235');
+  it('UT-S07-29: 兼容旧 worker 的输入等待事件，中心从日志推断问题', () => withReport('UT-S07-29', async () => {
     // 中心：source=poll 的 waiting_input 也按 EX-19.1 从日志推断问题
     const w = await fw();
     const { sid, taskId } = await running({ online: true });

@@ -7,22 +7,21 @@
   "auth": { "panelToken": "{{env.FOREMAN_PANEL_TOKEN}}", "workerToken": "{{env.FOREMAN_TOKEN}}" },
   "dependencies": [
     { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "FOREMAN_LARK_CLI 指向假 lark-cli：event +subscribe 回放 NDJSON，im 子命令写 JSON 文件", "handle": "lark" },
-    { "dependency": "Claude Code CLI", "strategy": "mock-service", "config": "假 claude 脚本模拟 --bg / agents --json / logs / --bg --resume，并按时间线调用 MCP 工具", "handle": "claude" },
     { "dependency": "Codex CLI", "strategy": "mock-service", "config": "假 codex 脚本模拟 exec / exec resume", "handle": "codex" }
   ],
   "presets": {
     "clock": [{ "step": "setup", "action": "clock.freeze" }],
     "dev-online": [
-      { "step": "setup", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": [] } }
+      { "step": "setup", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": [] } }
     ],
     "center-online": [
-      { "step": "setup", "action": "runtime.register", "args": { "name": "center", "transport": "local", "labels": ["agent:claude", "agent:codex", "text"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] } }
+      { "step": "setup", "action": "runtime.register", "args": { "name": "center", "transport": "local", "labels": ["agent:codex", "text"], "agents": { "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] } }
     ],
     "lark-context": [
       { "step": "setup", "action": "mock.set", "mock": { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "fake lark-cli messages-get/list" }, "args": { "handle": "lark", "owner": "ou_owner", "botOpenId": "ou_bot", "chats": { "oc_index": { "name": "Doris 内核-索引", "messages": "{{fixture:lark.messages(chat='oc_index', count=45, target='om_target')}}" } } } }
     ],
-    "claude-triage-guess": [
-      { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "get_task" }, { "tool": "deliver", "arguments": { "artifacts": [{ "kind": "triage", "tier": "fix", "effort": "small", "repo": { "name": "selectdb/selectdb-core", "confidence": 0.82 }, "suggestedPath": "透传 timeout", "codeLocations": [{ "file": "be/src/olap/rowset/segment_v2/ngram_index_reader.cpp", "line": 88 }] }] } }, { "exit": 0 }] } }
+    "codex-triage-guess": [
+      { "step": "setup", "action": "mock.set", "args": { "handle": "codex", "script": [{ "tool": "get_task" }, { "tool": "deliver", "arguments": { "artifacts": [{ "kind": "triage", "tier": "fix", "effort": "small", "repo": { "name": "selectdb/selectdb-core", "confidence": 0.82 }, "suggestedPath": "透传 timeout", "codeLocations": [{ "file": "be/src/olap/rowset/segment_v2/ngram_index_reader.cpp", "line": 88 }] }] } }, { "exit": 0 }] } }
     ]
   },
   "cases": [
@@ -31,7 +30,7 @@
       "title": "群消息打 📌 入库并走到分流卡",
       "covers": "Step 1→17（含 S01 Step 12→31）",
       "kind": "main",
-      "use": ["clock", "dev-online", "lark-context", "claude-triage-guess"],
+      "use": ["clock", "dev-online", "lark-context", "codex-triage-guess"],
       "steps": [
         { "step": "Step 1-2", "action": "mock.emit", "mock": { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "回放 reaction 事件" }, "args": { "handle": "lark", "event": { "type": "im.message.reaction.created_v1", "event_id": "evt-1", "message_id": "om_target", "chat_id": "oc_index", "operator_type": "user", "operator_open_id": "ou_owner", "emoji": "PUSHPIN" } } },
         { "step": "Step 12-14", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "match": { "message_id": "om_target", "text": "已收录为 T-" }, "timeoutMs": 5000 } },
@@ -50,7 +49,7 @@
       "title": "@机器人引用消息派活",
       "covers": "Step 1→17",
       "kind": "main",
-      "use": ["clock", "dev-online", "lark-context", "claude-triage-guess"],
+      "use": ["clock", "dev-online", "lark-context", "codex-triage-guess"],
       "steps": [
         { "step": "Step 1-2", "action": "mock.emit", "args": { "handle": "lark", "event": { "type": "im.message.receive_v1", "event_id": "evt-2", "message_id": "om_mention", "chat_id": "oc_index", "operator_type": "user", "sender_open_id": "ou_owner", "mentions": ["ou_bot"], "text": "@foreman 看一下这个超时", "parent_id": "om_target" } } },
         { "step": "Step 12-14", "action": "mock.expect", "args": { "handle": "lark", "kind": "messages-reply", "match": { "text": "已收录为 T-" }, "timeoutMs": 5000 } },
@@ -66,7 +65,7 @@
       "use": ["clock", "center-online", "lark-context"],
       "setup": [
         { "step": "setup", "action": "mock.set", "args": { "handle": "lark", "recentSince": "{{now-1h}}", "recent": "{{fixture:lark.messages(chat='oc_dm', count=5)}}" } },
-        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "deliver", "arguments": { "artifacts": [{ "kind": "candidates", "candidates": [{ "messageId": "om_c1", "reason": "疑似需求", "confidence": 0.7 }, { "messageId": "om_c2", "reason": "疑似需求", "confidence": 0.65 }] }] } }, { "exit": 0 }] } }
+        { "step": "setup", "action": "mock.set", "args": { "handle": "codex", "script": [{ "tool": "deliver", "arguments": { "artifacts": [{ "kind": "candidates", "candidates": [{ "messageId": "om_c1", "reason": "疑似需求", "confidence": 0.7 }, { "messageId": "om_c2", "reason": "疑似需求", "confidence": 0.65 }] }] } }, { "exit": 0 }] } }
       ],
       "steps": [
         { "step": "Step 18", "action": "scheduler.tick", "args": { "job": "candidate-scan" } },
@@ -83,7 +82,7 @@
       "title": "候选一键入库走主路径",
       "covers": "Step 30 → Step 5",
       "kind": "main",
-      "use": ["clock", "center-online", "dev-online", "lark-context", "claude-triage-guess"],
+      "use": ["clock", "center-online", "dev-online", "lark-context", "codex-triage-guess"],
       "setup": [
         { "step": "setup", "action": "db.seed", "args": { "table": "candidates", "rows": [{ "source_type": "feishu", "message_id": "om_target", "chat_id": "oc_index", "text": "客户那边 ngram 索引 LIKE 查询偶发超时", "reason": "疑似需求", "confidence": 0.7, "status": "open" }] } }
       ],
@@ -112,7 +111,7 @@
       "title": "同一消息重复打表情回已存在",
       "covers": "EX-5.1",
       "kind": "exception",
-      "use": ["clock", "dev-online", "lark-context", "claude-triage-guess"],
+      "use": ["clock", "dev-online", "lark-context", "codex-triage-guess"],
       "steps": [
         { "step": "Step 1-17", "action": "note", "args": { "text": "include ST-S02-01 Step 1–4（入库完成）" } },
         { "step": "Step 11", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/channels/feishu/threads" }, "assert": [{ "path": "body.total", "equals": 1 }] }, "extract": { "taskKey": "body.items[0].key" } },
@@ -126,7 +125,7 @@
       "title": "重复标记且原任务 paused 时出现恢复条目",
       "covers": "EX-5.1 副作用",
       "kind": "exception",
-      "use": ["clock", "dev-online", "lark-context", "claude-triage-guess"],
+      "use": ["clock", "dev-online", "lark-context", "codex-triage-guess"],
       "steps": [
         { "step": "Step 1-17", "action": "note", "args": { "text": "include ST-S02-01 Step 1–4" } },
         { "step": "Step 11", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/channels/feishu/threads" }, "assert": [{ "path": "body.total", "equals": 1 }] }, "extract": { "taskKey": "body.items[0].key" } },
@@ -141,7 +140,7 @@
       "title": "上下文读取失败仍建任务并稍后补齐",
       "covers": "EX-8.1",
       "kind": "exception",
-      "use": ["clock", "dev-online", "lark-context", "claude-triage-guess"],
+      "use": ["clock", "dev-online", "lark-context", "codex-triage-guess"],
       "setup": [
         { "step": "setup", "action": "mock.set", "mock": { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "messages-get 首次失败" }, "args": { "handle": "lark", "failGetOnce": true } }
       ],
@@ -160,7 +159,7 @@
       "title": "回帖失败不影响任务且标注未送达",
       "covers": "EX-13.1",
       "kind": "exception",
-      "use": ["clock", "dev-online", "lark-context", "claude-triage-guess"],
+      "use": ["clock", "dev-online", "lark-context", "codex-triage-guess"],
       "setup": [
         { "step": "setup", "action": "mock.set", "args": { "handle": "lark", "failReply": true } }
       ],
@@ -179,7 +178,7 @@
       "kind": "exception",
       "use": ["clock", "center-online", "lark-context"],
       "setup": [
-        { "step": "setup", "action": "db.seed", "args": { "table": "sessions", "rows": "{{fixture:sessions.running(runtime='center', agent='claude', count=3)}}" } },
+        { "step": "setup", "action": "db.seed", "args": { "table": "sessions", "rows": "{{fixture:sessions.running(runtime='center', agent='codex', count=3)}}" } },
         { "step": "setup", "action": "db.seed", "args": { "table": "sessions", "rows": "{{fixture:sessions.running(runtime='center', agent='codex', count=3)}}" } }
       ],
       "steps": [
@@ -196,7 +195,7 @@
       "kind": "exception",
       "use": ["clock", "center-online", "lark-context"],
       "setup": [
-        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "sleepForever": true }] } }
+        { "step": "setup", "action": "mock.set", "args": { "handle": "codex", "script": [{ "sleepForever": true }] } }
       ],
       "steps": [
         { "step": "Step 18-25 ×3", "action": "scheduler.tick", "args": { "job": "candidate-scan" } },

@@ -43,9 +43,9 @@ describe('S06 1.5 决定后的承接（等待者已不在）', () => {
   it('UT-S06-33: 否决且没有等待者时，理由与上下文进入频道并由调度员接手', () => withReport('UT-S06-33', async () => {
     // 必须是真实连上的 runtime：只往表里 seed 一行的话 hub 认为它不在线，拉不起调度员
     const w = new FakeWorker(app.ws, TEST_TOKEN); await w.connect(); workers.push(w);
-    await w.register({ name: 'center', labels: ['text'], agents: { claude: { bin: 'fake-claude', maxConcurrent: 3 } } });
+    await w.register({ name: 'center', labels: ['text'], agents: { codex: { bin: 'fake-codex', maxConcurrent: 3 } } });
     await new Promise((r) => setTimeout(r, 100));
-    const sid = await seedSession(app.db, { taskId, runtime: 'center', agent: 'claude', kind: 'implement', state: 'done' });
+    const sid = await seedSession(app.db, { taskId, runtime: 'center', agent: 'codex', kind: 'implement', state: 'done' });
     const a = await request('create_pr', '推送 foreman/T-231 并建 PR', { sessionId: sid, executor: 'agent' });
     const r = await decide(a.key, { decision: 'reject', bodyHash: a.body_hash, comment: '推送目标应该是我自己的 fork' });
     expect(r.status).toBe(200);
@@ -63,7 +63,7 @@ describe('S06 1.5 决定后的承接（等待者已不在）', () => {
   it('UT-S06-34: 批准但等待者已不在且会话不可续接时，同样进入频道', () => withReport('UT-S06-34', async () => {
     // 只承接要 agent 接手的动作；会话已被判失联（不可续接）
     await seedRuntime(app.db, { name: 'dev' });
-    const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'claude', kind: 'implement', state: 'lost' });
+    const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'codex', kind: 'implement', state: 'lost' });
     const a = await request('create_pr', '推送并建 PR', { sessionId: sid, executor: 'agent' });
     const r = await decide(a.key, { decision: 'approve', bodyHash: a.body_hash });
     expect(r.status).toBe(200);

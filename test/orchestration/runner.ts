@@ -64,7 +64,7 @@ export class Runner {
     this.sshModeFile = resolve(this.sshDir, 'mode');
     writeFileSync(this.sshModeFile, 'forward-local');
     const ssh = writeFakeSsh(this.sshDir);
-    this.binsDir = writeFakeBins(mkdtempSync(resolve(tmpdir(), 'fbins-')), { claude: { version: '2.1.260' }, opencode: { version: '0.9.2' }, codex: { fail: true }, 'fake-claude': {}, 'fake-codex': {} });
+    this.binsDir = writeFakeBins(mkdtempSync(resolve(tmpdir(), 'fbins-')), { codex: { version: '0.158.0' }, 'fake-codex': {} });
     process.env.FAKE_SSH_MODE_FILE = this.sshModeFile;
     process.env.FAKE_SSH_LISTEN = String(this.sshListen);
     const port = await freePort();
@@ -451,9 +451,9 @@ export class Runner {
           const ok = h.cond?.any === true || (h.cond?.contains ? text.includes(String(h.cond.contains)) : true);
           if (ok) { this.resumeHandlers.delete(String(env.payload.sessionId)); this.vars.resumeText = text; void this.runScriptSteps(String(env.payload.sessionId), h.then); }
         }
-        // 假 claude 记录续接参数：--bg --resume <agentSessionId> "<text>"（S07 Step 40）
+        // 记录 Codex exec resume 的原线程 ID 与追加文本（S07 Step 40）。
         void this.app.db.one<any>('SELECT agent, agent_session_id FROM sessions WHERE id=$1', [env.payload.sessionId]).then((s) => {
-          this.mockCalls.push({ handle: s?.agent ?? 'claude', kind: 'exec', args: `--bg --resume ${s?.agent_session_id ?? ''} "${String(env.payload.text ?? '')}"`, ok: true });
+          this.mockCalls.push({ handle: s?.agent ?? 'codex', kind: 'exec', args: `exec resume ${s?.agent_session_id ?? ''} "${String(env.payload.text ?? '')}"`, ok: true });
         }).catch(() => undefined);
         return;
       }
@@ -609,7 +609,7 @@ export class Runner {
         return;
       }
       default: {
-        // 通用 mock 状态（jira / claude / codex / gh）：支持 issues[0].assignee 这类路径键
+        // 通用 mock 状态（jira / codex / gh）：支持 issues[0].assignee 这类路径键
         const cur = (this.vars[`mock.${a.handle}`] as Record<string, unknown> | undefined) ?? {};
         for (const [k, v] of Object.entries(a)) { if (k === 'handle') continue; setPath(cur, k, v); }
         this.vars[`mock.${a.handle}`] = cur;
@@ -631,7 +631,7 @@ export class Runner {
         const out = this.procs.filter((p) => p.name === 'cli').map((p) => p.out).join('') + (this.lastCliOutput?.stdout ?? '');
         return a.kind === 'stdout' && out.includes(a.match?.text ?? '') ? { text: out } : null;
       }
-      // 其他 mock（gh / jira / claude / codex）：按 handle + kind + match 子串查调用记录
+      // 其他 mock（gh / jira / codex / codex）：按 handle + kind + match 子串查调用记录
       return this.mockCalls.find((c) => c.handle === a.handle && c.kind === a.kind && Object.entries(a.match ?? {}).every(([k, v]) => String((c as any)[k] ?? '').includes(String(v)))) ?? null;
     };
     while (Date.now() < deadline) {

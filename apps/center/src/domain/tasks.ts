@@ -26,7 +26,7 @@ export class Tasks {
     const candidates = [];
     for (const r of rts.rows) {
       const running = await this.runtimes.runningByAgent(r.id);
-      candidates.push({ name: r.name, online: r.online, labels: r.labels as string[], runningSessions: Object.values(running).reduce((a: number, b: any) => a + Number(b), 0), repos: r.repos && Object.keys(r.repos).length ? Object.keys(r.repos) : undefined });
+      candidates.push({ name: r.name, online: r.online && !!r.agents?.codex, labels: r.labels as string[], runningSessions: Object.values(running).reduce((a: number, b: any) => a + Number(b), 0), repos: r.repos && Object.keys(r.repos).length ? Object.keys(r.repos) : undefined });
     }
     return routeTask({ kind: routingCategory(kind), rules: this.cfg.routing, runtimes: candidates, override, repo });
   }

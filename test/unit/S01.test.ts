@@ -16,7 +16,7 @@ const workers: FakeWorker[] = [];
 async function fw(name: string, reg?: Record<string, unknown>) {
   const w = new FakeWorker(app.ws, TEST_TOKEN);
   await w.connect(); workers.push(w);
-  const ack = await w.register({ name, labels: ['vpn:jira', 'build:doris', 'agent:claude', 'agent:codex'], agents: { claude: { bin: 'fake-claude', maxConcurrent: 3 }, codex: { bin: 'fake-codex', maxConcurrent: 3 } }, capabilities: ['jira-poll', 'jira-lookup'], ...reg });
+  const ack = await w.register({ name, labels: ['vpn:jira', 'build:doris', 'agent:codex'], agents: { codex: { bin: 'fake-codex', maxConcurrent: 3 } }, capabilities: ['jira-poll', 'jira-lookup'], ...reg });
   if (ack.type !== 'register.ack') throw new Error(`注册失败 ${JSON.stringify(ack.payload)}`);
   return w;
 }
@@ -24,9 +24,9 @@ const issue = (over: Partial<JiraIssue> = {}): JiraIssue => ({ key: 'CIR-20001',
 
 /** 以任务级 token 调 MCP */
 async function mcpSession(taskKey: string) {
-  await seedRuntime(app.db, { name: 'dev', labels: ['build:doris', 'agent:claude'] });
+  await seedRuntime(app.db, { name: 'dev', labels: ['build:doris'] });
   const taskId = await seedTask(app.db, { key: taskKey, state: 'triaging', runtime: 'dev' });
-  const sessionId = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'claude', kind: 'code_locate' });
+  const sessionId = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'codex', kind: 'code_locate' });
   const token = Intake.newToken();
   await app.db.query('UPDATE sessions SET mcp_token_hash=$2 WHERE id=$1', [sessionId, Intake.hash(token)]);
   return { taskId, sessionId, token };
@@ -231,7 +231,7 @@ describe('S01 1.4 降级与通知', () => {
   }));
 
   it('UT-S01-23: 分流结论给出的目标分支落进分流卡与任务，并出现在拍板卡上', () => withReport('UT-S01-23', async () => {
-    await seedRuntime(app.db, { name: 'dev', labels: ['build:doris', 'agent:claude'] });
+    await seedRuntime(app.db, { name: 'dev', labels: ['build:doris'] });
     const taskId = await seedTask(app.db, { key: 'T-720', state: 'triaging', runtime: 'dev' });
     await app.intake.emitTriage(taskId, null, { tier: 'fix', effort: 'small', targetBranch: 'branch-selectdb-doris-4.1', codeLocations: [{ file: 'be/src/exprs/vsearch.cpp', line: 193, symbol: 'f', why: 'x' }] });
     expect((await app.db.one<any>('SELECT base_branch FROM triage_cards WHERE task_id=$1', [taskId])).base_branch).toBe('branch-selectdb-doris-4.1');
@@ -252,12 +252,12 @@ describe('S01 1.4 降级与通知', () => {
     const creates: string[] = [];
     const w = new FakeWorker(app.ws, TEST_TOKEN); await w.connect(); workers.push(w);
     w.onAny((e) => { if (e.type === 'worktree.create') creates.push(String(e.payload.taskKey)); });
-    await w.register({ name: 'dev', labels: ['build:doris', 'agent:claude', 'agent:codex'], agents: { claude: { bin: 'fake-claude', maxConcurrent: 1 }, codex: { bin: 'fake-codex', maxConcurrent: 1 } } });
+    await w.register({ name: 'dev', labels: ['build:doris', 'agent:codex'], agents: { codex: { bin: 'fake-codex', maxConcurrent: 2 } } });
     for (let i = 0; i < 30 && creates.length < 2; i++) await new Promise((r) => setTimeout(r, 100));
     await new Promise((r) => setTimeout(r, 300));
     expect(creates).toHaveLength(2);
     const planned = await app.db.query<any>(`SELECT id, agent FROM sessions WHERE kind='code_locate' AND state='planned' ORDER BY agent`);
-    expect(planned.rows.map((r) => r.agent)).toEqual(['claude', 'codex']);
+    expect(planned.rows.map((r) => r.agent)).toEqual(['codex', 'codex']);
     expect(Number((await app.db.one<any>(`SELECT count(*) AS n FROM jobs WHERE kind='code-locate' AND status='queued'`)).n)).toBe(1);
     await app.dispatch.onSessionState('dev', { sessionId: planned.rows[0].id, state: 'failed', exitCode: 1, failureReason: 'x', source: 'exit' });
     for (let i = 0; i < 30 && creates.length < 3; i++) await new Promise((r) => setTimeout(r, 100));
@@ -266,13 +266,13 @@ describe('S01 1.4 降级与通知', () => {
   }));
 
   it('UT-S01-22: 一直停在 planned 的代码定位也按 15 分钟超时', () => withReport('UT-S01-22', async () => {
-    await seedRuntime(app.db, { name: 'dev', labels: ['build:doris', 'agent:claude'] });
+    await seedRuntime(app.db, { name: 'dev', labels: ['build:doris'] });
     const taskId = await seedTask(app.db, { key: 'T-704', state: 'triaging', runtime: 'dev' });
-    const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'claude', kind: 'code_locate', state: 'planned', startedAt: null });
+    const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'codex', kind: 'code_locate', state: 'planned', startedAt: null });
     await app.db.query(`UPDATE sessions SET created_at=$2, started_at=NULL WHERE id=$1`, [sid, new Date(app.clock.now().getTime() - 16 * 60_000)]);
     // 已交付分流卡但停在 waiting_input：按完成处理，不降级已有卡，关掉钩子推断的问题
     const t2 = await seedTask(app.db, { key: 'T-705', state: 'triaging', runtime: 'dev' });
-    const s2 = await seedSession(app.db, { taskId: t2, runtime: 'dev', agent: 'claude', kind: 'code_locate', state: 'waiting_input', startedAt: new Date(app.clock.now().getTime() - 16 * 60_000) });
+    const s2 = await seedSession(app.db, { taskId: t2, runtime: 'dev', agent: 'codex', kind: 'code_locate', state: 'waiting_input', startedAt: new Date(app.clock.now().getTime() - 16 * 60_000) });
     await app.intake.emitTriage(t2, s2, { tier: 'fix', effort: 'small', codeLocations: [{ path: 'be/src/olap/a.cpp', line: 10, symbol: 'f', why: 'x' }] });
     await app.db.query(`INSERT INTO questions (task_id, session_id, text, origin, status, asked_at, expires_at) VALUES ($1,$2,'✻Brewed for 3m · done','hook','open',$3,$4)`, [t2, s2, app.clock.now(), new Date(app.clock.now().getTime() + 30 * 60_000)]);
     await app.intake.watchCodeLocateTimeouts();

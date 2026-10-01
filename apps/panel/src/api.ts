@@ -87,7 +87,7 @@ export const ACTION_LABEL: Record<string, string> = {
   merge_release: '合入 release', jira_transition_in_progress: 'Jira 转进行中', jira_done: 'Jira 转完成',
   feishu_reply: '飞书回帖', jira_comment: 'Jira 评论',
 };
-export const RETRY_LABEL: Record<string, string> = { retry: '重试', same_agent: '重试', switch_agent: '换一个 agent', fresh_session: '开新会话继续', abandon: '放弃' };
+export const RETRY_LABEL: Record<string, string> = { retry: '重试', same_agent: '重试', switch_agent: '开新 Codex 会话', fresh_session: '开新会话继续', abandon: '放弃' };
 
 /** Jira 优先级归一成 0–3（P0 最急）；认不出的返回 null */
 export function prioRank(p?: string | null): number | null {

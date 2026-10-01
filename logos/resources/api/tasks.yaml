@@ -558,7 +558,7 @@ components:
       description: "任务类型，决定路由；根任务通常 code/analysis/text，子任务 pr/branch/review"
     AgentName:
       type: string
-      enum: [claude, codex, opencode]
+      enum: [codex]
     RepoRef:
       type: object
       required: [name, source]
@@ -807,7 +807,7 @@ components:
           type: string
           enum: [planned, running, waiting_input, done, failed, stopped, lost]
         reachable: { type: boolean, description: "runtime 失联时为 false" }
-        agentSessionId: { type: string, nullable: true, description: "claude --bg 或 codex 的会话 ID" }
+        agentSessionId: { type: string, nullable: true, description: "Codex 线程 ID；历史记录保留原执行器会话 ID" }
         worktreePath: { type: string, nullable: true }
         startedAt: { type: string, format: date-time, nullable: true }
         endedAt: { type: string, format: date-time, nullable: true }

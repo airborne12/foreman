@@ -13,8 +13,8 @@ import type { Envelope } from '@foreman/shared';
 
 let app: TestApp;
 const workers: FakeWorker[] = [];
-const CENTER = { transport: 'local' as const, labels: ['agent:claude', 'agent:codex', 'text'], agents: { claude: { bin: 'fake-claude', maxConcurrent: 3 }, codex: { bin: 'fake-codex', maxConcurrent: 3 } } };
-const DEV = { transport: 'direct' as const, labels: ['agent:claude', 'agent:codex', 'build:doris', 'repo:selectdb/selectdb-core', 'vpn:jira'], agents: { claude: { bin: 'fake-claude', maxConcurrent: 3 }, codex: { bin: 'fake-codex', maxConcurrent: 3 } }, repos: { 'selectdb/selectdb-core': { main: '/tmp/fx/core', worktreeRoot: '/tmp/fx/wt' } }, capabilities: ['jira-lookup'] as string[] };
+const CENTER = { transport: 'local' as const, labels: ['agent:codex', 'text'], agents: { codex: { bin: 'fake-codex', maxConcurrent: 3 } } };
+const DEV = { transport: 'direct' as const, labels: ['agent:codex', 'build:doris', 'repo:selectdb/selectdb-core', 'vpn:jira'], agents: { codex: { bin: 'fake-codex', maxConcurrent: 3 } }, repos: { 'selectdb/selectdb-core': { main: '/tmp/fx/core', worktreeRoot: '/tmp/fx/wt' } }, capabilities: ['jira-lookup'] as string[] };
 
 async function fw(name: string, reg: Record<string, unknown>) {
   const w = new FakeWorker(app.ws, TEST_TOKEN); await w.connect(); workers.push(w);
@@ -28,7 +28,7 @@ const post = (text: string, slug = 'doris-index', extra: Record<string, unknown>
 async function dispatcherSession(slug = 'doris-index') {
   const c = await app.db.one<{ id: string }>('SELECT id FROM channels WHERE slug=$1', [slug]);
   const rid = await runtimeId(app.db, 'center');
-  const s = await app.db.one<{ id: string }>(`INSERT INTO sessions (channel_id, runtime_id, agent, kind, state, prompt, started_at, last_activity_at, created_at, updated_at) VALUES ($1,$2,'claude','dispatcher','running','p',$3,$3,$3,$3) RETURNING id`, [c!.id, rid, app.clock.now()]);
+  const s = await app.db.one<{ id: string }>(`INSERT INTO sessions (channel_id, runtime_id, agent, kind, state, prompt, started_at, last_activity_at, created_at, updated_at) VALUES ($1,$2,'codex','dispatcher','running','p',$3,$3,$3,$3) RETURNING id`, [c!.id, rid, app.clock.now()]);
   const token = Intake.newToken();
   await app.db.query('UPDATE sessions SET mcp_token_hash=$2 WHERE id=$1', [s!.id, Intake.hash(token)]);
   return { sessionId: s!.id, token, channelId: c!.id };
@@ -36,7 +36,7 @@ async function dispatcherSession(slug = 'doris-index') {
 const mcp = (token: string, tool: string, args: Record<string, unknown>) => fetch(app.url + '/mcp', { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: tool, arguments: args } }) }).then((r) => r.json() as Promise<any>);
 /** 造 N 条占满并发的会话 */
 async function fillQuota(runtime: string) {
-  for (const [a, agent] of ['claude', 'codex'].entries()) for (let i = 0; i < 3; i++) {
+  for (const [a, agent] of ['codex', 'codex'].entries()) for (let i = 0; i < 3; i++) {
     const t = await seedTask(app.db, { key: `T-9${a}${i}`, state: 'running', runtime });
     await seedSession(app.db, { taskId: t, runtime, agent, kind: 'implement', state: 'running' });
   }

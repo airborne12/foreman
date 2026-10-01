@@ -266,7 +266,7 @@ components:
         labels:
           type: array
           items: { type: string }
-          example: [agent:claude, agent:codex, build:doris, repo:apache/doris, vpn:jira]
+          example: [agent:codex, build:doris, repo:apache/doris, vpn:jira]
         repos:
           type: array
           items: { type: string }

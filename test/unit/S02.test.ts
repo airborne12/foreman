@@ -12,7 +12,7 @@ import type { FeishuMessage } from '../../apps/center/src/adapters/feishu.js';
 
 let app: TestApp;
 const workers: FakeWorker[] = [];
-const CENTER = { labels: ['agent:claude', 'agent:codex', 'text'], agents: { claude: { bin: 'fake-claude', maxConcurrent: 3 }, codex: { bin: 'fake-codex', maxConcurrent: 3 } }, transport: 'local' as const };
+const CENTER = { labels: ['agent:codex', 'text'], agents: { codex: { bin: 'fake-codex', maxConcurrent: 3 } }, transport: 'local' as const };
 
 async function fw(name: string, reg: Record<string, unknown> = CENTER) {
   const w = new FakeWorker(app.ws, TEST_TOKEN); await w.connect(); workers.push(w);
@@ -169,7 +169,7 @@ describe('S02 1.3 候选扫描', () => {
   }));
   it('UT-S02-17: 候选扫描路由到 text 类型 → center', () => withReport('UT-S02-17', async () => {
     await fw('center');
-    await seedRuntime(app.db, { name: 'dev', labels: ['agent:claude', 'build:doris'] });
+    await seedRuntime(app.db, { name: 'dev', labels: ['build:doris'] });
     const r = await app.feishuIntake.scanCandidates() as any;
     expect(r.started).toBe(true); expect(r.runtime).toBe('center');
     const s = await app.db.one<any>(`SELECT s.kind, r.name FROM sessions s JOIN runtimes r ON r.id=s.runtime_id WHERE s.id=$1`, [r.sessionId]);

@@ -211,7 +211,7 @@ function ApprovalDetail({ a, title, head, runtimes, reload }: { a: any; title: s
     { k: '影响版本', v: (p.versions ?? []).join('、') || 'Jira 未填', missing: !(p.versions ?? []).length },
     { k: '基线分支', v: `${ov.baseBranch ?? p.baseBranch ?? '仓库默认'}${!ov.baseBranch && p.baseSource === 'version' ? '（按版本）' : ''}`, key: 'baseBranch', mono: true },
     ...((p.pickTargets ?? []).length ? [{ k: 'pick', v: (p.pickTargets as string[]).join('、'), mono: true }] : []),
-    { k: '执行', v: `${ov.runtime ?? p.defaultRuntime ?? '按路由'} · ${ov.agent ?? p.defaultAgent ?? '轮换'}`, key: ov.runtime ? 'runtime' : 'agent' },
+    { k: '执行', v: `${ov.runtime ?? p.defaultRuntime ?? '按路由'} · ${ov.agent ?? 'codex'}`, key: ov.runtime ? 'runtime' : 'agent' },
   ] : ([
     ['仓库', p.repo ?? p.publish?.repo], ['源分支', p.head ?? p.publish?.branch], ['目标分支', p.base ?? p.publish?.base], ['推送到', p.pushRemote ?? p.pushUrl ?? p.publish?.pushRemote],
     ['提交', typeof p.commit === 'string' ? p.commit.slice(0, 12) : null],
@@ -291,7 +291,7 @@ function ApprovalDetail({ a, title, head, runtimes, reload }: { a: any; title: s
                   </select></div>
                 <div className="field"><label htmlFor="ov-agent">agent</label>
                   <select id="ov-agent" className="select" value={ov.agent ?? p.defaultAgent ?? ''} onChange={(e) => set('agent', e.target.value)}>
-                    <option value="">按轮换</option>{['claude', 'codex'].map((x) => <option key={x} value={x}>{x}</option>)}
+                    <option value="">Codex（默认）</option><option value="codex">Codex</option>
                   </select></div>
               </div>
               {modified && <div className="row end" style={{ marginTop: 10 }}><Btn className="ghost sm" icon="refresh" onClick={() => setOv({})}>恢复建议值</Btn></div>}
@@ -426,7 +426,6 @@ function FailureDetail({ t, title, head, reload }: { t: any; title: string; head
             <span className="spacer" />
             <Btn className="danger" busy={busy === 'abandon'} disabled={!!busy} onClick={() => retry('abandon')}>放弃</Btn>
             <Btn busy={busy === 'fresh_session'} disabled={!!busy} onClick={() => retry('fresh_session')}>开新会话继续</Btn>
-            <Btn busy={busy === 'switch_agent'} disabled={!!busy} onClick={() => retry('switch_agent')}>换一个 agent</Btn>
             <Btn className="go" icon="refresh" busy={busy === 'same_agent'} disabled={!!busy} onClick={() => retry('same_agent')}>重试</Btn>
           </>
         ) : canReply ? (

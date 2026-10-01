@@ -1,5 +1,5 @@
 /**
- * 实验环境用的模拟 worker —— 不跑真实 agent，不消耗任何 Claude / Codex 额度。
+ * 实验环境用的模拟 worker —— 不跑真实 agent，不消耗任何 Codex 额度。
  *
  * 按剧本说 worker 协议、并以任务级 token 调中心的 MCP，把一条真实链路完整走一遍：
  *   Jira 入库 → 代码定位 → 分流卡拍板 → 实现 / 出方案 → 提问 → 申请建 PR → 交付
@@ -211,8 +211,8 @@ async function runScript(s: Sess) {
 
 type Rt = { name: string; ws?: WebSocket; hb?: NodeJS.Timeout; reg: Record<string, unknown> };
 const RUNTIMES: Rt[] = [
-  { name: 'dev', reg: { transport: 'reverse-tunnel', labels: ['agent:claude', 'agent:codex', 'vpn:jira', 'repo:selectdb/selectdb-core', 'build:doris'], agents: { claude: { bin: 'claude', maxConcurrent: 3 }, codex: { bin: 'codex', maxConcurrent: 3 } }, repos: { 'selectdb/selectdb-core': { main: '/lab/selectdb-core', worktreeRoot: '/lab/wt' } }, capabilities: ['jira-poll', 'jira-lookup', 'gh'] } },
-  { name: 'center', reg: { transport: 'local', labels: ['agent:claude', 'agent:codex', 'text'], agents: { claude: { bin: 'claude', maxConcurrent: 3 }, codex: { bin: 'codex', maxConcurrent: 3 } }, repos: {}, capabilities: [] } },
+  { name: 'dev', reg: { transport: 'reverse-tunnel', labels: ['agent:codex', 'vpn:jira', 'repo:selectdb/selectdb-core', 'build:doris'], agents: { codex: { bin: 'codex', maxConcurrent: 3 } }, repos: { 'selectdb/selectdb-core': { main: '/lab/selectdb-core', worktreeRoot: '/lab/wt' } }, capabilities: ['jira-poll', 'jira-lookup', 'gh'] } },
+  { name: 'center', reg: { transport: 'local', labels: ['agent:codex', 'text'], agents: { codex: { bin: 'codex', maxConcurrent: 3 } }, repos: {}, capabilities: [] } },
 ];
 const rtOf = (name: string) => RUNTIMES.find((r) => r.name === name)!;
 function send(rt: Rt, type: string, payload: Record<string, unknown>, ref?: string) {

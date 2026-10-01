@@ -6,24 +6,23 @@
   "baseUrl": "{{env.CENTER_URL}}",
   "auth": { "panelToken": "{{env.FOREMAN_PANEL_TOKEN}}", "workerToken": "{{env.FOREMAN_TOKEN}}" },
   "dependencies": [
-    { "dependency": "Claude Code CLI", "strategy": "mock-service", "config": "假 claude 脚本作为调度员，按时间线调用 MCP 工具", "handle": "claude" },
-    { "dependency": "Codex CLI", "strategy": "mock-service", "config": "假 codex 脚本", "handle": "codex" },
+    { "dependency": "Codex CLI", "strategy": "mock-service", "config": "假 codex 脚本模拟 exec / exec resume", "handle": "codex" },
     { "dependency": "Jira Server", "strategy": "mock-service", "config": "本地 fake Jira 实现 issue 查询", "handle": "jira" }
   ],
   "presets": {
     "clock": [{ "step": "setup", "action": "clock.freeze" }],
     "center-online": [
-      { "step": "setup", "action": "runtime.register", "args": { "name": "center", "transport": "local", "labels": ["agent:claude", "agent:codex", "text"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] } }
+      { "step": "setup", "action": "runtime.register", "args": { "name": "center", "transport": "local", "labels": ["agent:codex", "text"], "agents": { "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] } }
     ],
     "dev-jira": [
-      { "step": "setup", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core", "vpn:jira"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": ["jira-lookup", "jira-poll"] } },
+      { "step": "setup", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:codex", "build:doris", "repo:selectdb/selectdb-core", "vpn:jira"], "agents": { "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": ["jira-lookup", "jira-poll"] } },
       { "step": "setup", "action": "mock.set", "mock": { "dependency": "Jira Server", "strategy": "mock-service", "config": "fake Jira" }, "args": { "handle": "jira", "issues": [{ "key": "CIR-19418", "summary": "FE 端 show index 语句报错", "project": "CIR", "status": "待办" }, { "key": "CIR-19420", "summary": "compaction 慢", "project": "CIR", "status": "待办" }] } }
     ],
     "channel": [
       { "step": "setup", "action": "note", "args": { "text": "频道 doris-index 由 case 内 POST /api/channels 创建" } }
     ],
     "dispatcher-lookup-propose": [
-      { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "lookup_jira", "arguments": { "key": "{{regex:CIR-\\d+}}" }, "expect": { "found": true } }, { "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "CIR-19418", "sourceTitle": "FE 端 show index 语句报错", "repo": "selectdb/selectdb-core", "repoSource": "mapping", "path": "fix", "pickTargets": ["branch-selectdb-doris-3.1"] } }] } }
+      { "step": "setup", "action": "mock.set", "args": { "handle": "codex", "script": [{ "tool": "lookup_jira", "arguments": { "key": "{{regex:CIR-\\d+}}" }, "expect": { "found": true } }, { "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "CIR-19418", "sourceTitle": "FE 端 show index 语句报错", "repo": "selectdb/selectdb-core", "repoSource": "mapping", "path": "fix", "pickTargets": ["branch-selectdb-doris-3.1"] } }] } }
     ]
   },
   "cases": [
@@ -113,7 +112,7 @@
       "kind": "exception",
       "use": ["clock", "center-online"],
       "setup": [
-        { "step": "setup", "action": "db.seed", "args": { "table": "sessions", "rows": "{{fixture:sessions.running(runtime='center', agent='claude', count=3)}}" } },
+        { "step": "setup", "action": "db.seed", "args": { "table": "sessions", "rows": "{{fixture:sessions.running(runtime='center', agent='codex', count=3)}}" } },
         { "step": "setup", "action": "db.seed", "args": { "table": "sessions", "rows": "{{fixture:sessions.running(runtime='center', agent='codex', count=3)}}" } }
       ],
       "steps": [
@@ -133,7 +132,7 @@
       "kind": "exception",
       "use": ["clock", "center-online"],
       "setup": [
-        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "lookup_jira", "arguments": { "key": "CIR-19418" }, "expect": { "error": "SOURCE_UNAVAILABLE" } }, { "tool": "ask_clarification", "arguments": { "channel": "doris-index", "text": "暂时查不到 Jira，请确认 CIR-19418 的标题与仓库", "candidates": [] } }] } }
+        { "step": "setup", "action": "mock.set", "args": { "handle": "codex", "script": [{ "tool": "lookup_jira", "arguments": { "key": "CIR-19418" }, "expect": { "error": "SOURCE_UNAVAILABLE" } }, { "tool": "ask_clarification", "arguments": { "channel": "doris-index", "text": "暂时查不到 Jira，请确认 CIR-19418 的标题与仓库", "candidates": [] } }] } }
       ],
       "steps": [
         { "step": "Step 2", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index" }, "expected_status": 201 },
@@ -154,7 +153,7 @@
       "use": ["clock", "center-online", "dev-jira"],
       "setup": [
         { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:tasks.recent(count=5, channel='jira')}}" } },
-        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "lookup_jira", "arguments": { "key": "CIR-99999" }, "expect": { "found": false } }, { "tool": "list_tasks", "arguments": { "recent": 5 } }, { "tool": "ask_clarification", "arguments": { "channel": "doris-index", "text": "没找到 CIR-99999，是这几个吗？", "candidates": "{{fromListTasks:5}}" } }, { "onResume": { "contains": "CIR-20001" }, "then": [{ "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "CIR-20001", "path": "fix", "repo": "selectdb/selectdb-core" } }] }] } }
+        { "step": "setup", "action": "mock.set", "args": { "handle": "codex", "script": [{ "tool": "lookup_jira", "arguments": { "key": "CIR-99999" }, "expect": { "found": false } }, { "tool": "list_tasks", "arguments": { "recent": 5 } }, { "tool": "ask_clarification", "arguments": { "channel": "doris-index", "text": "没找到 CIR-99999，是这几个吗？", "candidates": "{{fromListTasks:5}}" } }, { "onResume": { "contains": "CIR-20001" }, "then": [{ "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "CIR-20001", "path": "fix", "repo": "selectdb/selectdb-core" } }] }] } }
       ],
       "steps": [
         { "step": "Step 2", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index" }, "expected_status": 201 },
@@ -177,7 +176,7 @@
       "kind": "exception",
       "use": ["clock", "center-online", "dev-jira"],
       "setup": [
-        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "lookup_jira", "arguments": { "key": "CIR-19418" } }, { "tool": "lookup_jira", "arguments": { "key": "CIR-19420" } }, { "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "CIR-19418", "path": "fix", "repo": "selectdb/selectdb-core" } }, { "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "CIR-19420", "path": "fix", "repo": "selectdb/selectdb-core" } }] } }
+        { "step": "setup", "action": "mock.set", "args": { "handle": "codex", "script": [{ "tool": "lookup_jira", "arguments": { "key": "CIR-19418" } }, { "tool": "lookup_jira", "arguments": { "key": "CIR-19420" } }, { "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "CIR-19418", "path": "fix", "repo": "selectdb/selectdb-core" } }, { "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "CIR-19420", "path": "fix", "repo": "selectdb/selectdb-core" } }] } }
       ],
       "steps": [
         { "step": "Step 2", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index" }, "expected_status": 201 },
@@ -200,7 +199,7 @@
       "use": ["clock", "center-online", "dev-jira"],
       "setup": [
         { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:tasks.recent(count=3, channel='jira')}}" } },
-        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "tool": "list_tasks", "arguments": { "q": "索引" } }, { "tool": "ask_clarification", "arguments": { "channel": "doris-index", "text": "你指的是哪一个？", "candidates": "{{fromListTasks:3}}" } }, { "onResume": { "any": true }, "then": [{ "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "{{resumeText}}", "path": "fix", "repo": "selectdb/selectdb-core" } }] }] } }
+        { "step": "setup", "action": "mock.set", "args": { "handle": "codex", "script": [{ "tool": "list_tasks", "arguments": { "q": "索引" } }, { "tool": "ask_clarification", "arguments": { "channel": "doris-index", "text": "你指的是哪一个？", "candidates": "{{fromListTasks:3}}" } }, { "onResume": { "any": true }, "then": [{ "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "{{resumeText}}", "path": "fix", "repo": "selectdb/selectdb-core" } }] }] } }
       ],
       "steps": [
         { "step": "Step 2", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index" }, "expected_status": 201 },
@@ -221,7 +220,7 @@
       "kind": "exception",
       "use": ["clock", "center-online", "dev-jira"],
       "setup": [
-        { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "script": [{ "sleepSeconds": 90 }, { "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "CIR-19418", "path": "fix", "repo": "selectdb/selectdb-core" } }] } }
+        { "step": "setup", "action": "mock.set", "args": { "handle": "codex", "script": [{ "sleepSeconds": 90 }, { "tool": "propose_task", "arguments": { "channel": "doris-index", "source": "CIR-19418", "path": "fix", "repo": "selectdb/selectdb-core" } }] } }
       ],
       "steps": [
         { "step": "Step 2", "method": "POST", "url": "/api/channels", "body": { "slug": "doris-index" }, "expected_status": 201 },

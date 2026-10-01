@@ -128,7 +128,7 @@ export async function createApp(config: CenterConfig, opts?: { clock?: Clock; fe
         await intake.emitTriage(s.task_id, s.id, { degraded: true, degradedReason: `代码定位会话失联（${name} 上已不存在），可重新定位` });
         continue;
       }
-      await dispatch.failTask(s.task_id, `会话失联：${name} 上已不存在该会话`, ['retry', 'switch_agent', 'abandon']);
+      await dispatch.failTask(s.task_id, `会话失联：${name} 上已不存在该会话`, ['retry', 'fresh_session', 'abandon']);
       await channels.escalateToChannel(s.task_id, `${t?.key ?? '任务'} 的${s.kind === 'code_locate' ? '代码定位' : ''}会话在 ${name} 上失联（worker 重启或进程退出），已按降级处理。需要的话在这里说一声怎么继续。`, { reason: 'session_lost', sessionKind: s.kind });
     }
   });

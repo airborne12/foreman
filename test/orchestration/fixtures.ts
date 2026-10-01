@@ -45,8 +45,8 @@ export const fixtures: Record<string, (ctx: FixtureCtx, args: Record<string, unk
       name: a.name ?? 'laptop',
       center: { url: a.center ?? ctx.env.CENTER_WS ?? 'ws://127.0.0.1:7801', token: a.token ?? ctx.env.FOREMAN_TOKEN },
       transport: a.transport ?? 'direct',
-      labels: a.labels ?? ['agent:claude'],
-      agents: Object.fromEntries(((a.labels as string[] | undefined) ?? ['agent:claude']).filter((l) => l.startsWith('agent:')).map((l) => [l.slice(6), { bin: `fake-${l.slice(6)}`, maxConcurrent: 3 }])),
+      labels: a.labels ?? ['agent:codex'],
+      agents: Object.fromEntries(((a.labels as string[] | undefined) ?? ['agent:codex']).filter((l) => l.startsWith('agent:')).map((l) => [l.slice(6), { bin: `fake-${l.slice(6)}`, maxConcurrent: 3 }])),
       repos: (a.labels as string[] | undefined)?.includes('build:doris') ? { 'selectdb/selectdb-core': { main: '/tmp/fx/selectdb-core', worktreeRoot: '/tmp/fx/wt' } } : {},
       capabilities: (a.labels as string[] | undefined)?.includes('vpn:jira') ? ['jira-poll', 'jira-lookup'] : [],
       state_file: resolve(dir, 'worker-state.json'),
@@ -74,7 +74,7 @@ export const fixtures: Record<string, (ctx: FixtureCtx, args: Record<string, unk
       const p = resolve(base, key); mkdirSync(p);
       const t = await seedTask(ctx.db, { key, state: 'running', runtime: rt });
       await seedWorktree(ctx.db, { taskId: t, runtime: rt, path: p });
-      await seedSession(ctx.db, { taskId: t, runtime: rt, agent: 'claude' });
+      await seedSession(ctx.db, { taskId: t, runtime: rt, agent: 'codex' });
       rows.push({ taskKey: key, path: p, days: null });
     }
     ctx.vars.__worktrees = rows;
@@ -100,12 +100,12 @@ export const fixtures: Record<string, (ctx: FixtureCtx, args: Record<string, unk
     const [st, ref] = String(a.source ?? 'jira:CIR-1').split(':');
     const key = String(a.key); const tier = String(a.tier ?? 'fix'); const repo = (a.repo as string | null) ?? null;
     const taskId = await seedTask(ctx.db, { key, state: 'pending_decision', kind: String(a.kind ?? 'code'), path: tier, repo, channel: String(a.channel ?? 'jira'), sourceType: st, source: ref });
-    const summaryLine = `档位 ${tier} · 预估 small · 仓库 ${repo ?? '待确认'} · runtime dev · agent claude`;
-    const payload = { taskKey: key, tier, effort: 'small', repo: { name: repo, source: repo ? 'mapping' : 'unresolved', confidence: repo ? 0.9 : 0.5, candidates: repo ? [] : ['apache/doris', 'selectdb/selectdb-core'] }, suggestedPath: '按分流卡执行', codeLocations: [{ file: 'be/src/x.cpp', line: 1, why: 'fixture' }], defaultRuntime: 'dev', defaultAgent: 'claude', degraded: false, degradedReason: null, summaryLine };
+    const summaryLine = `档位 ${tier} · 预估 small · 仓库 ${repo ?? '待确认'} · runtime dev · agent codex`;
+    const payload = { taskKey: key, tier, effort: 'small', repo: { name: repo, source: repo ? 'mapping' : 'unresolved', confidence: repo ? 0.9 : 0.5, candidates: repo ? [] : ['apache/doris', 'selectdb/selectdb-core'] }, suggestedPath: '按分流卡执行', codeLocations: [{ file: 'be/src/x.cpp', line: 1, why: 'fixture' }], defaultRuntime: 'dev', defaultAgent: 'codex', degraded: false, degradedReason: null, summaryLine };
     const body = `分流卡：${summaryLine}\n建议：按分流卡执行`;
     const ap = await ctx.db.one<{ id: string; key: string }>(`INSERT INTO approvals (key, task_id, action_type, status, title, body, body_hash, payload, trust_mode_snapshot, trust_streak_snapshot, expires_at, created_at, updated_at)
       VALUES ('A-' || nextval('approval_key_seq'), $1, 'triage_confirm', 'pending', $2, $3, $4, $5, 'manual', 0, $6, $7, $7) RETURNING id, key`, [taskId, `${key} · ${ref}`, body, sha256(body), JSON.stringify(payload), new Date(ctx.now().getTime() + 30 * 60_000), ctx.now()]);
-    await ctx.db.query(`INSERT INTO triage_cards (task_id, tier, effort, repo_name, repo_confidence, repo_candidates, suggested_path, code_locations, default_runtime, default_agent, degraded, approval_id) VALUES ($1,$2,'small',$3,$4,$5,'按分流卡执行',$6,'dev','claude',false,$7) ON CONFLICT (task_id) DO NOTHING`,
+    await ctx.db.query(`INSERT INTO triage_cards (task_id, tier, effort, repo_name, repo_confidence, repo_candidates, suggested_path, code_locations, default_runtime, default_agent, degraded, approval_id) VALUES ($1,$2,'small',$3,$4,$5,'按分流卡执行',$6,'dev','codex',false,$7) ON CONFLICT (task_id) DO NOTHING`,
       [taskId, tier, repo, repo ? 0.9 : 0.5, payload.repo.candidates, JSON.stringify(payload.codeLocations), ap!.id]);
     const ch = await ctx.db.one<{ channel_id: string }>('SELECT channel_id FROM tasks WHERE id=$1', [taskId]);
     // 时间戳用假时钟（早于后续线程事件 1 秒），保证 items[-1] 是最新事件

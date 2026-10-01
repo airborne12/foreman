@@ -4,7 +4,7 @@ After=network-online.target
 
 [Service]
 # worker 的家目录写死：不用 %h / systemd 实例的 HOME。2026-09-29 开发机账号 home 从 /mnt/disk1 迁到 /mnt/disk14，
-# 在跑的 systemd 实例仍是老 HOME、重登后又变成新 HOME，用 %h 会让配置、会话记录、claude 信任随之漂移。
+# 在跑的 systemd 实例仍是老 HOME、重登后又变成新 HOME，用 %h 会让配置与会话记录随之漂移。
 # __HOME__ 由 scripts/deploy-worker.sh 渲染。
 Environment=HOME=__HOME__
 WorkingDirectory=__HOME__

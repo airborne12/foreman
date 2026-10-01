@@ -24,16 +24,17 @@ export const AgentConfig = z.object({
   bin: z.string(),
   version: z.string().nullable().optional(),
   maxConcurrent: z.number().int().min(1),
-  /** claude --permission-mode（缺省 auto） */
-  permissionMode: z.string().optional(),
-  /** codex sandbox_mode（缺省 workspace-write） */
+  /** Codex sandbox_mode（缺省 workspace-write） */
   sandbox: z.string().optional(),
-  /**
-   * claude --disallowedTools：只收紧、不放权。后台会话没人点确认框，
-   * 与其让危险命令停在确认框上把会话挂死，不如直接禁掉（如 rm、chmod -R 之类）。
-   */
-  disallowedTools: z.array(z.string()).optional(),
 });
+
+/** 旧配置可继续读取，但停用执行器及标签不再注册或参与路由。 */
+export const AgentConfigs = z.preprocess((value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const entries = value as Record<string, unknown>;
+  return entries.codex == null ? {} : { codex: entries.codex };
+}, z.record(AgentConfig));
+export const AgentLabels = z.array(z.string()).transform((labels) => labels.filter((label) => !label.startsWith('agent:') || label === 'agent:codex'));
 
 export const RepoConfig = z.object({
   main: z.string(),
@@ -46,8 +47,8 @@ export const Register = z.object({
   instanceId: z.string().uuid(),
   version: z.string(),
   transport: z.enum(TRANSPORTS),
-  labels: z.array(z.string()),
-  agents: z.record(AgentConfig),
+  labels: AgentLabels,
+  agents: AgentConfigs,
   repos: z.record(RepoConfig),
   disk: DiskInfo.optional(),
   capabilities: z.array(z.enum(['jira-poll', 'jira-lookup', 'gh', 'merge-tree', 'rg', 'git-publish'])).default([]),
@@ -87,7 +88,6 @@ export const WorktreeCreate = z.object({
   buildEnv: z.record(z.string()).optional(),
   contextMarkdown: z.string().optional(),
   taskJson: z.record(z.unknown()).optional(),
-  hooks: z.record(z.unknown()).optional(),
   reuseIfExists: z.boolean().default(true),
   fetchFirst: z.boolean().optional(),
   /** worktree 已存在但基线不对（代码定位阶段按仓库默认建的）→ 按新基线重建；有未提交改动或未推送提交时拒绝 */

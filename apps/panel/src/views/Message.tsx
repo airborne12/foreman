@@ -146,7 +146,7 @@ function FragmentKV({ k, v }: { k: string; v: string }) {
 
 export function Avatar({ who }: { who?: string | null }) {
   const w = (who ?? '').toLowerCase();
-  const cls = w.includes('claude') ? 'claude' : w.includes('codex') ? 'codex' : w === 'user' ? 'user' : '';
-  const label = w === 'user' ? '我' : w.includes('claude') ? 'Cl' : w.includes('codex') ? 'Cx' : <Icon name="bot" size="sm" />;
+  const cls = w.includes('codex') ? 'codex' : w === 'user' ? 'user' : '';
+  const label = w === 'user' ? '我' : w.includes('codex') ? 'Cx' : <Icon name="bot" size="sm" />;
   return <span className={`avatar ${cls}`} aria-hidden="true">{label}</span>;
 }

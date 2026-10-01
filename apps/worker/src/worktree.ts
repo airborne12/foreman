@@ -2,7 +2,7 @@
  * worktree.create 执行（S03 Step 11；worker-channel.yaml WorktreeCreate/WorktreeReady；EX-11.1）
  * - 路径 <worktreeRoot>/<taskKey>；已存在且 reuseIfExists → 直接复用
  * - 分支缺省 foreman/<taskKey>；已存在的分支直接挂载，否则从 baseBranch 新建
- * - 写入 .foreman/context.md、.foreman/task.json、.claude/settings.json（Notification 钩子）
+ * - 写入 .foreman/context.md、.foreman/task.json
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -11,7 +11,7 @@ import { resolve, dirname, basename } from 'node:path';
 
 export interface WorktreeCreateInput {
   taskKey: string; repo: string; baseBranch: string; branchName?: string; buildEnv?: Record<string, string>;
-  contextMarkdown?: string; taskJson?: Record<string, unknown>; hooks?: Record<string, unknown>; reuseIfExists?: boolean; fetchFirst?: boolean;
+  contextMarkdown?: string; taskJson?: Record<string, unknown>; reuseIfExists?: boolean; fetchFirst?: boolean;
   /** 已存在但基线不对时按新基线重建（见 dropForRebase 的安全检查） */
   resetToBase?: boolean;
 }
@@ -127,7 +127,7 @@ export async function excludeForemanDir(path: string, git: GitRunner = realGit) 
 }
 
 /** 上下文文件（每次都刷新，保证 context.md 为最新版本） */
-export function writeContextFiles(path: string, input: Pick<WorktreeCreateInput, 'contextMarkdown' | 'taskJson' | 'hooks' | 'taskKey' | 'buildEnv'>, main?: string) {
+export function writeContextFiles(path: string, input: Pick<WorktreeCreateInput, 'contextMarkdown' | 'taskJson' | 'taskKey' | 'buildEnv'>, main?: string) {
   mkdirSync(resolve(path, '.foreman'), { recursive: true });
   writeFileSync(resolve(path, '.foreman/context.md'), input.contextMarkdown ?? `# ${input.taskKey}\n`);
   writeFileSync(resolve(path, '.foreman/task.json'), JSON.stringify(input.taskJson ?? { key: input.taskKey }, null, 2));
@@ -142,12 +142,4 @@ export function writeContextFiles(path: string, input: Pick<WorktreeCreateInput,
     const keep = (base ?? '').split('\n').filter((l) => l && !keys.some((k) => new RegExp(`^\\s*export\\s+${k}=`).test(l)));
     writeFileSync(envPath, [...keep, ...Object.entries(input.buildEnv ?? {}).map(([k, v]) => `export ${k}=${JSON.stringify(v)}`)].join('\n') + '\n');
   }
-  // 需要输入改由 worker 轮询 claude state=blocked 发现；只有显式传入 hooks 才写 .claude/settings.json
-  if (!input.hooks) return;
-  mkdirSync(resolve(path, '.claude'), { recursive: true });
-  const settingsPath = resolve(path, '.claude/settings.json');
-  let settings: Record<string, unknown> = {};
-  if (existsSync(settingsPath)) { try { settings = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch { settings = {}; } }
-  settings.hooks = { ...((settings.hooks as Record<string, unknown>) ?? {}), ...input.hooks };
-  writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
 }

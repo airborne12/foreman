@@ -12,7 +12,7 @@ tech_stack:
   database: "PostgreSQL 17（中心机已有实例，库名 foreman）"
   orm: "pg（node-postgres）直连 + SQL 迁移；schema.sql 即 0001_init（实现阶段由 Prisma 修订）"
   scheduler: "进程内 croner + events/jobs 表，不使用 Redis"
-  agents: "claude --bg / --bg --resume；codex exec / exec resume；opencode run；全部订阅登录态，禁止 API key 与 claude -p"
+  agents: "仅 Codex CLI：codex exec / exec resume；订阅登录态，禁止 API key；review 使用独立 Codex 会话"
   integrations: "飞书 lark-cli（机器人身份）；Jira REST v2（系统作业在 vpn:jira runtime）；GitHub gh CLI（系统作业）"
   transport: "worker 经 WebSocket 拨中心；开发机走 ssh -R 反向隧道"
   process_manager: "launchd（中心机、笔记本）；systemd --user（开发机）"
@@ -46,21 +46,11 @@ external_dependencies:
     used_in: ["S03", "S04"]
     test_strategy: "mock-service"
     test_config: "假 gh 脚本按参数返回固定 JSON"
-  - name: "Claude Code CLI"
-    provider: "claude（订阅）"
-    used_in: ["S03", "S04", "S07"]
-    test_strategy: "mock-service"
-    test_config: "假 claude 脚本模拟 --bg / agents --json / logs / --bg --resume，并按时间线调用 MCP 工具"
   - name: "Codex CLI"
     provider: "codex（ChatGPT 订阅）"
     used_in: ["S03", "S04", "S07"]
     test_strategy: "mock-service"
     test_config: "假 codex 脚本模拟 exec / exec resume"
-  - name: "OpenCode CLI"
-    provider: "opencode"
-    used_in: ["S03"]
-    test_strategy: "mock-service"
-    test_config: "假 opencode 脚本模拟 run"
   - name: "ssh 反向隧道"
     provider: "ssh / autossh"
     used_in: ["S05"]

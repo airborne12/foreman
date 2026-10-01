@@ -13,12 +13,8 @@ import { Envelope, makeEnvelope, CENTER_TO_WORKER, type WorkerConfig } from '@fo
 import { runGc, diskUsedRatio } from './gc.js';
 import { foremanHome } from './config.js';
 import { gitPublish, GitPublishError, type GitPublishArgs } from './gitPublish.js';
-import { isManagedPath, setClaudeTrust, isUntrustedError, type TrustScope } from './claudeTrust.js';
 
-/**
- * 调度员、无仓库的出方案等文本会话没有 worktree，中心下发的 cwd 是占位的 /tmp。
- * claude 2.1.284 起 --bg 只在被信任的目录里启动，/tmp 不该整个去信任，改到专用目录 ~/.foreman/workspace。
- */
+/** 无仓库会话使用专用工作目录，避免将上下文和日志混入 /tmp。 */
 export function textWorkspace<T extends { cwd: string }>(input: T, home = foremanHome()): T {
   if (input.cwd !== '/tmp') return input;
   const dir = resolve(home, 'workspace');
@@ -91,12 +87,13 @@ export class Worker {
     try { if (existsSync(this.sessionsFile)) rows = JSON.parse(readFileSync(this.sessionsFile, 'utf8')); } catch (e) { this.log(`会话记录读取失败，忽略：${(e as Error).message}`); return; }
     for (const s of rows) {
       if (!s?.sessionId || this.sessions.has(s.sessionId)) continue;
+      if (s.agent !== 'codex' && s.state === 'running') s.state = 'failed';
       this.sessions.set(s.sessionId, s);
       if (s.state !== 'running') continue;
       const adapter = (this.opts.adapters ?? ADAPTERS)[s.agent];
       const bin = this.opts.config.agents[s.agent]?.bin;
       if (adapter?.attach && bin) {
-        adapter.attach(s, bin, (code, err) => this.onSessionExit(s.sessionId, code, err), this.adapterOpts(s.agent, s.sessionId));
+        adapter.attach(s, bin, (code, err) => this.onSessionExit(s.sessionId, code, err), this.adapterOpts(s.agent));
         this.state.sessions[s.agent] = (this.state.sessions[s.agent] ?? 0) + 1;
       }
     }
@@ -155,7 +152,7 @@ export class Worker {
       this.log(`registered as ${this.opts.config.name}\n  transport: ${this.opts.config.transport}\n  labels:    ${this.opts.config.labels.join(', ')}\n  agents:    ${Object.entries(this.opts.config.agents).map(([k, v]) => `${k} 0/${v.maxConcurrent}`).join(', ')}`);
       this.startHeartbeat(ack.heartbeatSeconds * 1000 * (this.opts.backoffScale ?? 1));
       // 重连对账（S05 Step 16）
-      this.send('session.list', { sessions: [...this.sessions.values()].map((s) => ({ sessionId: s.sessionId, agentSessionId: s.agentSessionId, state: s.state })) });
+      this.send('session.list', { sessions: [...this.sessions.values()].filter((s) => s.agent === 'codex').map((s) => ({ sessionId: s.sessionId, agentSessionId: s.agentSessionId, state: s.state })) });
       for (const cmd of ack.pendingCommands) await this.handleCommand(cmd);
       return;
     }
@@ -187,7 +184,7 @@ export class Worker {
       switch (env.type) {
         case 'worktree.gc': {
           const input = CENTER_TO_WORKER['worktree.gc'].parse(env.payload);
-          const result = await runGc(input, { diskPath: this.opts.config.worktree.disk_path, onRemoved: (p) => this.trustClaude(p, false) });
+          const result = await runGc(input, { diskPath: this.opts.config.worktree.disk_path });
           reply = makeEnvelope('worktree.gc.result', result as unknown as Record<string, unknown>, { ref: env.id });
           break;
         }
@@ -218,16 +215,12 @@ export class Worker {
           const adapter = (this.opts.adapters ?? ADAPTERS)[input.agent];
           if (!bin || !adapter) { reply = makeEnvelope('error', { code: 'AGENT_START_FAILED', message: `本 runtime 未配置 agent ${input.agent}`, retryable: false }, { ref: env.id }); break; }
           try {
-            if (input.agent === 'claude') this.trustClaude(input.cwd, true);
-            const start = () => adapter.start(input, bin, (code, err) => this.onSessionExit(input.sessionId, code, err), this.adapterOpts(input.agent, input.sessionId));
-            // 正在运行的 claude 可能用旧内容回写 ~/.claude.json 冲掉刚写的信任：报未信任就补标一次再试
-            const s = await start().catch(async (e) => {
-              if (input.agent !== 'claude' || !isUntrustedError(String((e as Error).message)) || !this.trustClaude(input.cwd, true)) throw e;
-              return start();
-            });
+            const s = await adapter.start(input, bin, (code, err) => this.onSessionExit(input.sessionId, code, err), this.adapterOpts(input.agent));
             this.sessions.set(input.sessionId, s); this.saveSessions();
-            this.state.sessions[input.agent] = (this.state.sessions[input.agent] ?? 0) + 1; this.setState({});
+            this.syncSessionCounts();
             reply = makeEnvelope('session.started', { sessionId: input.sessionId, agentSessionId: s.agentSessionId, startedAt: new Date().toISOString(), pid: s.pid }, { ref: env.id });
+            // 快速退出的会话先回复 started，再补发结束状态；启动期间的回调尚未有会话记录。
+            if (s.state !== 'running') setImmediate(() => this.onSessionExit(s.sessionId, s.exitCode ?? (s.state === 'done' ? 0 : 1), tail(s.logFile, 5)));
           } catch (e) {
             reply = makeEnvelope('error', { code: 'AGENT_START_FAILED', message: String((e as Error).message).slice(0, 500), retryable: e instanceof SessionStartError ? e.retryable : true }, { ref: env.id });
           }
@@ -239,15 +232,14 @@ export class Worker {
           const adapter = s ? (this.opts.adapters ?? ADAPTERS)[s.agent] : null;
           const bin = s ? this.opts.config.agents[s.agent]?.bin : null;
           if (!s || !adapter || !bin) { reply = makeEnvelope('error', { code: 'RESUME_FAILED', message: `会话 ${input.sessionId} 不在本 runtime`, retryable: false }, { ref: env.id }); break; }
-          if (s.agent === 'claude') this.trustClaude(s.cwd, true);
-          try { await adapter.resume(s, input.text, bin, (code, err) => this.onSessionExit(input.sessionId, code, err), this.adapterOpts(s.agent, s.sessionId)); this.saveSessions(); reply = makeEnvelope('session.state', { sessionId: s.sessionId, state: 'running', source: 'poll', observedAt: new Date().toISOString() }, { ref: env.id }); }
-          catch (e) { reply = makeEnvelope('error', { code: 'RESUME_FAILED', message: String((e as Error).message).slice(0, 500), retryable: false }, { ref: env.id }); }
+          try { await adapter.resume(s, input.text, bin, (code, err) => this.onSessionExit(input.sessionId, code, err), this.adapterOpts(s.agent)); this.saveSessions(); this.syncSessionCounts(); reply = makeEnvelope('session.state', { sessionId: s.sessionId, state: 'running', source: 'poll', observedAt: new Date().toISOString() }, { ref: env.id }); }
+          catch (e) { this.saveSessions(); this.syncSessionCounts(); reply = makeEnvelope('error', { code: 'RESUME_FAILED', message: String((e as Error).message).slice(0, 500), retryable: false }, { ref: env.id }); }
           break;
         }
         case 'session.stop': {
           const input = CENTER_TO_WORKER['session.stop'].parse(env.payload);
           const s = this.sessions.get(input.sessionId);
-          if (s) { await ((this.opts.adapters ?? ADAPTERS)[s.agent]?.stop(s, this.opts.config.agents[s.agent]?.bin)); this.decSession(s.agent); this.saveSessions(); }
+          if (s) { await ((this.opts.adapters ?? ADAPTERS)[s.agent]?.stop(s, this.opts.config.agents[s.agent]?.bin)); this.syncSessionCounts(); this.saveSessions(); }
           reply = makeEnvelope('session.state', { sessionId: input.sessionId, state: 'stopped', source: 'poll', observedAt: new Date().toISOString() }, { ref: env.id });
           break;
         }
@@ -256,7 +248,7 @@ export class Worker {
           const s = this.sessions.get(input.sessionId);
           const adapter = s ? (this.opts.adapters ?? ADAPTERS)[s.agent] : null;
           const bin = s ? this.opts.config.agents[s.agent]?.bin : null;
-          // claude 的输出在后台会话里，取 `claude logs`；其余读本地日志文件
+          // 读取 Codex 的本地 JSON 日志，历史会话也能查看已保存的日志。
           const lines = s && adapter?.logs && bin ? await adapter.logs(s, input.limit + 1, bin) : (s && existsSync(s.logFile) ? readFileSync(s.logFile, 'utf8').split('\n') : []);
           reply = makeEnvelope('session.logs.result', { sessionId: input.sessionId, lines: lines.slice(-input.limit), truncated: lines.length > input.limit }, { ref: env.id });
           break;
@@ -303,31 +295,15 @@ export class Worker {
     });
   }
 
-  private decSession(agent: string) { this.state.sessions[agent] = Math.max(0, (this.state.sessions[agent] ?? 0) - 1); this.setState({}); }
-
-  /** worker 自己管理的目录：各仓库 worktreeRoot 之下、文本会话目录 */
-  private trustScope(): TrustScope {
-    return { childrenOf: Object.values(this.opts.config.repos).map((r) => r.worktreeRoot), exact: [resolve(foremanHome(), 'workspace')] };
-  }
-  /** 标记 / 取消 claude 对该目录的信任；非 worker 管理的目录一律不碰。条目被冲掉时再调一次即补回 */
-  private trustClaude(path: string, trusted: boolean): boolean {
-    if (!isManagedPath(path, this.trustScope())) return false;
-    try {
-      const changed = setClaudeTrust(path, trusted);
-      if (changed) this.log(`claude 工作区${trusted ? '已信任' : '已取消信任'}：${path}`);
-      return true;
-    } catch (e) { this.log(`claude 工作区信任写入失败（${path}）：${(e as Error).message}`); return false; }
+  /** 按实际活动会话计数，避免重复停止或续接完成会话误减其他会话的名额。 */
+  private syncSessionCounts() {
+    const counts: Record<string, number> = Object.fromEntries(Object.keys(this.opts.config.agents).map((agent) => [agent, 0]));
+    for (const s of this.sessions.values()) if (s.state === 'running' && s.agent === 'codex') counts.codex = (counts.codex ?? 0) + 1;
+    this.state.sessions = counts; this.setState({});
   }
 
-  private adapterOpts(agent: string, sessionId: string): AdapterOptions {
-    const a = this.opts.config.agents[agent];
-    return { permissionMode: a?.permissionMode, sandbox: a?.sandbox, disallowedTools: a?.disallowedTools, onWaiting: () => this.onSessionWaiting(sessionId) };
-  }
-
-  /** 轮询发现会话在等输入/权限 → session.state waiting_input（source=poll，中心按 EX-19.1 推断问题） */
-  private onSessionWaiting(sessionId: string) {
-    if (!this.sessions.has(sessionId)) return;
-    this.send('session.state', { sessionId, state: 'waiting_input', waitingFor: 'input', source: 'poll', observedAt: new Date().toISOString() });
+  private adapterOpts(agent: string): AdapterOptions {
+    return { sandbox: this.opts.config.agents[agent]?.sandbox };
   }
 
   /** 进程退出 → session.state（source=exit，S03 Step 31） */
@@ -336,7 +312,7 @@ export class Worker {
     if (!s) return;
     if (s.state === 'stopped') return;
     s.state = code === 0 ? 'done' : 'failed'; s.exitCode = code;
-    this.decSession(s.agent); this.saveSessions();
+    this.syncSessionCounts(); this.saveSessions();
     this.send('session.state', { sessionId, state: s.state, source: 'exit', exitCode: code, failureReason: code === 0 ? null : (err || tail(s.logFile, 5)).slice(0, 500), observedAt: new Date().toISOString() });
   }
 

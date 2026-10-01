@@ -1,5 +1,5 @@
 /**
- * 假二进制目录：claude / opencode / git 打印版本；用于 CLI 探测与 doctor。
+ * 假二进制目录：Codex / git 打印版本；用于 CLI 探测与 doctor。
  */
 import { writeFileSync, chmodSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
