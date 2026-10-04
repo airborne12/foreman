@@ -1,5 +1,7 @@
 # foreman 产品设计：runtime 接入与 CLI（M1）
 
+> 2026-10-01 执行器变更：以 `logos/changes/codex-only/proposal.md` 为准，所有定位、实现、review、调度与扫描会话仅使用 Codex。review 使用独立会话；Codex 满额时排队，启动失败用 Codex 新会话重试，旧执行器会话只能查看历史或开新会话。本文原有多执行器轮换、跨执行器 review 与 Claude 专用步骤由此替代。
+
 > 最后更新：2026-09-09
 > 模块：core
 > 覆盖场景：S05（主）；S04 的斜杠命令兜底与 CLI 等价命令；S03 的 worktree 生命周期

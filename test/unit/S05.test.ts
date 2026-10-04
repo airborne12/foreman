@@ -47,10 +47,9 @@ afterAll(async () => { for (const w of workers) w.close(); await new Promise((r)
 beforeEach(async () => { for (const w of workers.splice(0)) w.close(); await http(app, 'POST', '/__test/reset'); });
 
 describe('S05 1.1 worker init 与 doctor', () => {
-  it('UT-S05-01: 探测到 claude 与 git、未探测到 codex 时标签正确', () => withReport('UT-S05-01', () => {
-    const bins = writeFakeBins(mkdtempSync(resolve(tmpdir(), 'fb-')), { claude: { version: '2.1.260' }, git: {}, opencode: {} });
+  it('UT-S05-01: Codex 不可用时不标记 agent:codex，其他工具仍可用', () => withReport('UT-S05-01', () => {
+    const bins = writeFakeBins(mkdtempSync(resolve(tmpdir(), 'fb-')), { codex: { fail: true }, git: {} });
     const p = probe({ env: { PATH: bins, HOME: '/nonexistent' } });
-    expect(p.labels).toContain('agent:claude');
     expect(p.labels).not.toContain('agent:codex');
     expect(p.agents.codex?.ok).toBe(false);
     expect(p.tools.git?.ok).toBe(true);
@@ -66,13 +65,13 @@ describe('S05 1.1 worker init 与 doctor', () => {
 
   it('UT-S05-03: 生成的 worker.yaml 通过 schema 校验且权限 0600', () => withReport('UT-S05-03', async () => {
     const home = mkdtempSync(resolve(tmpdir(), 'fh-'));
-    const bins = writeFakeBins(mkdtempSync(resolve(tmpdir(), 'fb-')), { claude: { version: '2.1.260' }, git: {} });
+    const bins = writeFakeBins(mkdtempSync(resolve(tmpdir(), 'fb-')), { codex: { version: '2.1.260' }, git: {} });
     await runCli(['worker', 'init', '--non-interactive', '--name', 'laptop', '--center', app.ws, '--transport', 'direct', '--token', TEST_TOKEN], { FOREMAN_HOME: home, PATH: `${bins}:${process.env.PATH}` });
     const f = resolve(home, 'worker.yaml');
     expect(existsSync(f)).toBe(true);
     expect((statSync(f).mode & 0o777).toString(8)).toBe('600');
     const y = YAML.parse(readFileSync(f, 'utf8'));
-    expect(y.name).toBe('laptop'); expect(y.transport).toBe('direct'); expect(y.labels).toContain('agent:claude');
+    expect(y.name).toBe('laptop'); expect(y.transport).toBe('direct'); expect(y.labels).toContain('agent:codex');
     expect(y.center.token).toBe('${FOREMAN_TOKEN}');
   }));
 
@@ -110,13 +109,13 @@ describe('S05 1.2 注册与心跳', () => {
 
   it('UT-S05-08: agents.maxConcurrent < 1 被拒', () => withReport('UT-S05-08', async () => {
     const w = await fw();
-    const e = await w.register({ name: 'dev', agents: { claude: { bin: 'claude', maxConcurrent: 0 } } });
+    const e = await w.register({ name: 'dev', agents: { codex: { bin: 'codex', maxConcurrent: 0 } } });
     expect(e.type).toBe('error'); expect(e.payload.code).toBe('VALIDATION');
   }));
 
   it('UT-S05-09: 注册成功 upsert runtimes online=true 且 ack.heartbeatSeconds=30', () => withReport('UT-S05-09', async () => {
     const w = await fw();
-    const ack = await w.register({ name: 'dev', labels: ['agent:claude'] });
+    const ack = await w.register({ name: 'dev', labels: ['agent:codex'] });
     expect(ack.type).toBe('register.ack'); expect(ack.payload.heartbeatSeconds).toBe(30);
     const row = await app.db.one<any>('SELECT * FROM runtimes WHERE name=$1', ['dev']);
     expect(row.online).toBe(true); expect(row.registered_at).toBeTruthy();
@@ -168,7 +167,7 @@ describe('S05 1.2 注册与心跳', () => {
   it('UT-S05-15: 心跳更新 last_seen_at、disk、load', () => withReport('UT-S05-15', async () => {
     const w = await fw('dev');
     await app.fakeClock.advance(30_000);
-    w.send('heartbeat', { load: 12.5, disk: { usedRatio: 0.71, freeBytes: 100 }, sessions: { claude: 1 } });
+    w.send('heartbeat', { load: 12.5, disk: { usedRatio: 0.71, freeBytes: 100 }, sessions: { codex: 1 } });
     await new Promise((r) => setTimeout(r, 100));
     const row = await app.db.one<any>('SELECT * FROM runtimes WHERE name=$1', ['dev']);
     expect(Number(row.disk_used_ratio)).toBeCloseTo(0.71); expect(Number(row.load)).toBe(12.5);
@@ -195,7 +194,7 @@ describe('S05 1.3 离线判定与对账', () => {
   it('UT-S05-18: last_seen 超过 90 秒标离线并把其会话 reachable=false', () => withReport('UT-S05-18', async () => {
     await seedRuntime(app.db, { name: 'dev', lastSeenAt: new Date(app.fakeClock.now().getTime() - 91_000) });
     const t = await seedTask(app.db, { key: 'T-901', state: 'running' });
-    await seedSession(app.db, { taskId: t, runtime: 'dev', agent: 'claude' });
+    await seedSession(app.db, { taskId: t, runtime: 'dev', agent: 'codex' });
     await seedSession(app.db, { taskId: t, runtime: 'dev', agent: 'codex' });
     await app.scheduler.tick('heartbeat-check');
     const rt = await app.db.one<any>('SELECT online FROM runtimes WHERE name=$1', ['dev']);
@@ -215,8 +214,8 @@ describe('S05 1.3 离线判定与对账', () => {
     const w = await fw('dev');
     const t1 = await seedTask(app.db, { key: 'T-910', state: 'triaging' });
     const t2 = await seedTask(app.db, { key: 'T-911', state: 'running' });
-    const s1 = await seedSession(app.db, { taskId: t1, runtime: 'dev', agent: 'claude', kind: 'code_locate' });
-    const s2 = await seedSession(app.db, { taskId: t2, runtime: 'dev', agent: 'claude', kind: 'implement' });
+    const s1 = await seedSession(app.db, { taskId: t1, runtime: 'dev', agent: 'codex', kind: 'code_locate' });
+    const s2 = await seedSession(app.db, { taskId: t2, runtime: 'dev', agent: 'codex', kind: 'implement' });
     await app.db.query('UPDATE sessions SET reachable=false');
     w.send('session.list', { sessions: [] });
     for (let i = 0; i < 40; i++) {
@@ -238,8 +237,8 @@ describe('S05 1.3 离线判定与对账', () => {
   it('UT-S05-20: session.list 对账，本机不存在的会话标 lost', () => withReport('UT-S05-20', async () => {
     const w = await fw('dev');
     const t = await seedTask(app.db, { key: 'T-902' });
-    const s1 = await seedSession(app.db, { taskId: t, runtime: 'dev', agent: 'claude' });
-    const s2 = await seedSession(app.db, { taskId: t, runtime: 'dev', agent: 'claude' });
+    const s1 = await seedSession(app.db, { taskId: t, runtime: 'dev', agent: 'codex' });
+    const s2 = await seedSession(app.db, { taskId: t, runtime: 'dev', agent: 'codex' });
     const s3 = await seedSession(app.db, { taskId: t, runtime: 'dev', agent: 'codex' });
     await app.db.query('UPDATE sessions SET reachable=false');
     // 丢失的会话推断出来的问题应当一起关掉，否则永远挂在收件箱里没人能回答
@@ -275,7 +274,7 @@ describe('S05 1.3 离线判定与对账', () => {
 describe('S05 1.4 路由规则', () => {
   const rules = { code: { require: ['build:doris'], prefer: 'dev' }, analysis: { require: [], prefer: 'dev' }, text: { require: [], prefer: 'center' } };
   it('UT-S05-23: require 标签全部命中才候选', () => withReport('UT-S05-23', () => {
-    const d = routeTask({ kind: 'code', rules, runtimes: [{ name: 'dev', online: true, labels: ['agent:claude'], runningSessions: 0 }] });
+    const d = routeTask({ kind: 'code', rules, runtimes: [{ name: 'dev', online: true, labels: ['agent:codex'], runningSessions: 0 }] });
     expect(d.runtime).toBeNull(); expect(d.missingLabels).toEqual(['build:doris']);
   }));
   it('UT-S05-24: 多候选取 prefer', () => withReport('UT-S05-24', () => {

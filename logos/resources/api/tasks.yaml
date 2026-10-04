@@ -558,7 +558,7 @@ components:
       description: "任务类型，决定路由；根任务通常 code/analysis/text，子任务 pr/branch/review"
     AgentName:
       type: string
-      enum: [claude, codex, opencode]
+      enum: [codex]
     RepoRef:
       type: object
       required: [name, source]
@@ -578,6 +578,7 @@ components:
       properties:
         key: { type: string, example: T-231 }
         parentKey: { type: string, nullable: true }
+        rootTask: { $ref: '#/components/schemas/RootTask', description: "收件箱返回实际所属根任务，按父关系归组" }
         title: { type: string }
         state: { $ref: '#/components/schemas/TaskState' }
         kind: { $ref: '#/components/schemas/TaskKind' }
@@ -597,6 +598,36 @@ components:
         unreadCount: { type: integer }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+
+    RootTask:
+      type: object
+      nullable: true
+      properties:
+        key: { type: string }
+        title: { type: string }
+        channel: { type: string }
+        source:
+          type: object
+          properties:
+            type: { type: string }
+            ref: { type: string }
+            url: { type: string, nullable: true }
+
+    TaskTreeNode:
+      allOf:
+        - $ref: '#/components/schemas/TaskSummary'
+        - type: object
+          required: [children, groupState, groupLabel, active, attentionCount, ownAttentionCount, latestActivityAt]
+          properties:
+            children:
+              type: array
+              items: { $ref: '#/components/schemas/TaskTreeNode' }
+            groupState: { $ref: '#/components/schemas/TaskState', description: "子树展示汇总，不改变本任务 state" }
+            groupLabel: { type: string, description: "整体进展文案，如审查中" }
+            active: { type: boolean, description: "本节点或后代有未完成执行或待办" }
+            attentionCount: { type: integer, description: "整棵子树的实际待处理事项数" }
+            ownAttentionCount: { type: integer, description: "仅本节点的实际待处理事项数" }
+            latestActivityAt: { type: string, format: date-time, description: "本节点和所有后代最近活动的最大时间" }
 
     Task:
       allOf:
@@ -628,6 +659,7 @@ components:
           properties:
             contextPack: { $ref: '#/components/schemas/ContextPack' }
             triageCard: { $ref: '#/components/schemas/TriageCard' }
+            taskTree: { $ref: '#/components/schemas/TaskTreeNode', description: "所属根任务的完整树，包含祖先、兄弟和后代" }
             children:
               type: array
               items: { $ref: '#/components/schemas/TaskSummary' }
@@ -807,7 +839,7 @@ components:
           type: string
           enum: [planned, running, waiting_input, done, failed, stopped, lost]
         reachable: { type: boolean, description: "runtime 失联时为 false" }
-        agentSessionId: { type: string, nullable: true, description: "claude --bg 或 codex 的会话 ID" }
+        agentSessionId: { type: string, nullable: true, description: "Codex 线程 ID；历史记录保留原执行器会话 ID" }
         worktreePath: { type: string, nullable: true }
         startedAt: { type: string, format: date-time, nullable: true }
         endedAt: { type: string, format: date-time, nullable: true }
@@ -840,6 +872,9 @@ components:
       properties:
         id: { type: string, format: uuid }
         taskKey: { type: string }
+        rootTask: { $ref: '#/components/schemas/RootTask' }
+        channel: { type: string, description: "收件箱补充问题所属任务的实际频道" }
+        priority: { type: string, nullable: true }
         sessionId: { type: string, format: uuid }
         text: { type: string }
         status: { type: string, enum: [open, answered, timeout] }

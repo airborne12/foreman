@@ -69,22 +69,15 @@ export class Dispatch {
     }
     const rt = await this.db.one<any>('SELECT * FROM runtimes WHERE name=$1', [route.runtime]);
     const kind: SessionKind = opts?.kind ?? (t.path === 'plan' ? 'plan' : t.path === 'proto' ? 'proto' : 'implement');
-    let agent: AgentName = opts?.agent ?? (t.decision?.agent as AgentName | null) ?? (t.agent as AgentName | null) ?? (kind === 'review' ? await this.reviewerFor(t) : await this.intake.nextAgent());
+    const agent: AgentName = 'codex';
     await this.threadEvent(taskId, `${route.reason} · agent ${agent}`);
-    // 并发闸门（EX-7.2）：planned + running + waiting_input 计入名额
-    let running = await this.runningCount(rt.id, agent);
-    const max = Number(rt.agents?.[agent]?.maxConcurrent ?? this.cfg.agent_concurrency[agent] ?? 3);
-    if (running >= max) {
-      const other = otherAgent(agent);
-      const cat = routingCategory(t.kind ?? 'code');
-      if (cat === 'analysis' && rt.agents?.[other] && (await this.runningCount(rt.id, other)) < Number(rt.agents[other].maxConcurrent ?? 3)) {
-        await this.threadEvent(taskId, `已改派 ${other}（${agent} 满）`); agent = other; running = 0;
-      } else {
-        const pos = Number((await this.db.one<{ n: string }>(`SELECT count(*) AS n FROM tasks WHERE state='queued' AND runtime_name=$1 AND agent=$2 AND id<>$3 AND queue_reason LIKE '排队%'`, [rt.name, agent, taskId]))?.n ?? 0) + 1;
-        const reason = `排队：${agent} 队列第 ${pos} 位（${running}/${max} 运行中）`;
-        await this.db.query(`UPDATE tasks SET state='queued', runtime_name=$2, agent=$3, queue_reason=$4, updated_at=$5 WHERE id=$1`, [taskId, rt.name, agent, reason, this.clock.now()]);
-        await this.threadEvent(taskId, reason); await this.broadcastTask(taskId); return;
-      }
+    const running = await this.runningCount(rt.id, agent);
+    const max = Number(rt.agents?.codex?.maxConcurrent ?? this.cfg.agent_concurrency.codex);
+    if (!rt.agents?.codex || running >= max) {
+      const pos = Number((await this.db.one<{ n: string }>(`SELECT count(*) AS n FROM tasks WHERE state='queued' AND runtime_name=$1 AND agent=$2 AND id<>$3 AND queue_reason LIKE '排队%'`, [rt.name, agent, taskId]))?.n ?? 0) + 1;
+      const reason = rt.agents?.codex ? `排队：codex 队列第 ${pos} 位（${running}/${max} 运行中）` : `等待 ${rt.name} 配置 Codex`;
+      await this.db.query(`UPDATE tasks SET state='queued', runtime_name=$2, agent=$3, queue_reason=$4, updated_at=$5 WHERE id=$1`, [taskId, rt.name, agent, reason, this.clock.now()]);
+      await this.threadEvent(taskId, reason); await this.broadcastTask(taskId); return;
     }
     const now = this.clock.now();
     // 只复用同一仓库的工作区：代码定位时仓库可能还没定，拍板后换了仓库就得另建
@@ -96,7 +89,8 @@ export class Dispatch {
     const worked = wt ? await this.db.one(`SELECT 1 FROM sessions WHERE worktree_id=$1 AND kind<>'code_locate' LIMIT 1`, [wt.id]) : null;
     const rebase = !!wt && !worked && wt.base_branch !== wantBase;
     if (rebase) { await this.threadEvent(taskId, `基线已定为 ${wantBase}，现有工作区基于 ${wt.base_branch}（代码定位阶段所建），按新基线重建`); wt = null; }
-    const session = await this.db.one<{ id: string }>(`INSERT INTO sessions (task_id, runtime_id, agent, kind, state, prompt, attempt, worktree_id, created_at, updated_at) VALUES ($1,$2,$3,$4,'planned',$8,$5,$6,$7,$7) RETURNING id`, [taskId, rt.id, agent, kind, opts?.attempt ?? 1, wt?.id ?? null, now, opts?.promptSuffix ?? '']);
+    const session = await this.db.reserveCodex(rt.id, this.cfg.agent_concurrency.codex, (c) => this.db.one<{ id: string }>(`INSERT INTO sessions (task_id, runtime_id, agent, kind, state, prompt, attempt, worktree_id, created_at, updated_at) VALUES ($1,$2,$3,$4,'planned',$8,$5,$6,$7,$7) RETURNING id`, [taskId, rt.id, agent, kind, opts?.attempt ?? 1, wt?.id ?? null, now, opts?.promptSuffix ?? ''], c));
+    if (!session) { await this.dispatchTask(taskId, opts); return; }
     await this.db.query(`UPDATE tasks SET state='queued', runtime_name=$2, agent=$3, queue_reason=NULL, author_agent=CASE WHEN $4='implement' THEN $3 ELSE author_agent END, updated_at=$5 WHERE id=$1`, [taskId, rt.name, agent, kind, now]);
     await this.broadcastTask(taskId);
     if (wt) await this.startSession(session!.id, wt.path);
@@ -111,6 +105,8 @@ export class Dispatch {
       for (const r of rows.rows) { await this.events.record(this.db.pool, { type: 'message.updated', taskId: r.task_id, payload: { messageId: r.id, delivery: 'delivered' } }); }
       this.events.flush();
     }
+    const legacy = await this.db.query<any>(`SELECT s.id, s.cwd FROM sessions s JOIN runtimes r ON r.id=s.runtime_id WHERE r.name=$1 AND s.state='planned' AND s.agent<>'codex' AND s.cwd IS NOT NULL ORDER BY s.created_at`, [name]);
+    for (const row of legacy.rows) await this.startSession(row.id, row.cwd);
     const queued = await this.db.query<any>(`SELECT id FROM tasks WHERE state='queued' AND (runtime_name=$1 OR runtime_name IS NULL) AND (queue_reason IS NULL OR queue_reason NOT LIKE '排队%') AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.task_id=tasks.id AND s.state IN ('planned','running','waiting_input')) ORDER BY created_at`, [name]);
     for (const t of queued.rows) await this.dispatchTask(t.id);
   }
@@ -119,7 +115,11 @@ export class Dispatch {
   private async drainQueue(runtimeName: string, agent: string) {
     await this.intake.drainCodeLocate(runtimeName);
     const next = await this.db.one<{ id: string }>(`SELECT id FROM tasks WHERE state='queued' AND runtime_name=$1 AND agent=$2 AND queue_reason LIKE '排队%' ORDER BY updated_at LIMIT 1`, [runtimeName, agent]);
-    if (next) await this.dispatchTask(next.id, { agent: agent as AgentName });
+    if (next) {
+      const legacy = await this.db.one<any>(`SELECT id, cwd FROM sessions WHERE task_id=$1 AND state='planned' AND agent<>'codex' AND cwd IS NOT NULL ORDER BY created_at LIMIT 1`, [next.id]);
+      if (legacy) await this.startSession(legacy.id, legacy.cwd);
+      else await this.dispatchTask(next.id, { agent: agent as AgentName });
+    }
   }
 
   /** 会话终结时关掉它推断出来的问题（EX-19.1 的 origin=hook）：会话没了，这类问题没人能回答 */
@@ -130,11 +130,8 @@ export class Dispatch {
   private async runningCount(runtimeId: string, agent: string) {
     return Number((await this.db.one<{ n: string }>(`SELECT count(*) AS n FROM sessions WHERE runtime_id=$1 AND agent=$2 AND state IN ('planned','running','waiting_input')`, [runtimeId, agent]))?.n ?? 0);
   }
-  /** review 子任务：与作者不同家（S03 Step 29） */
-  async reviewerFor(t: any): Promise<AgentName> {
-    const parent = t.parent_id ? await this.db.one<any>('SELECT author_agent FROM tasks WHERE id=$1', [t.parent_id]) : null;
-    return otherAgent((parent?.author_agent ?? t.author_agent ?? 'claude') as AgentName);
-  }
+  /** Review 使用新的 Codex 会话，与实现会话隔离。 */
+  async reviewerFor(_t: any): Promise<AgentName> { return 'codex'; }
 
   // ---------------- worktree.ready → session.start（Step 12–17） ----------------
   async onWorktreeReady(runtimeName: string, ready: { taskKey: string; path: string; branchName: string; reused: boolean; baseBranch?: string | null; buildEnvMissing?: boolean; repo?: string }) {
@@ -160,7 +157,8 @@ export class Dispatch {
       return;
     }
     const agent = await this.intake.nextAgent();
-    const s = await this.db.one<{ id: string }>(`INSERT INTO sessions (task_id, runtime_id, agent, kind, state, prompt, worktree_id, created_at, updated_at) VALUES ($1,$2,$3,'code_locate','planned','',$4,$5,$5) RETURNING id`, [t.id, rt.id, agent, wt!.id, now]);
+    const s = await this.db.reserveCodex(rt.id, this.cfg.agent_concurrency.codex, (c) => this.db.one<{ id: string }>(`INSERT INTO sessions (task_id, runtime_id, agent, kind, state, prompt, worktree_id, created_at, updated_at) VALUES ($1,$2,$3,'code_locate','planned','',$4,$5,$5) RETURNING id`, [t.id, rt.id, agent, wt!.id, now], c));
+    if (!s) { await this.intake.enqueueCodeLocate(t.id); return; }
     await this.startSession(s!.id, ready.path);
   }
 
@@ -170,27 +168,46 @@ export class Dispatch {
     if (!route.runtime || !this.hub.isOnline(route.runtime)) return { error: 'NO_RUNTIME', detail: route.runtime ? `${route.runtime} 离线` : '没有可用的文本类 runtime' };
     const rt = await this.db.one<any>('SELECT * FROM runtimes WHERE name=$1', [route.runtime]);
     const agent = await this.pickFreeAgent(rt);
-    if (!agent) return { error: 'QUOTA', detail: `${rt.name} 上两家 agent 并发已满` };
+    if (!agent) return { error: 'QUOTA', detail: `${rt.name} 上 Codex 并发已满` };
     const now = this.clock.now();
-    const s = await this.db.one<{ id: string }>(`INSERT INTO sessions (channel_id, runtime_id, agent, kind, state, prompt, created_at, updated_at) VALUES ($1,$2,$3,$4,'planned',$5,$6,$6) RETURNING id`,
-      [input.channelId, rt.id, agent, input.kind, input.prompt, now]);
+    const s = await this.db.reserveCodex(rt.id, this.cfg.agent_concurrency.codex, (c) => this.db.one<{ id: string }>(`INSERT INTO sessions (channel_id, runtime_id, agent, kind, state, prompt, created_at, updated_at) VALUES ($1,$2,$3,$4,'planned',$5,$6,$6) RETURNING id`,
+      [input.channelId, rt.id, agent, input.kind, input.prompt, now], c));
+    if (!s) return { error: 'QUOTA', detail: `${rt.name} 上 Codex 并发已满` };
     await this.startSession(s!.id, '/tmp', input.prompt, input.timeoutMinutes ?? null);
     return { sessionId: s!.id, runtime: rt.name, agent };
   }
 
-  /** 并发闸门：返回还有名额的 agent（claude 优先），都满返回 null（S02 EX-23.1、S04 EX-13.1） */
+  /** 只有 runtime 实际登记的 Codex 才有可分配名额。 */
   async pickFreeAgent(rt: { id: string; agents?: Record<string, { maxConcurrent?: number }> }): Promise<AgentName | null> {
-    for (const agent of ['claude', 'codex'] as AgentName[]) {
-      const cfgMax = rt.agents?.[agent]?.maxConcurrent ?? this.cfg.agent_concurrency[agent];
-      if (cfgMax == null) continue;
-      if ((await this.runningCount(rt.id, agent)) < Number(cfgMax)) return agent;
-    }
-    return null;
+    if (!rt.agents?.codex) return null;
+    const max = rt.agents.codex.maxConcurrent ?? this.cfg.agent_concurrency.codex;
+    return (await this.runningCount(rt.id, 'codex')) < Number(max) ? 'codex' : null;
   }
 
   async startSession(sessionId: string, cwd: string, promptOverride?: string | null, timeoutMinutes?: number | null) {
     const s = await this.db.one<any>(`SELECT s.*, r.name AS runtime, t.key AS task_key, t.path AS task_path, t.repo_name FROM sessions s JOIN runtimes r ON r.id=s.runtime_id LEFT JOIN tasks t ON t.id=s.task_id WHERE s.id=$1`, [sessionId]);
-    if (!s) return;
+    if (!s || s.state !== 'planned') return;
+    // 旧版本预留的其他执行器名额不属于 Codex；先检查新执行器名额，再转换预约。
+    if (s.agent !== 'codex') {
+      const reserved = await this.db.reserveCodex(s.runtime_id, this.cfg.agent_concurrency.codex, async (c) => {
+        const row = await this.db.one<any>('SELECT agent, state FROM sessions WHERE id=$1 FOR UPDATE', [sessionId], c);
+        if (!row || row.state !== 'planned' || row.agent === 'codex') return false;
+        await this.db.query("UPDATE sessions SET agent='codex' WHERE id=$1", [sessionId], c);
+        return true;
+      });
+      if (reserved === false) return;
+      if (reserved === null) {
+        await this.db.query('UPDATE sessions SET cwd=$2 WHERE id=$1', [sessionId, cwd]);
+        if (s.task_id) {
+          await this.db.query(`UPDATE tasks SET state='queued', runtime_name=$2, agent='codex', queue_reason='排队：codex 名额释放后启动遗留会话', updated_at=$3 WHERE id=$1`, [s.task_id, s.runtime, this.clock.now()]);
+          await this.broadcastTask(s.task_id);
+        }
+        return;
+      }
+    }
+    // planned 会话尚无执行器线程，可以安全改为 Codex。
+    s.agent = 'codex';
+    await this.db.query("UPDATE sessions SET agent='codex' WHERE id=$1", [sessionId]);
     const token = IntakeStatics.newToken();
     const known = s.kind === 'code_locate' ? await this.intake.knownRepos() : undefined;
     const prompt = promptOverride ?? (this.promptFor(s.kind, s.task_key, s.task_path, s.repo_name, known) + (s.prompt ? `\n\n${s.prompt}` : ''));
@@ -207,7 +224,7 @@ export class Dispatch {
   promptFor(kind: string, taskKey: string, path: string | null, repo: string | null, knownRepos?: string[]) {
     const base = `你在 foreman 任务 ${taskKey} 的 worktree 中工作（仓库 ${repo ?? '待定'}）。先调用 MCP 工具 get_task 读取上下文包；每完成一个可感知步骤调用 report_progress（≤200 字）；需要用户决策调用 ask_user；需要人确认的动作（如创建 PR）先调用 request_approval；产物用 deliver 回写。禁止使用任何 API key。`;
     switch (kind) {
-      // 字段逐个写清：2026-09-29 claude 交回短仓库名（selectdb-core）、建议只写一个词 fix，codex 把基线写成「3.1 or 4.0」
+      // 分流字段明确要求仓库全名、具体基线分支与可执行建议。
       case 'code_locate': return `${base}
 本会话只做代码定位与分流，不要修改代码。结束前调用一次 deliver，artifacts 里放一个 {kind:"triage", ...} 对象，字段要求：
 - tier：fix（简单修复）/ plan（出方案）/ proto（出原型）
@@ -298,7 +315,7 @@ export class Dispatch {
       await this.db.query(`UPDATE sessions SET state='failed', exit_code=$2, failure_reason=$3, ended_at=$4, updated_at=$4 WHERE id=$1`, [s.id, p.exitCode ?? null, p.failureReason ?? null, now]);
       await this.closeInferredQuestions(s.id);
       if (s.kind === 'code_locate') { await this.intake.closeCodeLocateJobs(s.task_id, 'failed'); await this.intake.emitTriage(s.task_id, s.id, { degraded: true, degradedReason: `代码定位失败：${p.failureReason ?? 'exit ' + p.exitCode}` }); }
-      else await this.failTask(s.task_id, `会话失败：${p.failureReason ?? 'exit ' + p.exitCode}`, ['retry', 'switch_agent', 'abandon']);
+      else await this.failTask(s.task_id, `会话失败：${p.failureReason ?? 'exit ' + p.exitCode}`, ['retry', 'fresh_session', 'abandon']);
       await this.drainQueue(runtimeName, s.agent);
       return;
     }
@@ -316,7 +333,7 @@ export class Dispatch {
     }
     if (p.state === 'waiting_input') {
       await this.db.query(`UPDATE sessions SET state='waiting_input', updated_at=$2 WHERE id=$1 AND state IN ('planned','running','waiting_input')`, [s.id, now]);
-      // EX-19.1：钩子或轮询（claude state=blocked）说需要输入但没有 ask_user 问题 → 从日志推断
+      // EX-19.1：兼容旧 worker 的等待输入事件，从日志推断问题。
       if ((p.source === 'hook' || p.source === 'poll') && this.questions) await this.questions.inferFromHook(s, runtimeName);
       return;
     }
@@ -356,13 +373,12 @@ export class Dispatch {
       await this.threadEvent(s.task_id, `agent ${s.agent} 启动失败（第 ${s.attempt} 次）：${String(env.payload.message ?? '').slice(0, 200)}`);
       if (Number(s.attempt) >= 2) {
         if (s.kind === 'code_locate') { await this.intake.emitTriage(s.task_id, s.id, { degraded: true, degradedReason: 'agent 两次启动失败，代码定位待补' }); return; }
-        await this.failTask(s.task_id, `agent 两次启动失败（${otherAgent(s.agent)} / ${s.agent}）`, ['retry', 'switch_agent', 'abandon']); return;
+        await this.failTask(s.task_id, `Codex 两次启动失败`, ['retry', 'fresh_session', 'abandon']); return;
       }
-      // 换家重试一次，复用 worktree（EX-15.1）
+      // 用新的 Codex 会话重试一次，复用 worktree（EX-15.1）。
       const wt = await this.db.one<any>(`SELECT id, path FROM worktrees WHERE task_id=$1 AND runtime_id=$2 AND state='ready'`, [s.task_id, s.runtime_id]);
-      const other = otherAgent(s.agent as AgentName);
-      // 换家也要守并发上限（EX-7.2）：另一家满了就排队，不能硬塞。
-      // 2026-09-29 生产：claude 在 dev 上因目录未信任全部起不来，3 个代码定位同时换到 codex，codex 跑到 6/3
+      const other: AgentName = 'codex';
+      // 自动重试同样遵守 Codex 并发上限，满额就排队。
       const rt = await this.db.one<any>('SELECT name, agents FROM runtimes WHERE id=$1', [s.runtime_id]);
       const cap = Number(rt?.agents?.[other]?.maxConcurrent ?? this.cfg.agent_concurrency[other] ?? 3);
       const busy = await this.runningCount(s.runtime_id, other);
@@ -374,12 +390,17 @@ export class Dispatch {
           await this.db.query(`UPDATE tasks SET state='queued', agent=$2, queue_reason=$3, updated_at=$4 WHERE id=$1`, [s.task_id, other, `排队：${s.agent} 启动失败，等 ${other} 空出名额（${busy}/${cap}）`, now]);
           await this.broadcastTask(s.task_id);
         }
-        await this.threadEvent(s.task_id, `${other} 并发已满（${busy}/${cap}），排队等名额再换 ${other} 重试`);
+        await this.threadEvent(s.task_id, `${other} 并发已满（${busy}/${cap}），排队等名额再用 ${other} 重试`);
         return;
       }
-      const ns = await this.db.one<{ id: string }>(`INSERT INTO sessions (task_id, runtime_id, agent, kind, state, prompt, attempt, worktree_id, created_at, updated_at) VALUES ($1,$2,$3,$4,'planned','',$5,$6,$7,$7) RETURNING id`, [s.task_id, s.runtime_id, other, s.kind, Number(s.attempt) + 1, wt?.id ?? s.worktree_id ?? null, now]);
+      const ns = await this.db.reserveCodex(s.runtime_id, this.cfg.agent_concurrency.codex, (c) => this.db.one<{ id: string }>(`INSERT INTO sessions (task_id, runtime_id, agent, kind, state, prompt, attempt, worktree_id, created_at, updated_at) VALUES ($1,$2,$3,$4,'planned','',$5,$6,$7,$7) RETURNING id`, [s.task_id, s.runtime_id, other, s.kind, Number(s.attempt) + 1, wt?.id ?? s.worktree_id ?? null, now], c));
+      if (!ns) {
+        if (s.kind === 'code_locate') await this.intake.enqueueCodeLocate(s.task_id);
+        else { await this.db.query("UPDATE tasks SET state='queued', agent='codex', queue_reason='排队：等待 Codex 重试名额', updated_at=$2 WHERE id=$1", [s.task_id, now]); await this.broadcastTask(s.task_id); }
+        return;
+      }
       if (s.kind !== 'code_locate') await this.db.query(`UPDATE tasks SET agent=$2, author_agent=CASE WHEN $3='implement' THEN $2 ELSE author_agent END, updated_at=$4 WHERE id=$1`, [s.task_id, other, s.kind, now]);
-      await this.threadEvent(s.task_id, `改用 ${other} 重试（第 2 次，复用 worktree）`);
+      await this.threadEvent(s.task_id, `用 ${other} 新会话重试（第 2 次，复用 worktree）`);
       await this.startSession(ns!.id, wt?.path ?? s.cwd ?? '/tmp');
     }
   }
@@ -415,7 +436,7 @@ export class Dispatch {
           const n = Number((await this.db.one<{ n: string }>('SELECT count(*) AS n FROM tasks WHERE parent_id=$1', [s.task_id], c))?.n ?? 0);
           await c.query(`INSERT INTO tasks (key, parent_id, channel_id, title, state, kind, source_type, source_ref, source_url, repo_name, repo_source, runtime_name, agent, pr_url, last_activity_at, created_at, updated_at)
             SELECT $1, id, channel_id, $2, 'delivered', 'pr', 'github', $3, $3, repo_name, repo_source, runtime_name, agent, $3, $4, $4, $4 FROM tasks WHERE id=$5`, [`${s.task_key}.${n + 1}`, `PR ${a.title ?? a.url}`, a.url, now, s.task_id]);
-          const reviewer = otherAgent(s.agent as AgentName);
+          const reviewer: AgentName = 'codex';
           await c.query(`INSERT INTO tasks (key, parent_id, channel_id, title, state, kind, source_type, source_ref, repo_name, repo_source, runtime_name, agent, last_activity_at, created_at, updated_at)
             SELECT $1, id, channel_id, $2, 'queued', 'review', 'github', $3, repo_name, repo_source, runtime_name, $4, $5, $5, $5 FROM tasks WHERE id=$6`, [`${s.task_key}.${n + 2}`, `review（${reviewer}）`, a.url, reviewer, now, s.task_id]);
           await c.query(`INSERT INTO messages (channel_id, task_id, kind, author, text, created_at) VALUES ($1,$2,'system','system',$3,$4)`, [s.channel_id, s.task_id, `子任务 ${s.task_key}.${n + 1} PR 已创建 · 子任务 ${s.task_key}.${n + 2} review 由 ${reviewer} 执行（作者 ${s.agent}）`, now]);
@@ -529,13 +550,14 @@ export class Dispatch {
       await this.threadEvent(taskId, '已放弃（worktree 保留 3 天）'); await this.broadcastTask(taskId); return;
     }
     const last = await this.db.one<any>(`SELECT * FROM sessions WHERE task_id=$1 ORDER BY created_at DESC LIMIT 1`, [taskId]);
-    const agent = mode === 'switch_agent' ? otherAgent((last?.agent ?? t.agent ?? 'claude') as AgentName) : ((last?.agent ?? t.agent) as AgentName | null);
+    const agent: AgentName = 'codex';
+    const fresh = mode === 'fresh_session' || mode === 'switch_agent' || (last && last.agent !== 'codex');
     await this.db.query(`UPDATE tasks SET state='queued', failure_reason=NULL, agent=$2, updated_at=$3 WHERE id=$1`, [taskId, agent, now]);
     await this.events.record(this.db.pool, { type: 'inbox.removed', taskId, payload: { itemType: 'failure', key: t.key, reason: 'retried' } }); this.events.flush();
-    await this.threadEvent(taskId, mode === 'switch_agent' ? `换 ${agent} 重试（复用 worktree）` : mode === 'fresh_session' ? '新会话重试（附线程摘要）' : '同 agent 重试（复用 worktree）');
+    await this.threadEvent(taskId, fresh ? 'Codex 新会话重试（附线程摘要）' : 'Codex 重试（复用 worktree）');
     const kind = (last?.kind as SessionKind | undefined) ?? 'implement';
     let promptSuffix: string | undefined;
-    if (mode === 'fresh_session') {
+    if (fresh) {
       const recent = await this.db.query<{ kind: string; author: string; text: string }>(`SELECT kind, author, text FROM messages WHERE task_id=$1 AND kind IN ('progress','ask','user_reply','user','artifact_card','system') ORDER BY created_at DESC, seq DESC LIMIT 12`, [taskId]);
       promptSuffix = `线程摘要（上一会话 ${last?.agent_session_id ?? ''} 无法恢复，以下为此前进展，请接着做）：\n` + recent.rows.reverse().map((m) => `- [${m.kind}/${m.author}] ${m.text.slice(0, 200)}`).join('\n');
     }
@@ -577,12 +599,18 @@ export class Dispatch {
     const s = await this.db.one<any>(`SELECT s.*, r.name AS runtime FROM sessions s JOIN runtimes r ON r.id=s.runtime_id WHERE s.task_id=$1 ORDER BY s.created_at DESC, s.attempt DESC LIMIT 1`, [taskId]);
     const now = this.clock.now();
     if (!s) return { delivery: 'queued' as const, commandId: null };
+    if (s.agent !== 'codex') throw new ApiError(409, 'RESUME_FAILED', '旧执行器会话无法用 Codex 续接，请开新会话继续');
+    const restoring = !['planned', 'running', 'waiting_input'].includes(s.state);
+    if (restoring) {
+      const reserved = await this.db.reserveCodex(s.runtime_id, this.cfg.agent_concurrency.codex, (c) => this.db.one<{ id: string }>(`UPDATE sessions SET state='planned', last_activity_at=$2, updated_at=$2 WHERE id=$1 AND state NOT IN ('planned','running','waiting_input') RETURNING id`, [s.id, now], c));
+      if (!reserved) throw new ApiError(409, 'RESUME_FAILED', 'Codex 并发名额已满，请稍后续接');
+    }
     const env = this.hub.send(s.runtime, 'session.resume', { sessionId: s.id, text });
     const online = this.hub.isOnline(s.runtime);
     await this.db.query(`INSERT INTO jobs (kind, status, args, scheduled_at, dispatched_at, created_at) VALUES ('dispatch',$2,$1,$3,$3,$3)`, [JSON.stringify({ commandId: env.id, type: 'session.resume', sessionId: s.id, taskId }), online ? 'dispatched' : 'queued', now]);
     if (messageId) await this.db.query(`UPDATE messages SET session_id=$2, payload = payload || $3::jsonb, delivery=$4, delivered_at=$5 WHERE id=$1`, [messageId, s.id, JSON.stringify({ commandId: env.id }), online ? 'delivered' : 'queued', online ? now : null]);
     if (online) {
-      if (['done', 'stopped'].includes(s.state)) {
+      if (restoring) {
         await this.db.query(`UPDATE sessions SET state='running', last_activity_at=$2, updated_at=$2 WHERE id=$1`, [s.id, now]);
         await this.db.query(`UPDATE tasks SET state='running', state_before_pause=NULL, queue_reason=CASE WHEN queue_reason LIKE '人工处理：会话结束%' THEN NULL ELSE queue_reason END, updated_at=$2 WHERE id=$1 AND state IN ('delivered','paused','waiting_input')`, [taskId, now]);
         await this.threadEvent(taskId, `已恢复会话 ${s.agent_session_id ?? s.id.slice(0, 8)}（${s.agent}），消息已送入`);
@@ -689,5 +717,3 @@ export class Dispatch {
     this.events.flush();
   }
 }
-
-export function otherAgent(a: AgentName): AgentName { return a === 'claude' ? 'codex' : 'claude'; }

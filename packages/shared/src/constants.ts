@@ -1,5 +1,5 @@
 /** 与 schema.sql / API YAML 对齐的枚举常量 */
-export const AGENTS = ['claude', 'codex', 'opencode'] as const;
+export const AGENTS = ['codex'] as const;
 export type AgentName = (typeof AGENTS)[number];
 
 export const TRANSPORTS = ['direct', 'reverse-tunnel', 'local'] as const;

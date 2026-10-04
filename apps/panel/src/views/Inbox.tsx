@@ -23,12 +23,13 @@ export function Inbox({ shared, loaded }: { shared: Shared; loaded: boolean }) {
   // 从线程里「去收件箱处理」跳过来时带 ?sel=a:A-90，直接定位到那一条（2026-09-29：只跳到收件箱，用户找不到要处理哪条）
   const [selId, setSelId] = useState<string | null>(() => new URLSearchParams(location.search).get('sel'));
   const [opened, setOpened] = useState(() => new URLSearchParams(location.search).has('sel')); // 窄屏：列表与详情二选一
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const listRef = useRef<HTMLDivElement>(null);
 
   const items = useMemo<Item[]>(() => {
     const all: Item[] = [
       ...(inbox.approvals ?? []).map((a: any) => ({ kind: 'approval' as const, id: `a:${a.key}`, data: a, title: approvalTitle(a), priority: a.priority ?? null, at: a.createdAt })),
-      ...(inbox.questions ?? []).map((q: any) => ({ kind: 'question' as const, id: `q:${q.id}`, data: q, title: q.text, priority: null, at: q.createdAt })),
+      ...(inbox.questions ?? []).map((q: any) => ({ kind: 'question' as const, id: `q:${q.id}`, data: q, title: q.text, priority: q.priority ?? null, at: q.askedAt })),
       ...(inbox.failures ?? []).map((f: any) => ({ kind: 'failure' as const, id: `f:${f.key}`, data: f, title: cleanTitle(f.title, f.source?.ref), priority: f.priority ?? null, at: f.updatedAt })),
       ...(inbox.candidates ?? []).map((c: any) => ({ kind: 'candidate' as const, id: `c:${c.id}`, data: c, title: c.text, priority: null, at: c.createdAt })),
     ];
@@ -37,24 +38,31 @@ export function Inbox({ shared, loaded }: { shared: Shared; loaded: boolean }) {
   }, [inbox]);
   const counts = useMemo(() => Object.fromEntries(KIND_ORDER.map((k) => [k, items.filter((i) => i.kind === k).length])) as Record<Kind, number>, [items]);
   const visible = filter === 'all' ? items : items.filter((i) => i.kind === filter);
-  const current = visible.find((i) => i.id === selId) ?? visible[0] ?? null;
+  const groups = new Map<string, { root: any; items: Item[] }>();
+  for (const item of visible) {
+    const root = item.data.rootTask;
+    const key = root?.key ?? (item.kind === 'candidate' ? 'candidates' : item.data.taskKey ?? item.data.key ?? item.id);
+    const group = groups.get(key) ?? { root, items: [] };
+    group.items.push(item); groups.set(key, group);
+  }
+  const navigable = [...groups].flatMap(([key, group]) => collapsed.has(key) ? [] : group.items);
+  const current = navigable.find((i) => i.id === selId) ?? navigable[0] ?? null;
   // 当前项处理掉后自动落到下一项
   useEffect(() => { if (current && current.id !== selId) setSelId(current.id); }, [current, selId]);
 
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.target instanceof HTMLElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
-      const i = visible.findIndex((x) => x.id === current?.id);
-      if (e.key === 'j' || e.key === 'ArrowDown') { const n = visible[Math.min(i + 1, visible.length - 1)]; if (n) { setSelId(n.id); e.preventDefault(); } }
-      if (e.key === 'k' || e.key === 'ArrowUp') { const n = visible[Math.max(i - 1, 0)]; if (n) { setSelId(n.id); e.preventDefault(); } }
+      if (e.target instanceof Element && e.target.closest('input,textarea,select,button,a,[contenteditable="true"]')) return;
+      const i = navigable.findIndex((x) => x.id === current?.id);
+      if (e.key === 'j' || e.key === 'ArrowDown') { const n = navigable[Math.min(i + 1, navigable.length - 1)]; if (n) { setSelId(n.id); e.preventDefault(); } }
+      if (e.key === 'k' || e.key === 'ArrowUp') { const n = navigable[Math.max(i - 1, 0)]; if (n) { setSelId(n.id); e.preventDefault(); } }
       if (e.key === 'Enter' && current) { const t = taskLink(current); if (t) navigate(t); }
     };
     window.addEventListener('keydown', on); return () => window.removeEventListener('keydown', on);
-  }, [visible, current]);
+  }, [navigable, current]);
   useEffect(() => { listRef.current?.querySelector('.item.active')?.scrollIntoView({ block: 'nearest' }); }, [current?.id]);
 
-  let lastGroup = '';
   return (
     <div className={`content${current && opened ? ' has-detail' : ''}`}>
       <section className="inbox-list" aria-label="待处理列表">
@@ -72,12 +80,14 @@ export function Inbox({ shared, loaded }: { shared: Shared; loaded: boolean }) {
           ))}
         </div>
         <div className="list" ref={listRef}>
-          {visible.map((it) => {
-            const g = KIND_META[it.kind].group; const head = g !== lastGroup && filter === 'all'; lastGroup = g;
-            return (
-              <div key={it.id}>
-                {head && <div className="list-group">{g}</div>}
-                <button className={`item${current?.id === it.id ? ' active' : ''}`} onClick={() => { setSelId(it.id); setOpened(true); }} aria-current={current?.id === it.id || undefined}>
+          {[...groups].map(([key, group]) => <div key={key} className="inbox-task-group">
+            <button className="inbox-group-heading" aria-expanded={!collapsed.has(key)} onClick={() => setCollapsed((prev) => { const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next; })}>
+              <Icon name={collapsed.has(key) ? 'chevronRight' : 'chevronDown'} size="sm" />
+              <span className="grow"><span className="mono">{key === 'candidates' ? '候选' : key}</span>{group.root && <span className="inbox-group-title">{cleanTitle(group.root.title, group.root.source?.ref)}</span>}</span>
+              <span className="badge warn">{group.items.length} 项</span>
+            </button>
+            {!collapsed.has(key) && group.items.map((it) => (
+                <button key={it.id} className={`item${current?.id === it.id ? ' active' : ''}`} onClick={() => { setSelId(it.id); setOpened(true); }} aria-current={current?.id === it.id || undefined}>
                   <span className={`ico ${it.kind}`}><Icon name={KIND_META[it.kind].icon} /></span>
                   <span className="t1">{it.title}</span>
                   <span className="t2">
@@ -86,9 +96,8 @@ export function Inbox({ shared, loaded }: { shared: Shared; loaded: boolean }) {
                     <Time className="time" iso={it.at} />
                   </span>
                 </button>
-              </div>
-            );
-          })}
+            ))}
+          </div>)}
           {loaded && !visible.length && <InboxEmpty runtimes={runtimes} channels={shared.channels} />}
         </div>
       </section>
@@ -146,6 +155,7 @@ function Detail({ item, runtimes, reload, onBack }: { item: Item; runtimes: any[
       {item.kind === 'approval' && <span className="badge mono">{d.key}</span>}
       <SourceBadge source={source} url={sourceUrl} />
       <PrioBadge priority={item.priority} />
+      {d.rootTask && <button className="task-root-link small" onClick={() => navigate(`/c/${d.rootTask.channel}/t/${d.rootTask.key}`)}>原任务 {d.rootTask.key}{d.rootTask.key !== (d.taskKey ?? d.key) ? ` › ${d.taskKey ?? d.key}` : ''}</button>}
       <span className="spacer" style={{ flex: 1 }} />
       {link && <Btn className="ghost sm" icon="message" onClick={() => navigate(link)}>打开线程 {item.kind === 'failure' ? d.key : d.taskKey}</Btn>}
     </div>
@@ -211,7 +221,7 @@ function ApprovalDetail({ a, title, head, runtimes, reload }: { a: any; title: s
     { k: '影响版本', v: (p.versions ?? []).join('、') || 'Jira 未填', missing: !(p.versions ?? []).length },
     { k: '基线分支', v: `${ov.baseBranch ?? p.baseBranch ?? '仓库默认'}${!ov.baseBranch && p.baseSource === 'version' ? '（按版本）' : ''}`, key: 'baseBranch', mono: true },
     ...((p.pickTargets ?? []).length ? [{ k: 'pick', v: (p.pickTargets as string[]).join('、'), mono: true }] : []),
-    { k: '执行', v: `${ov.runtime ?? p.defaultRuntime ?? '按路由'} · ${ov.agent ?? p.defaultAgent ?? '轮换'}`, key: ov.runtime ? 'runtime' : 'agent' },
+    { k: '执行', v: `${ov.runtime ?? p.defaultRuntime ?? '按路由'} · ${ov.agent ?? 'codex'}`, key: ov.runtime ? 'runtime' : 'agent' },
   ] : ([
     ['仓库', p.repo ?? p.publish?.repo], ['源分支', p.head ?? p.publish?.branch], ['目标分支', p.base ?? p.publish?.base], ['推送到', p.pushRemote ?? p.pushUrl ?? p.publish?.pushRemote],
     ['提交', typeof p.commit === 'string' ? p.commit.slice(0, 12) : null],
@@ -291,7 +301,7 @@ function ApprovalDetail({ a, title, head, runtimes, reload }: { a: any; title: s
                   </select></div>
                 <div className="field"><label htmlFor="ov-agent">agent</label>
                   <select id="ov-agent" className="select" value={ov.agent ?? p.defaultAgent ?? ''} onChange={(e) => set('agent', e.target.value)}>
-                    <option value="">按轮换</option>{['claude', 'codex'].map((x) => <option key={x} value={x}>{x}</option>)}
+                    <option value="">Codex（默认）</option><option value="codex">Codex</option>
                   </select></div>
               </div>
               {modified && <div className="row end" style={{ marginTop: 10 }}><Btn className="ghost sm" icon="refresh" onClick={() => setOv({})}>恢复建议值</Btn></div>}
@@ -426,7 +436,6 @@ function FailureDetail({ t, title, head, reload }: { t: any; title: string; head
             <span className="spacer" />
             <Btn className="danger" busy={busy === 'abandon'} disabled={!!busy} onClick={() => retry('abandon')}>放弃</Btn>
             <Btn busy={busy === 'fresh_session'} disabled={!!busy} onClick={() => retry('fresh_session')}>开新会话继续</Btn>
-            <Btn busy={busy === 'switch_agent'} disabled={!!busy} onClick={() => retry('switch_agent')}>换一个 agent</Btn>
             <Btn className="go" icon="refresh" busy={busy === 'same_agent'} disabled={!!busy} onClick={() => retry('same_agent')}>重试</Btn>
           </>
         ) : canReply ? (

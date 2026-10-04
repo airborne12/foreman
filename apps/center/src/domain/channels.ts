@@ -71,7 +71,7 @@ export class Channels {
     return this.serialize(r!);
   }
   async serialize(c: any) {
-    const active = Number((await this.db.one<{ n: string }>(`SELECT count(*) AS n FROM tasks WHERE channel_id=$1 AND state NOT IN ('done','paused')`, [c.id]))?.n ?? 0);
+    const active = await this.tasks.trees.activeCount(c.id);
     const pending = Number((await this.db.one<{ n: string }>(`SELECT count(*) AS n FROM approvals a JOIN tasks t ON t.id=a.task_id WHERE t.channel_id=$1 AND a.status='pending'`, [c.id]))?.n ?? 0);
     const d = await this.db.one<any>(`SELECT * FROM sessions WHERE channel_id=$1 AND kind='dispatcher' ORDER BY created_at DESC LIMIT 1`, [c.id]);
     return {
@@ -82,14 +82,9 @@ export class Channels {
     };
   }
 
-  async threads(slug: string, q: { state?: string; page?: number; perPage?: number }) {
+  async threads(slug: string, q: { state?: string; search?: string; activeOnly?: boolean; page?: number; perPage?: number; throughPage?: number }) {
     const c = await this.bySlug(slug);
-    const where: string[] = ['t.channel_id=$1', 't.parent_id IS NULL']; const params: unknown[] = [c.id];
-    if (q.state) { params.push(q.state); where.push(`t.state=$${params.length}`); }
-    const per = Math.min(Math.max(q.perPage ?? 20, 1), 100); const page = Math.max(q.page ?? 1, 1);
-    const total = await this.db.one<{ n: string }>(`SELECT count(*) AS n FROM tasks t WHERE ${where.join(' AND ')}`, params);
-    const rows = await this.db.query<any>(`SELECT t.* FROM tasks t WHERE ${where.join(' AND ')} ORDER BY t.last_activity_at DESC LIMIT ${per} OFFSET ${(page - 1) * per}`, params);
-    return { items: await Promise.all(rows.rows.map((t) => this.tasks.serializeSummary(t, c.slug))), total: Number(total?.n ?? 0) };
+    return this.tasks.trees.channel(c.id, q);
   }
 
   /** 频道级消息流（不含线程内消息） */
@@ -168,7 +163,7 @@ export class Channels {
 
   async activeDispatcher(channelId: string) {
     return this.db.one<any>(`SELECT s.*, r.name AS runtime_name FROM sessions s JOIN runtimes r ON r.id=s.runtime_id
-      WHERE s.channel_id=$1 AND s.kind='dispatcher' AND s.state IN ('planned','running','waiting_input') ORDER BY s.created_at DESC LIMIT 1`, [channelId]);
+      WHERE s.channel_id=$1 AND s.kind='dispatcher' AND s.agent='codex' AND s.state IN ('planned','running','waiting_input') ORDER BY s.created_at DESC LIMIT 1`, [channelId]);
   }
 
   /** Step 13：提示词含频道名、最近 50 条消息、在线 runtime 与标签、已登记仓库 */
@@ -254,7 +249,7 @@ export class Channels {
     const d = await this.db.one<any>(`INSERT INTO task_drafts (channel_id, session_id, origin, status, fields, expires_at, created_at, updated_at) VALUES ($1,$2,$3,'open',$4,$5,$6,$6) RETURNING *`,
       [c.id, sessionId ?? null, origin, JSON.stringify(fields), new Date(now.getTime() + 24 * 3600_000), now]);
     const m = await this.db.one<any>(`INSERT INTO messages (channel_id, kind, author, text, ref_type, ref_id, payload, created_at) VALUES ($1,'draft_card',$2,$3,'draft',$4,$5,$6) RETURNING *`,
-      [c.id, origin === 'command' ? 'system' : 'claude', `草案：${fields.source || '（待补）'}${fields.sourceTitle ? ` · ${fields.sourceTitle}` : ''}`, d!.id, JSON.stringify({ fields, highlight, note: fields.note ?? null, status: 'open', existing }), now]);
+      [c.id, origin === 'command' ? 'system' : 'codex', `草案：${fields.source || '（待补）'}${fields.sourceTitle ? ` · ${fields.sourceTitle}` : ''}`, d!.id, JSON.stringify({ fields, highlight, note: fields.note ?? null, status: 'open', existing }), now]);
     await this.events.record(this.db.pool, { type: 'message.new', channelId: c.id, payload: { channel: c.slug, message: serializeMessage(m, null, c.slug) } });
     this.events.flush();
     return this.serializeDraft(d!, c.slug, highlight);
@@ -372,7 +367,7 @@ export class Channels {
     const now = this.clock.now();
     let warned = 0; let stopped = 0;
     const sessions = await this.db.query<any>(`SELECT s.*, r.name AS runtime_name, c.id AS ch_id, c.slug, c.title FROM sessions s JOIN runtimes r ON r.id=s.runtime_id JOIN channels c ON c.id=s.channel_id
-      WHERE s.kind='dispatcher' AND s.state IN ('planned','running','waiting_input')`);
+      WHERE s.kind='dispatcher' AND s.agent='codex' AND s.state IN ('planned','running','waiting_input')`);
     for (const s of sessions.rows) {
       const lastUser = await this.db.one<any>(`SELECT id, created_at FROM messages WHERE channel_id=$1 AND task_id IS NULL AND kind='user' ORDER BY created_at DESC, seq DESC LIMIT 1`, [s.ch_id]);
       if (lastUser) {

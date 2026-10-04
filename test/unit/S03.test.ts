@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { mkdtempSync, existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
-import { claudeAdapter, codexStartArgs, codexResumeArgs } from '../../apps/worker/src/sessions.js';
+import { codexAdapter, codexStartArgs, codexResumeArgs } from '../../apps/worker/src/sessions.js';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -17,7 +17,6 @@ import { WorktreeCreate, SessionStart, WorkerConfig, makeEnvelope, routeTask } f
 import { createWorktree, pickBuildEnv, resolveBaseRef, belongsTo } from '../../apps/worker/src/worktree.js';
 import { Worker, textWorkspace } from '../../apps/worker/src/worker.js';
 import { Intake, normalizeRepo, isBranchName, normalizeTriage } from '../../apps/center/src/domain/intake.js';
-import { isManagedPath, setClaudeTrust } from '../../apps/worker/src/claudeTrust.js';
 import { runGc } from '../../apps/worker/src/gc.js';
 import { statSync, mkdirSync } from 'node:fs';
 import { SessionStartError } from '../../apps/worker/src/sessions.js';
@@ -25,7 +24,7 @@ import { gitPublish, GitPublishError } from '../../apps/worker/src/gitPublish.js
 
 let app: TestApp;
 const workers: FakeWorker[] = [];
-const DEV_REG = { labels: ['agent:claude', 'agent:codex', 'build:doris', 'repo:selectdb/selectdb-core', 'vpn:jira'], agents: { claude: { bin: 'fake-claude', maxConcurrent: 3 }, codex: { bin: 'fake-codex', maxConcurrent: 3 } }, repos: { 'selectdb/selectdb-core': { main: '/tmp/fx/core', worktreeRoot: '/tmp/fx/wt' } } };
+const DEV_REG = { labels: ['agent:codex', 'build:doris', 'repo:selectdb/selectdb-core', 'vpn:jira'], agents: { codex: { bin: 'fake-codex', maxConcurrent: 3 } }, repos: { 'selectdb/selectdb-core': { main: '/tmp/fx/core', worktreeRoot: '/tmp/fx/wt' } } };
 async function fw(name: string, reg?: Record<string, unknown>) {
   const w = new FakeWorker(app.ws, TEST_TOKEN);
   await w.connect(); workers.push(w);
@@ -154,19 +153,19 @@ describe('S03 1.3 路由与选家', () => {
     const rid = await runtimeId(app.db, 'laptop');
     expect(await app.db.one('SELECT 1 FROM sessions WHERE runtime_id=$1', [rid])).not.toBeNull();
   }));
-  it('UT-S03-14: 开发 agent 轮换：上次 claude 则本次 codex', () => withReport('UT-S03-14', async () => {
-    await seedTask(app.db, { key: 'T-100', state: 'done', authorAgent: 'claude', terminalAt: app.clock.now() });
+  it('UT-S03-14: 历史作者不影响默认 Codex 执行器', () => withReport('UT-S03-14', async () => {
+    await seedTask(app.db, { key: 'T-100', state: 'done', authorAgent: 'codex', terminalAt: app.clock.now() });
     expect(await app.intake.nextAgent()).toBe('codex');
     await app.db.query(`UPDATE tasks SET author_agent='codex', updated_at=now() WHERE key='T-100'`);
-    expect(await app.intake.nextAgent()).toBe('claude');
+    expect(await app.intake.nextAgent()).toBe('codex');
   }));
-  it('UT-S03-15: review 子任务 agent 必须不同于 author_agent', () => withReport('UT-S03-15', async () => {
+  it('UT-S03-15: review 子任务使用独立 Codex 会话', () => withReport('UT-S03-15', async () => {
     const { sessionId } = await mcpSession('T-231', 'codex');
     await app.dispatch.deliver(sessionId, [{ kind: 'pr', url: 'https://github.com/selectdb/selectdb-core/pull/1', title: 'x' }]);
     const review = await app.db.one<any>(`SELECT agent FROM tasks WHERE key='T-231.2'`);
-    expect(review.agent).toBe('claude');
-    expect(await app.dispatch.reviewerFor({ author_agent: 'codex' })).toBe('claude');
-    expect(await app.dispatch.reviewerFor({ author_agent: 'claude' })).toBe('codex');
+    expect(review.agent).toBe('codex');
+    expect(await app.dispatch.reviewerFor({ author_agent: 'codex' })).toBe('codex');
+    expect(await app.dispatch.reviewerFor({ author_agent: 'codex' })).toBe('codex');
   }));
   it('UT-S03-16: 并发闸门：同 runtime 同 agent planned+running ≥ 3 时排队', () => withReport('UT-S03-16', async () => {
     await fw('dev');
@@ -176,14 +175,14 @@ describe('S03 1.3 路由与选家', () => {
     const t = await app.tasks.byKey('T-231');
     expect(t.state).toBe('queued'); expect(t.queue_reason).toMatch(/codex 队列第 1 位/);
   }));
-  it('UT-S03-17: 分析类任务并发满时换家，代码类不换', () => withReport('UT-S03-17', async () => {
+  it('UT-S03-17: 分析与代码任务 Codex 并发满时均排队', () => withReport('UT-S03-17', async () => {
     await fw('dev');
     for (let i = 0; i < 3; i++) await seedSession(app.db, { taskId: await seedTask(app.db, { key: `T-70${i}`, state: 'running', runtime: 'dev' }), runtime: 'dev', agent: 'codex' });
     const analysis = await seedTask(app.db, { key: 'T-231', state: 'queued', kind: 'analysis' });
     await app.dispatch.dispatchTask(analysis, { agent: 'codex' });
     const s = await app.db.one<any>('SELECT agent FROM sessions WHERE task_id=$1', [analysis]);
-    expect(s.agent).toBe('claude');
-    expect((await app.tasks.messages('T-231', {})).items.some((m) => m.text.includes('已改派 claude'))).toBe(true);
+    expect(s).toBeNull();
+    expect((await app.tasks.byKey('T-231')).queue_reason).toContain('codex');
     const code = await seedTask(app.db, { key: 'T-232', state: 'queued', kind: 'code' });
     await app.dispatch.dispatchTask(code, { agent: 'codex' });
     expect((await app.tasks.byKey('T-232')).state).toBe('queued');
@@ -212,7 +211,7 @@ describe('S03 1.4 worktree 与会话指令', () => {
     expect(execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: out.path, encoding: 'utf8' }).trim()).toBe('foreman/T-231');
   }));
   it('UT-S03-21: session.start 的 env 含 ANTHROPIC_API_KEY 被拒', () => withReport('UT-S03-21', () => {
-    const base = { sessionId: crypto.randomUUID(), taskKey: 'T-231', kind: 'implement', agent: 'claude', prompt: 'p', cwd: '/tmp', mcp: { url: 'http://127.0.0.1:7801/mcp', token: 't' } };
+    const base = { sessionId: crypto.randomUUID(), taskKey: 'T-231', kind: 'implement', agent: 'codex', prompt: 'p', cwd: '/tmp', mcp: { url: 'http://127.0.0.1:7801/mcp', token: 't' } };
     expect(SessionStart.safeParse({ ...base, env: { FOO: 'x' } }).success).toBe(true);
     const r = SessionStart.safeParse({ ...base, env: { ANTHROPIC_API_KEY: 'sk-x' } });
     expect(r.success).toBe(false);
@@ -248,7 +247,7 @@ describe('S03 1.4 worktree 与会话指令', () => {
     expect(readFileSync(resolve(out.path, '.foreman/context.md'), 'utf8')).toContain('T-231');
     expect(JSON.parse(readFileSync(resolve(out.path, '.foreman/task.json'), 'utf8')).key).toBe('T-231');
     expect(readFileSync(resolve(out.path, 'custom_env.sh'), 'utf8')).toContain(`export DORIS_THIRDPARTY="${tp}"`);
-    expect(existsSync(resolve(out.path, '.claude/settings.json'))).toBe(false);
+    expect(existsSync(resolve(out.path, '.codex/settings.json'))).toBe(false);
     // .foreman/ 是上下文包与日志，必须被 worktree 自己的 exclude 挡住，否则 agent 的 git add -A 会带进 PR
     const excl = resolve(out.path, execFileSync('git', ['rev-parse', '--git-path', 'info/exclude'], { cwd: out.path, encoding: 'utf8' }).trim());
     expect(readFileSync(excl, 'utf8')).toContain('.foreman/');
@@ -312,28 +311,11 @@ describe('S03 1.4 worktree 与会话指令', () => {
     expect(ev?.text).toContain('selectdb-cloud-4.0');
   }));
 
-  it('UT-S03-30: claude --bg 启动参数与会话 id 解析', () => withReport('UT-S03-30', async () => {
-    const dir = mkdtempSync(resolve(tmpdir(), 'fclaude-'));
-    const bin = resolve(dir, 'claude'); const log = resolve(dir, 'args.log');
-    const uuid = '3f171235-0ea7-40ae-b928-49c2b4445518';
-    writeFileSync(bin, [
-      '#!/bin/sh',
-      `if [ "$1" = "--bg" ]; then for a in "$@"; do printf '%s\\n' "$a"; done > "${log}"; echo "backgrounded · 3f171235 · T-231-implement"; fi`,
-      `if [ "$1" = "agents" ]; then echo '[{"id":"3f171235","sessionId":"${uuid}","name":"T-231-implement","kind":"background","state":"working"}]'; fi`, '',
-    ].join('\n')); chmodSync(bin, 0o755);
-    const s = await claudeAdapter.start({ sessionId: crypto.randomUUID(), taskKey: 'T-231', kind: 'implement', agent: 'claude', prompt: '实现 T-231', cwd: dir, name: 'T-231-implement', mcp: { url: 'http://127.0.0.1:7801/mcp', token: 'tok-1' } }, bin, () => undefined, { pollMs: 3_600_000, disallowedTools: ['Bash(rm:*)', 'Bash(git push:*)'] });
-    s.state = 'stopped';
-    const args = readFileSync(log, 'utf8').trimEnd().split('\n');
-    expect(args.slice(0, 5)).toEqual(['--bg', '--name', 'T-231-implement', '--permission-mode', 'auto']);
-    expect(args).toContain('--strict-mcp-config');
-    const mcp = args.find((a) => a.startsWith('--mcp-config='))!;
-    expect(JSON.parse(mcp.slice('--mcp-config='.length)).mcpServers.foreman).toMatchObject({ type: 'http', url: 'http://127.0.0.1:7801/mcp', headers: { Authorization: 'Bearer tok-1' } });
-    // 阻塞式 request_approval / ask_user 最长 30 分钟：MCP 调用超时放到 35 分钟（claude 默认 60 秒，T-81 实测超时）
-    expect(JSON.parse(mcp.slice('--mcp-config='.length)).mcpServers.foreman.timeout).toBe(35 * 60_000);
-    // 黑名单同样要用 = 写法，且不能挤掉最后一个位置参数 prompt
-    expect(args).toContain('--disallowedTools=Bash(rm:*),Bash(git push:*)');
-    expect(args[args.length - 1]).toBe('实现 T-231');
-    expect(s.agentSessionId).toBe(uuid); expect(s.shortId).toBe('3f171235');
+  it('UT-S03-30: Codex 启动参数保留任务 prompt 和 MCP 超时', () => withReport('UT-S03-30', () => {
+    const args = codexStartArgs({ sessionId: crypto.randomUUID(), taskKey: 'T-231', kind: 'implement', agent: 'codex', prompt: '实现任务', cwd: '/tmp', mcp: { url: 'http://localhost/mcp', token: 'tok' } });
+    expect(args[0]).toBe('exec'); expect(args.at(-1)).toBe('实现任务');
+    expect(args).toContain('mcp_servers.foreman.tool_timeout_sec=2100');
+    expect(args).toContain('mcp_servers.foreman.http_headers.Authorization="Bearer tok"');
   }));
   it('UT-S03-31: codex 启动带 workspace-write 沙箱，续接不带 -C', () => withReport('UT-S03-31', () => {
     const input = { sessionId: crypto.randomUUID(), taskKey: 'T-231', kind: 'implement', agent: 'codex', prompt: '实现', cwd: '/tmp/fx/wt/T-231', mcp: { url: 'http://127.0.0.1:7801/mcp', token: 'tok-2' } };
@@ -373,7 +355,7 @@ describe('S03 1.5 产物与子任务', () => {
   }));
   it('UT-S03-27: 出方案产物不创建 PR 子任务，implementFromPlan 可用', () => withReport('UT-S03-27', async () => {
     await fw('dev');
-    const { token, taskId } = await mcpSession('T-231', 'claude');
+    const { token, taskId } = await mcpSession('T-231', 'codex');
     await app.db.query(`UPDATE tasks SET path='plan' WHERE id=$1`, [taskId]);
     await seedWorktree(app.db, { taskId, runtime: 'dev', path: '/tmp/fx/wt/T-231' });
     const content = '# 方案\n方案二：删除旧接口';
@@ -402,9 +384,9 @@ describe('S03 1.5 产物与子任务', () => {
 describe('S03 1.6 实验环境回归（2026-09-24）', () => {
   it('UT-S03-37: 会话结束但本会话没有产物 → 任务暂停进收件箱，回复续接后原因清除', () => withReport('UT-S03-37', async () => {
     const w = await fw('dev');
-    const taskId = await seedTask(app.db, { key: 'T-243', state: 'running', runtime: 'dev', agent: 'claude' });
-    const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'claude', kind: 'implement' });
-    await app.db.query(`INSERT INTO messages (channel_id, task_id, kind, author, text) SELECT channel_id, id, 'progress', 'claude', '建 PR 没被批准，本轮停在这里' FROM tasks WHERE id=$1`, [taskId]);
+    const taskId = await seedTask(app.db, { key: 'T-243', state: 'running', runtime: 'dev', agent: 'codex' });
+    const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'codex', kind: 'implement' });
+    await app.db.query(`INSERT INTO messages (channel_id, task_id, kind, author, text) SELECT channel_id, id, 'progress', 'codex', '建 PR 没被批准，本轮停在这里' FROM tasks WHERE id=$1`, [taskId]);
     await app.dispatch.onSessionState('dev', { sessionId: sid, state: 'done', source: 'hook' });
     const t = await app.tasks.byKey('T-243');
     expect(t.state).toBe('paused');
@@ -496,7 +478,7 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     const taskId = await seedTask(app.db, { key: 'T-251', state: 'queued', runtime: 'dev' });
     await app.db.query(`UPDATE tasks SET base_branch='branch-selectdb-doris-4.1' WHERE id=$1`, [taskId]);
     const wt = await seedWorktree(app.db, { taskId, runtime: 'dev', path: '/tmp/fx/wt/T-251' });
-    await seedSession(app.db, { taskId, runtime: 'dev', agent: 'claude', kind: 'implement', state: 'failed' }).then((sid) => app.db.query('UPDATE sessions SET worktree_id=$2 WHERE id=$1', [sid, wt]));
+    await seedSession(app.db, { taskId, runtime: 'dev', agent: 'codex', kind: 'implement', state: 'failed' }).then((sid) => app.db.query('UPDATE sessions SET worktree_id=$2 WHERE id=$1', [sid, wt]));
     await app.dispatch.dispatchTask(taskId, { attempt: 2 });
     const env = await w.expect((e) => e.type === 'session.start' || e.type === 'worktree.create');
     expect(env.type).toBe('session.start');
@@ -510,19 +492,19 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
       await seedSession(app.db, { taskId: t, runtime: 'dev', agent: 'codex', kind: 'implement' });
     }
     const count = async () => Number((await app.db.one<any>(`SELECT count(*) AS n FROM sessions WHERE agent='codex' AND state IN ('planned','running','waiting_input')`)).n);
-    // 实现会话：claude 起不来 → codex 满 → 任务排队，不新建 codex 会话
-    const impl = await seedTask(app.db, { key: 'T-252', state: 'queued', runtime: 'dev', agent: 'claude' });
-    const s1 = await seedSession(app.db, { taskId: impl, runtime: 'dev', agent: 'claude', kind: 'implement', state: 'planned' });
+    // 实现会话：codex 起不来 → codex 满 → 任务排队，不新建 codex 会话
+    const impl = await seedTask(app.db, { key: 'T-252', state: 'queued', runtime: 'dev', agent: 'codex' });
+    const s1 = await seedSession(app.db, { taskId: impl, runtime: 'dev', agent: 'codex', kind: 'implement', state: 'planned' });
     await app.dispatch.startSession(s1, '/tmp/fx/wt/T-252');
     const e1 = await w.expect((e) => e.type === 'session.start' && e.payload.sessionId === s1);
     w.send('error', { code: 'AGENT_START_FAILED', message: 'Workspace not trusted', retryable: false }, e1.id);
     for (let i = 0; i < 30; i++) { if ((await app.tasks.byKey('T-252')).queue_reason) break; await new Promise((r) => setTimeout(r, 100)); }
     const t = await app.tasks.byKey('T-252');
-    expect(t.state).toBe('queued'); expect(t.agent).toBe('codex'); expect(t.queue_reason).toMatch(/^排队：claude 启动失败/);
+    expect(t.state).toBe('queued'); expect(t.agent).toBe('codex'); expect(t.queue_reason).toMatch(/^排队：codex 启动失败/);
     expect(await count()).toBe(3);
     // 代码定位：同样不硬塞，改回 code-locate 队列
     const loc = await seedTask(app.db, { key: 'T-253', state: 'triaging', runtime: 'dev' });
-    const s2 = await seedSession(app.db, { taskId: loc, runtime: 'dev', agent: 'claude', kind: 'code_locate', state: 'planned' });
+    const s2 = await seedSession(app.db, { taskId: loc, runtime: 'dev', agent: 'codex', kind: 'code_locate', state: 'planned' });
     await app.dispatch.startSession(s2, '/tmp/fx/wt/T-253');
     const e2 = await w.expect((e) => e.type === 'session.start' && e.payload.sessionId === s2);
     w.send('error', { code: 'AGENT_START_FAILED', message: 'Workspace not trusted', retryable: false }, e2.id);
@@ -549,83 +531,29 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     expect(aps.rows).toHaveLength(1); expect(aps.rows[0].status).toBe('pending');
     expect(aps.rows[0].payload.degradedReason).toBe('代码定位失败：会话结束但未回写分流结果');
   }));
-  it('UT-S03-47: claude 工作区信任只写 worker 管理的目录，保留其他内容，坏文件不覆盖', () => withReport('UT-S03-47', async () => {
-    const scope = { childrenOf: ['/mnt/wt'], exact: ['/home/u/.foreman/workspace'] };
-    expect(isManagedPath('/mnt/wt/T-1', scope)).toBe(true);
-    expect(isManagedPath('/mnt/wt/T-1/sub', scope)).toBe(true);
-    expect(isManagedPath('/mnt/wt', scope)).toBe(false);
-    expect(isManagedPath('/mnt/wt-other/T-1', scope)).toBe(false);
-    expect(isManagedPath('/home/u/.foreman/workspace', scope)).toBe(true);
-    expect(isManagedPath('/home/u', scope)).toBe(false);
-
-    const dir = mkdtempSync(resolve(tmpdir(), 'ctrust-'));
-    const f = resolve(dir, '.claude.json');
-    writeFileSync(f, JSON.stringify({ userID: 'u1', projects: { '/mnt/wt/T-2': { lastCost: 3, allowedTools: ['Read'] } } }), { mode: 0o600 });
-    expect(setClaudeTrust('/mnt/wt/T-1', true, f)).toBe(true);
-    expect(setClaudeTrust('/mnt/wt/T-1', true, f)).toBe(false); // 幂等
-    expect(setClaudeTrust('/mnt/wt/T-2', true, f)).toBe(true);
-    const d = JSON.parse(readFileSync(f, 'utf8'));
-    expect(d.userID).toBe('u1');
-    expect(d.projects['/mnt/wt/T-1']).toMatchObject({ hasTrustDialogAccepted: true, allowedTools: [], mcpServers: {} });
-    expect(d.projects['/mnt/wt/T-2']).toMatchObject({ hasTrustDialogAccepted: true, lastCost: 3, allowedTools: ['Read'] });
-    expect(statSync(f).mode & 0o777).toBe(0o600);
-    expect(setClaudeTrust('/mnt/wt/T-1', false, f)).toBe(true);
-    expect(JSON.parse(readFileSync(f, 'utf8')).projects['/mnt/wt/T-1']).toBeUndefined();
-    // 解析失败：抛错且文件原样
-    writeFileSync(f, '{ broken');
-    expect(() => setClaudeTrust('/mnt/wt/T-3', true, f)).toThrow();
-    expect(readFileSync(f, 'utf8')).toBe('{ broken');
-    // 回收回调
-    const removed: string[] = [];
-    await runGc({ policy: 'retain_days', dryRun: false, highWatermark: 0.85, protectedTaskKeys: [], candidates: [{ taskKey: 'T-9', path: resolve(dir, 'wt-T-9'), terminalAt: null }] }, { remove: () => undefined, onRemoved: (p) => removed.push(p) });
-    expect(removed).toEqual([]); // 目录不存在时不算删除，不回调
-    mkdirSync(resolve(dir, 'wt-T-9'));
-    await runGc({ policy: 'retain_days', dryRun: false, highWatermark: 0.85, protectedTaskKeys: [], candidates: [{ taskKey: 'T-9', path: resolve(dir, 'wt-T-9'), terminalAt: null }] }, { remove: () => undefined, onRemoved: (p) => removed.push(p) });
-    expect(removed).toEqual([resolve(dir, 'wt-T-9')]);
+  it('UT-S03-47: worker 读取旧会话时保留日志，但不恢复旧执行器', () => withReport('UT-S03-47', async () => {
+    const home = mkdtempSync(resolve(tmpdir(), 'legacy-worker-'));
+    const sid = crypto.randomUUID(); let attached = false;
+    writeFileSync(resolve(home, 'sessions.json'), JSON.stringify([{ sessionId: sid, agent: 'claude', agentSessionId: 'legacy', cwd: home, logFile: '/dev/null', state: 'running', pid: null }]));
+    const cfg = WorkerConfig.parse({ name: 'legacy47', center: { url: app.ws, token: TEST_TOKEN }, agents: { codex: { bin: 'fake-codex', maxConcurrent: 3 } } });
+    const w = new Worker({ config: cfg, stateFile: resolve(home, 'state.json'), log: () => undefined, adapters: { codex: { attach() { attached = true; } } as any } });
+    w.start(); await new Promise((r) => setTimeout(r, 100)); w.stop();
+    expect(attached).toBe(false); expect(w.sessions.get(sid)?.state).toBe('failed'); expect(w.state.sessions).toEqual({});
   }));
-  it('UT-S03-48: worker 起 claude 前自动信任自己建的 worktree；被冲掉时补标重试；管理范围外的目录不碰', () => withReport('UT-S03-48', async () => {
-    const home = mkdtempSync(resolve(tmpdir(), 'chome-'));
-    const root = mkdtempSync(resolve(tmpdir(), 'cwt-'));
-    const prev = process.env.CLAUDE_CONFIG_DIR; process.env.CLAUDE_CONFIG_DIR = home;
-    const f = resolve(home, '.claude.json');
-    writeFileSync(f, JSON.stringify({ projects: {} }), { mode: 0o600 });
-    let calls = 0; let dropOnce = true;
-    const trusted = (cwd: string) => JSON.parse(readFileSync(f, 'utf8')).projects?.[cwd]?.hasTrustDialogAccepted === true;
-    // 假 claude：模拟 2.1.284 的信任检查；第一次调用时模拟另一个 claude 进程回写旧内容冲掉条目
-    const fakeClaude = {
-      async start(input: any) {
-        calls += 1;
-        if (dropOnce && trusted(input.cwd)) { dropOnce = false; writeFileSync(f, JSON.stringify({ projects: {} })); }
-        if (!trusted(input.cwd)) throw new SessionStartError(`claude --bg 失败：Workspace not trusted. Run \`claude\` in ${input.cwd} once`);
-        return { sessionId: input.sessionId, agent: 'claude', agentSessionId: 'cl-x', pid: 1, cwd: input.cwd, logFile: '/dev/null', state: 'running' as const };
-      },
-      async resume() {}, async stop() {},
-    };
-    const cfg = WorkerConfig.parse({ name: 'w48', center: { url: app.ws, token: TEST_TOKEN }, transport: 'direct', labels: ['agent:claude'], agents: { claude: { bin: 'fake-claude', maxConcurrent: 3 } }, repos: { 'selectdb/selectdb-core': { main: '/tmp/fx/core', worktreeRoot: root } } });
-    const w = new Worker({ config: cfg, log: () => undefined, stateFile: resolve(home, 'state.json'), adapters: { claude: fakeClaude } as any });
+  it('UT-S03-48: worker 正确上报启动期间已经完成的 Codex 会话', () => withReport('UT-S03-48', async () => {
+    const home = mkdtempSync(resolve(tmpdir(), 'fast-worker-'));
+    const cfg = WorkerConfig.parse({ name: 'fast48', center: { url: app.ws, token: TEST_TOKEN }, agents: { codex: { bin: 'fake-codex', maxConcurrent: 3 } } });
+    const adapter = { async start(input: any, _bin: string, onExit: any) { onExit(0, ''); return { sessionId: input.sessionId, agent: 'codex', agentSessionId: 'fast-thread', pid: null, cwd: home, logFile: '/dev/null', state: 'done' as const, exitCode: 0 }; } };
+    const w = new Worker({ config: cfg, log: () => undefined, stateFile: resolve(home, 'state.json'), adapters: { codex: adapter as any } });
+    w.start();
     try {
-      w.start();
-      for (let i = 0; i < 50 && !app.workerHub.isOnline('w48'); i++) await new Promise((r) => setTimeout(r, 100));
-      const wt = resolve(root, 'T-255'); mkdirSync(wt);
-      const taskId = await seedTask(app.db, { key: 'T-255', state: 'queued', runtime: 'w48' });
-      const sid = await seedSession(app.db, { taskId, runtime: 'w48', agent: 'claude', kind: 'code_locate', state: 'planned' });
-      app.workerHub.send('w48', 'session.start', { sessionId: sid, taskKey: 'T-255', kind: 'code_locate', agent: 'claude', prompt: 'p', cwd: wt, mcp: { url: 'http://x/mcp', token: 't' } });
-      for (let i = 0; i < 50; i++) { if ((await app.db.one<any>('SELECT state FROM sessions WHERE id=$1', [sid])).state === 'running') break; await new Promise((r) => setTimeout(r, 100)); }
-      expect((await app.db.one<any>('SELECT state FROM sessions WHERE id=$1', [sid])).state).toBe('running');
-      expect(calls).toBe(2); // 首次被冲掉 → 补标后重试成功
-      expect(trusted(wt)).toBe(true);
-      // 管理范围外的目录：不写信任，照常报启动失败
-      const outside = mkdtempSync(resolve(tmpdir(), 'outside-'));
-      const sid2 = await seedSession(app.db, { taskId, runtime: 'w48', agent: 'claude', kind: 'code_locate', state: 'planned' });
-      app.workerHub.send('w48', 'session.start', { sessionId: sid2, taskKey: 'T-255', kind: 'code_locate', agent: 'claude', prompt: 'p', cwd: outside, mcp: { url: 'http://x/mcp', token: 't' } });
-      for (let i = 0; i < 20 && calls < 3; i++) await new Promise((r) => setTimeout(r, 100));
-      await new Promise((r) => setTimeout(r, 200));
-      expect(calls).toBe(3); // 只试一次，不补标重试
-      expect(JSON.parse(readFileSync(f, 'utf8')).projects[outside]).toBeUndefined();
-    } finally {
-      w.stop();
-      if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
-    }
+      for (let i = 0; i < 30 && !app.workerHub.isOnline('fast48'); i++) await new Promise((r) => setTimeout(r, 30));
+      const tid = await seedTask(app.db, { key: 'T-255', state: 'triaging' });
+      const sid = await seedSession(app.db, { taskId: tid, runtime: 'fast48', agent: 'codex', kind: 'code_locate', state: 'planned' });
+      app.workerHub.send('fast48', 'session.start', { sessionId: sid, taskKey: 'T-255', kind: 'code_locate', agent: 'codex', prompt: '定位', cwd: home, mcp: { url: 'http://x/mcp', token: 't' } });
+      for (let i = 0; i < 40; i++) { if ((await app.db.one<any>('SELECT state FROM sessions WHERE id=$1', [sid]))?.state === 'done') break; await new Promise((r) => setTimeout(r, 30)); }
+      expect((await app.db.one<any>('SELECT state FROM sessions WHERE id=$1', [sid]))?.state).toBe('done'); expect(w.state.sessions.codex).toBe(0);
+    } finally { w.stop(); }
   }));
   it('UT-S03-49: 定位结论入库前兜底——短仓库名补全、非法基线清空并留给拍板', () => withReport('UT-S03-49', async () => {
     const known = ['apache/doris', 'selectdb/selectdb-core'];
@@ -651,7 +579,7 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     // 端到端：MCP deliver 短名 → 分流卡仓库为全名，且能路由到登记该仓库的 dev
     await fw('dev');
     const taskId = await seedTask(app.db, { key: 'T-256', state: 'triaging', runtime: 'dev', repo: null });
-    const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'claude', kind: 'code_locate' });
+    const sid = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'codex', kind: 'code_locate' });
     const token = Intake.newToken();
     await app.db.query('UPDATE sessions SET mcp_token_hash=$2 WHERE id=$1', [sid, Intake.hash(token)]);
     const r = await mcpCall(token, 'deliver', { taskKey: 'T-256', artifacts: [{ kind: 'triage', tier: 'fix', effort: 'small', repo: { name: 'selectdb-core', confidence: 0.8 }, targetBranch: '4.0 or 4.1', suggestedPath: '补判空', codeLocations: [{ file: 'be/src/x.cpp', line: 1, why: '入口' }] }] });
@@ -673,7 +601,7 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     await app.dispatch.onSessionState('dev', { sessionId: sa, state: 'done', source: 'exit' });
     expect(await jobs(a)).toEqual(['succeeded']);
     // 2) 名额占满 + 遗留一条已派发作业（生产上从没被关过的那种）→ relocate 仍 202，作业进队列
-    for (const [i, agent] of ['claude', 'claude', 'claude', 'codex', 'codex', 'codex'].entries()) {
+    for (const [i, agent] of ['codex', 'codex', 'codex', 'codex', 'codex', 'codex'].entries()) {
       const t = await seedTask(app.db, { key: `T-27${i}`, state: 'running', runtime: 'dev' });
       await seedSession(app.db, { taskId: t, runtime: 'dev', agent, kind: 'implement' });
     }
@@ -700,7 +628,7 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     expect(note.text).toBe('代码定位未完成：worktree 创建失败');
   }));
   it('UT-S03-52: 同一会话重复申请同类审批（客户端超时重试）时接着等原审批，不建重复', () => withReport('UT-S03-52', async () => {
-    const { token, taskId } = await mcpSession('T-261', 'claude');
+    const { token, taskId } = await mcpSession('T-261', 'codex');
     // 测试时钟冻结：阻塞调用发出后手动推进时钟让它超时返回
     const timedOut = async (call: Promise<any>) => { await new Promise((r) => setTimeout(r, 300)); await app.fakeClock.advance(1_000); return call; };
     const req = () => timedOut(mcpCall(token, 'request_approval', { taskKey: 'T-261', actionType: 'create_pr', title: '创建 PR', body: '改动说明', timeoutMinutes: 0.01 }));
@@ -714,7 +642,7 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     expect(Number((await app.db.one<any>(`SELECT count(*) AS n FROM approvals WHERE task_id=$1`, [taskId])).n)).toBe(2);
   }));
   it('UT-S03-53: 会话结束时本会话还有待批审批 → 任务等待审批，不算「没产物」', () => withReport('UT-S03-53', async () => {
-    const { token, taskId, sessionId } = await mcpSession('T-262', 'claude');
+    const { token, taskId, sessionId } = await mcpSession('T-262', 'codex');
     const call = mcpCall(token, 'request_approval', { taskKey: 'T-262', actionType: 'create_pr', title: '创建 PR', body: '改动说明', timeoutMinutes: 0.01 });
     await new Promise((res) => setTimeout(res, 300)); await app.fakeClock.advance(1_000);
     const r = await call;
@@ -764,7 +692,7 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
   }));
   it('UT-S03-55: 批准后续接已结束的会话失败 → 进失败卡，不假装在跑', () => withReport('UT-S03-55', async () => {
     const w = await fw('dev');
-    const { token, taskId, sessionId } = await mcpSession('T-264', 'claude');
+    const { token, taskId, sessionId } = await mcpSession('T-264', 'codex');
     const call = mcpCall(token, 'request_approval', { taskKey: 'T-264', actionType: 'create_pr', title: '创建 PR', body: '改动说明', timeoutMinutes: 0.01 });
     await new Promise((r) => setTimeout(r, 300)); await app.fakeClock.advance(1_000);
     const key = (await call).result.structuredContent.approvalKey;
@@ -786,7 +714,7 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
   }));
   it('UT-S03-56: review 子任务回写结论（kind=review），交 pr 被明确拒绝；review worktree 沿用父任务基线', () => withReport('UT-S03-56', async () => {
     const w = await fw('dev');
-    const parent = await seedTask(app.db, { key: 'T-265', state: 'delivered', runtime: 'dev', agent: 'claude' });
+    const parent = await seedTask(app.db, { key: 'T-265', state: 'delivered', runtime: 'dev', agent: 'codex' });
     await app.db.query(`UPDATE tasks SET base_branch='branch-hotfix-x' WHERE id=$1`, [parent]);
     const child = await seedTask(app.db, { key: 'T-265.2', parentKey: 'T-265', state: 'queued', kind: 'review', runtime: 'dev', agent: 'codex' });
     // 基线沿用父任务
@@ -984,10 +912,10 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
   }));
   it('UT-S03-63: 换仓库 / 基线重来：停掉在跑的会话、作废旧审批、按新仓库派全新会话', () => withReport('UT-S03-63', async () => {
     const w = await fw('dev', { repos: { 'selectdb/selectdb-core': { main: '/tmp/fx/core', worktreeRoot: '/tmp/fx/wt' }, 'apache/doris': { main: '/tmp/fx/doris', worktreeRoot: '/tmp/fx/wt-doris' } } });
-    const taskId = await seedTask(app.db, { key: 'T-275', state: 'waiting_approval', runtime: 'dev', agent: 'claude', authorAgent: 'claude', repo: 'selectdb/selectdb-core' });
+    const taskId = await seedTask(app.db, { key: 'T-275', state: 'waiting_approval', runtime: 'dev', agent: 'codex', authorAgent: 'codex', repo: 'selectdb/selectdb-core' });
     await app.db.query(`UPDATE tasks SET base_branch='branch-selectdb-doris-5.0-incr' WHERE id=$1`, [taskId]);
     await app.db.query(`UPDATE context_packs SET jira=$2 WHERE task_id=$1`, [taskId, JSON.stringify({ key: 'DORIS-29301', affectsVersions: ['5.0.0'], versionTarget: { repo: 'apache/doris', baseBranch: 'master', pickTargets: [], versions: ['5.0.0'], unmatched: [] } })]);
-    const old = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'claude', kind: 'implement', state: 'running' });
+    const old = await seedSession(app.db, { taskId, runtime: 'dev', agent: 'codex', kind: 'implement', state: 'running' });
     const ap = await app.approvals.request({ taskId, sessionId: old, actionType: 'create_pr', title: 'fix', body: 'b', payload: { taskKey: 'T-275', executor: 'agent' } });
     // 还没拍板的不能重来；没登记的仓库拒绝
     const pd = await seedTask(app.db, { key: 'T-276', state: 'pending_decision' });
@@ -1012,7 +940,7 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     expect((await app.tasks.byKey('T-275')).state).toBe('queued');
   }));
   it('UT-S03-64: 公开仓库的 create_pr 文案必须英文、不带内部单号，否则退回改写', () => withReport('UT-S03-64', async () => {
-    const { token, taskId } = await mcpSession('T-277', 'claude');
+    const { token, taskId } = await mcpSession('T-277', 'codex');
     await app.db.query(`UPDATE tasks SET repo_name='apache/doris', source_ref='DORIS-29301' WHERE id=$1`, [taskId]);
     const req = (title: string, body: string) => mcpCall(token, 'request_approval', { taskKey: 'T-277', actionType: 'create_pr', title, body, timeoutMinutes: 0.01 });
     const zh = await req('[fix](fe) Check index jobs', '### 问题\n轻量 Schema Change 路径下 DROP INDEX 报错');
@@ -1025,7 +953,7 @@ describe('S03 1.6 实验环境回归（2026-09-24）', () => {
     const ok = await okCall;
     expect(ok.error).toBeUndefined(); expect(ok.result.structuredContent.approvalKey).toMatch(/^A-\d+$/);
     // 非公开仓库不限制
-    const s2 = await mcpSession('T-278', 'claude');
+    const s2 = await mcpSession('T-278', 'codex');
     const zhCall = mcpCall(s2.token, 'request_approval', { taskKey: 'T-278', actionType: 'create_pr', title: '修复', body: '中文描述', timeoutMinutes: 0.01 });
     await new Promise((r) => setTimeout(r, 300)); await app.fakeClock.advance(1_000);
     expect((await zhCall).error).toBeUndefined();

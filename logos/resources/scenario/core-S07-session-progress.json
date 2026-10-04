@@ -6,18 +6,18 @@
   "baseUrl": "{{env.CENTER_URL}}",
   "auth": { "panelToken": "{{env.FOREMAN_PANEL_TOKEN}}", "workerToken": "{{env.FOREMAN_TOKEN}}" },
   "dependencies": [
-    { "dependency": "Claude Code CLI", "strategy": "mock-service", "config": "假 claude 脚本模拟 --bg / agents --json / logs / --bg --resume，并按时间线调用 MCP 工具", "handle": "claude" },
+    { "dependency": "Codex CLI", "strategy": "mock-service", "config": "假 codex 脚本模拟 exec / exec resume", "handle": "codex" },
     { "dependency": "飞书事件与消息", "strategy": "mock-service", "config": "假 lark-cli：回放回复事件，记录发送", "handle": "lark" }
   ],
   "presets": {
     "clock": [{ "step": "setup", "action": "clock.freeze" }],
     "dev-online": [
-      { "step": "setup", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 }, "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": [] } }
+      { "step": "setup", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": { "selectdb/selectdb-core": { "main": "/tmp/fx/selectdb-core", "worktreeRoot": "/tmp/fx/wt" } }, "capabilities": [] } }
     ],
     "running-session": [
-      { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.runningOn(key='T-231', runtime='dev', agent='claude', session_state='running', agent_session_id='cl-231')}}" } },
+      { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.runningOn(key='T-231', runtime='dev', agent='codex', session_state='running', agent_session_id='cl-231')}}" } },
       { "step": "setup", "action": "db.assert", "args": { "sql": "select id, mcp_token_hash from sessions where task_id=(select id from tasks where key='T-231')" }, "extract": { "sessionId": "rows[0].id" } },
-      { "step": "setup", "action": "mock.set", "args": { "handle": "claude", "attach": { "agentSessionId": "cl-231", "logs": "{{fixture:logs(lines=600)}}" } } }
+      { "step": "setup", "action": "mock.set", "args": { "handle": "codex", "attach": { "agentSessionId": "cl-231", "logs": "{{fixture:logs(lines=600)}}" } } }
     ]
   },
   "cases": [
@@ -82,14 +82,14 @@
       "kind": "main",
       "use": ["clock", "dev-online"],
       "setup": [
-        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.runningOn(key='T-231', runtime='dev', agent='claude', session_state='done', agent_session_id='cl-231')}}" } },
+        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.runningOn(key='T-231', runtime='dev', agent='codex', session_state='done', agent_session_id='cl-231')}}" } },
         { "step": "setup", "action": "db.assert", "args": { "sql": "select id from sessions where task_id=(select id from tasks where key='T-231')" }, "extract": { "sessionId": "rows[0].id" } }
       ],
       "steps": [
         { "step": "Step 35", "action": "clock.advance", "args": { "minutes": 70 } },
         { "step": "Step 36-38", "method": "POST", "url": "/api/tasks/T-231/messages", "body": { "text": "顺便把 timeout 默认值从 1s 改成 5s" }, "expected_status": 202, "assert": [{ "path": "body.delivery", "equals": "resumed" }] },
         { "step": "Step 38-40", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.resume", "match": { "payload.sessionId": "{{sessionId}}" } }, "assert": [{ "path": "payload.text", "contains": "5s" }], "extract": { "c": "id" } },
-        { "step": "Step 40", "action": "mock.expect", "mock": { "dependency": "Claude Code CLI", "strategy": "mock-service", "config": "假 claude 记录参数" }, "args": { "handle": "claude", "kind": "exec", "match": { "args": "--bg --resume cl-231" } } },
+        { "step": "Step 40", "action": "mock.expect", "mock": { "dependency": "Codex CLI", "strategy": "mock-service", "config": "假 codex 记录参数" }, "args": { "handle": "codex", "kind": "exec", "match": { "args": "exec resume cl-231" } } },
         { "step": "Step 41", "action": "runtime.reply", "args": { "name": "dev", "type": "session.state", "payload": { "sessionId": "{{sessionId}}", "state": "running", "source": "poll", "observedAt": "{{now}}" } } },
         { "step": "Step 41", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-231/messages" }, "assert": [{ "path": "body.items[*].text", "matches": "已恢复会话" }] } },
         { "step": "Step 41", "method": "GET", "url": "/api/tasks/T-231", "expected_status": 200, "assert": [{ "path": "body.currentSession.id", "equals": "{{sessionId}}" }, { "path": "body.currentSession.state", "equals": "running" }] }
@@ -201,7 +201,7 @@
         { "step": "EX-37.1", "action": "scheduler.tick", "args": { "job": "heartbeat-check" } },
         { "step": "EX-37.1", "method": "POST", "url": "/api/tasks/T-231/messages", "body": { "text": "再检查一遍 UT" }, "expected_status": 202, "assert": [{ "path": "body.delivery", "equals": "queued" }, { "path": "body.message.delivery", "equals": "queued" }] },
         { "step": "EX-37.1", "action": "db.assert", "args": { "sql": "select count(*) as n from sessions where task_id=(select id from tasks where key='T-231')" }, "assert": [{ "path": "rows[0].n", "equals": 1 }] },
-        { "step": "S05 Step 13", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:claude", "agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "claude": { "bin": "fake-claude", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] }, "assert": [{ "path": "ack.pendingCommands[0].type", "equals": "session.resume" }] },
+        { "step": "S05 Step 13", "action": "runtime.register", "args": { "name": "dev", "transport": "direct", "labels": ["agent:codex", "build:doris", "repo:selectdb/selectdb-core"], "agents": { "codex": { "bin": "fake-codex", "maxConcurrent": 3 } }, "repos": {}, "capabilities": [] }, "assert": [{ "path": "ack.pendingCommands[0].type", "equals": "session.resume" }] },
         { "step": "EX-37.1", "action": "runtime.expectCommand", "args": { "name": "dev", "type": "session.resume" }, "assert": [{ "path": "payload.text", "equals": "再检查一遍 UT" }] },
         { "step": "EX-37.1", "action": "wait.until", "args": { "http": { "method": "GET", "url": "/api/tasks/T-231/messages" }, "assert": [{ "path": "body.items[-1].delivery", "equals": "delivered" }] } }
       ]
@@ -213,7 +213,7 @@
       "kind": "exception",
       "use": ["clock", "dev-online"],
       "setup": [
-        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.runningOn(key='T-231', runtime='dev', agent='claude', session_state='done', agent_session_id='cl-gone')}}" } },
+        { "step": "setup", "action": "db.seed", "args": { "table": "tasks", "rows": "{{fixture:task.runningOn(key='T-231', runtime='dev', agent='codex', session_state='done', agent_session_id='cl-gone')}}" } },
         { "step": "setup", "action": "db.assert", "args": { "sql": "select id from sessions where task_id=(select id from tasks where key='T-231')" }, "extract": { "sessionId": "rows[0].id" } }
       ],
       "steps": [

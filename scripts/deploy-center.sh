@@ -61,9 +61,8 @@ center:
   url: ws://127.0.0.1:7801
   token: \${FOREMAN_TOKEN}
 transport: local
-labels: [agent:claude, agent:codex, text]
+labels: [agent:codex, text]
 agents:
-  claude: { bin: claude, maxConcurrent: 3 }
   codex: { bin: codex, maxConcurrent: 3 }
 repos: {}
 capabilities: []

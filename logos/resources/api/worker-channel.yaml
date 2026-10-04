@@ -159,10 +159,6 @@ components:
           description: "按分支族的构建环境（thirdparty、jdk 等）。worker 以 export K=\"V\" 写入 worktree 根目录的 custom_env.sh（Doris env.sh 会 source）。中心不传时，worker 按 baseBranch 在 build_env.<repo> 下选档位：先找与分支同名的键，再找最长前缀匹配的键（如 branch-selectdb-doris-4.1 命中 4.1），都没有才用 default；连 default 都没有则该仓库不提供构建环境，worker 在 worktree.ready 中回报 buildEnvMissing=true，由中心据此降级（不要拿不匹配的依赖硬编译）"
         contextMarkdown: { type: string, description: "写入 .foreman/context.md 的上下文包" }
         taskJson: { type: object, additionalProperties: true, description: "写入 .foreman/task.json" }
-        hooks:
-          type: object
-          description: "可选。传入时写入 worktree 内 .claude/settings.json；中心默认不传——需要输入由 worker 轮询 claude state=blocked 发现并上报 session.state waiting_input（source=poll）"
-          additionalProperties: true
         reuseIfExists: { type: boolean, default: true }
     WorktreeReady:
       type: object
@@ -194,11 +190,11 @@ components:
         sessionId: { type: string, format: uuid, description: "中心分配的会话 id" }
         taskKey: { type: string }
         kind: { type: string, enum: [implement, review, code_locate, plan, proto, dispatcher, candidate_scan] }
-        agent: { type: string, enum: [claude, codex, opencode] }
+        agent: { type: string, enum: [codex] }
         model: { type: string, nullable: true }
         prompt: { type: string }
         cwd: { type: string, description: "worktree 路径；调度员与候选扫描为临时目录" }
-        name: { type: string, description: "claude --bg --name" }
+        name: { type: string, description: "任务会话显示名称（Codex 不使用此参数）" }
         mcp:
           type: object
           required: [url, token]
@@ -215,7 +211,7 @@ components:
       required: [sessionId, agentSessionId, startedAt]
       properties:
         sessionId: { type: string, format: uuid }
-        agentSessionId: { type: string, description: "claude --bg 输出的 id / codex session id" }
+        agentSessionId: { type: string, description: "Codex thread_id" }
         startedAt: { type: string, format: date-time }
         pid: { type: integer, nullable: true }
     SessionResume:
@@ -236,7 +232,7 @@ components:
       properties:
         sessionId: { type: string, format: uuid }
         state: { type: string, enum: [running, waiting_input, done, failed, stopped, lost] }
-        waitingFor: { type: string, nullable: true, description: "claude agents --json 的 waitingFor" }
+        waitingFor: { type: string, nullable: true, description: "等待输入的原因（兼容历史 worker 事件）" }
         source: { type: string, enum: [poll, hook, exit], description: "状态来源：轮询 agents --json / Notification 钩子 / 进程退出" }
         exitCode: { type: integer, nullable: true }
         failureReason: { type: string, nullable: true }

@@ -361,6 +361,8 @@ components:
       properties:
         key: { type: string, example: A-88 }
         taskKey: { type: string, example: T-231.1 }
+        rootTask: { $ref: 'tasks.yaml#/components/schemas/RootTask', description: "收件箱按实际根任务归组，审批仍逐项处理" }
+        channel: { type: string, description: "收件箱补充任务实际频道" }
         taskSourceUrl: { type: string, nullable: true, description: "来源单链接（Jira）" }
         priority: { type: string, nullable: true, description: "所属任务的 Jira 优先级原值" }
         actionType: { $ref: '#/components/schemas/ActionType' }

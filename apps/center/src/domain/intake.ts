@@ -10,7 +10,7 @@ import type { Notifications } from './notifications.js';
 import type { Approvals } from './approvals.js';
 import type { WorkerHub } from '../hub/workerHub.js';
 import type { Tasks } from './tasks.js';
-import { AGENTS, CODE_LOCATE_TIMEOUT_MINUTES, resolveVersionTarget, type CenterConfig, type AgentName, type VersionTarget } from '@foreman/shared';
+import { CODE_LOCATE_TIMEOUT_MINUTES, resolveVersionTarget, type CenterConfig, type AgentName, type VersionTarget } from '@foreman/shared';
 import { sha256 } from './approvals.js';
 
 export interface JiraIssue { key: string; summary: string; description?: string; project?: string; component?: string | null; version?: string | null; affectsVersions?: string[]; fixVersions?: string[]; priority?: string | null; assignee?: string | null; status?: string; updated?: string; comments?: Array<{ author: string; body: string }>; attachments?: Array<{ name: string; url: string }>; url?: string }
@@ -52,8 +52,8 @@ export class Intake {
   }
 
   private async findRuntime(label: string, capability?: string) {
-    const rts = await this.db.query<{ id: string; name: string; labels: string[]; capabilities: string[] }>(`SELECT id, name, labels, capabilities FROM runtimes WHERE online ORDER BY name`);
-    return rts.rows.find((r) => r.labels.includes(label) && this.hub.isOnline(r.name) && (!capability || (r.capabilities ?? []).includes(capability) || r.labels.includes(label))) ?? null;
+    const rts = await this.db.query<{ id: string; name: string; labels: string[]; capabilities: string[]; agents: Record<string, unknown> }>(`SELECT id, name, labels, capabilities, agents FROM runtimes WHERE online ORDER BY name`);
+    return rts.rows.find((r) => r.labels.includes(label) && (label !== 'build:doris' || !!r.agents?.codex) && this.hub.isOnline(r.name) && (!capability || (r.capabilities ?? []).includes(capability) || r.labels.includes(label))) ?? null;
   }
 
   /** runtime 上线：补派排队作业（EX-2.1）与排队的代码定位（EX-12.1） */
@@ -71,7 +71,7 @@ export class Intake {
 
   /** 派一个系统作业并等待结果（MCP lookup_jira、jira_comment 执行器用） */
   async runJob(kind: 'jira-lookup' | 'jira-comment' | 'gh-pr-view' | 'git-publish', args: Record<string, unknown>, timeoutMs = 60_000, opts?: { runtime?: string }): Promise<Record<string, unknown>> {
-    const label = kind.startsWith('jira') ? this.cfg.sources.jira.run_on_label : kind === 'git-publish' ? null : 'agent:claude';
+    const label = kind.startsWith('jira') ? this.cfg.sources.jira.run_on_label : kind === 'git-publish' ? null : 'agent:codex';
     // 指定 runtime（git-publish 必须在任务工作区所在的机器上跑）
     const rt = opts?.runtime
       ? await this.db.one<{ id: string; name: string }>('SELECT id, name FROM runtimes WHERE name=$1 AND online', [opts.runtime]).then((r) => (r && this.hub.isOnline(r.name) ? r : null))
@@ -273,22 +273,29 @@ export class Intake {
     const named = t.repo_name ? normalizeRepo(t.repo_name, known) : null;
     const repo = named && known.includes(named) ? named : fallback;
     if (named && named !== t.repo_name && known.includes(named)) await this.db.query(`UPDATE tasks SET repo_name=$2 WHERE id=$1`, [taskId, named]);
-    await this.db.query(`INSERT INTO sessions (task_id, runtime_id, agent, kind, state, prompt, created_at, updated_at) VALUES ($1,$2,$3,'code_locate','planned','',$4,$4)`, [taskId, rt.id, agent, now]);
+    const reserved = await this.db.reserveCodex(rt.id, this.cfg.agent_concurrency.codex, async (c) => {
+      const existing = await this.db.one(`SELECT 1 FROM sessions WHERE task_id=$1 AND kind='code_locate' AND state IN ('planned','running','waiting_input')`, [taskId], c);
+      if (existing) return false;
+      await this.db.query(`INSERT INTO sessions (task_id, runtime_id, agent, kind, state, prompt, created_at, updated_at) VALUES ($1,$2,$3,'code_locate','planned','',$4,$4)`, [taskId, rt.id, agent, now], c);
+      return true;
+    });
+    if (reserved === false) return true;
+    if (reserved === null) {
+      if (jobId) await this.db.query(`UPDATE jobs SET status='queued', dispatched_at=NULL WHERE id=$1`, [jobId]);
+      else await this.enqueueCodeLocate(taskId);
+      return false;
+    }
     await this.db.query(`UPDATE tasks SET runtime_name=$2, updated_at=$3 WHERE id=$1`, [taskId, rt.name, now]);
     await this.sendWorktreeCreate(taskId, rt.name, repo, 'code_locate');
     return true;
   }
 
-  /** 有空闲名额的 agent：先按轮换顺序，再换另一家；口径与 dispatch.pickFreeAgent 一致 */
+  /** Codex 名额未满时可启动定位，缺少 Codex 时不能回退旧执行器。 */
   private async freeAgent(rt: { id: string; agents: Record<string, { maxConcurrent?: number }> | null }): Promise<AgentName | null> {
-    const first = await this.nextAgent();
-    for (const agent of [first, ...AGENTS.filter((a) => a !== 'opencode' && a !== first)] as AgentName[]) {
-      const cap = rt.agents?.[agent]?.maxConcurrent ?? this.cfg.agent_concurrency[agent];
-      if (cap == null) continue;
-      const n = Number((await this.db.one<{ n: string }>(`SELECT count(*) AS n FROM sessions WHERE runtime_id=$1 AND agent=$2 AND state IN ('planned','running','waiting_input')`, [rt.id, agent]))?.n ?? 0);
-      if (n < Number(cap)) return agent;
-    }
-    return null;
+    if (!rt.agents?.codex) return null;
+    const cap = rt.agents.codex.maxConcurrent ?? this.cfg.agent_concurrency.codex;
+    const n = Number((await this.db.one<{ n: string }>(`SELECT count(*) AS n FROM sessions WHERE runtime_id=$1 AND agent='codex' AND state IN ('planned','running','waiting_input')`, [rt.id]))?.n ?? 0);
+    return n < Number(cap) ? 'codex' : null;
   }
 
   /** 名额释放后按入队顺序补派排队的代码定位（派不出去就停） */
@@ -405,14 +412,8 @@ export class Intake {
     }
   }
 
-  /** 轮换：上一实现任务的作者换一家（S03 Step 7） */
-  async nextAgent(): Promise<AgentName> {
-    const last = await this.db.one<{ author_agent: string | null }>(`SELECT author_agent FROM tasks WHERE author_agent IS NOT NULL ORDER BY updated_at DESC LIMIT 1`);
-    const order: AgentName[] = AGENTS.filter((a) => a !== 'opencode');
-    if (!last?.author_agent) return 'claude';
-    const i = order.indexOf(last.author_agent as AgentName);
-    return order[(i + 1) % order.length] ?? 'claude';
-  }
+  /** 所有任务统一使用 Codex。 */
+  async nextAgent(): Promise<AgentName> { return 'codex'; }
 
   /** 会话 token（MCP 鉴权） */
   static newToken() { return randomBytes(24).toString('hex'); }

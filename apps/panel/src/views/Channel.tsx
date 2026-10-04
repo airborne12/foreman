@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, ApiError, errText, cleanTitle } from '../api';
+import { api, ApiError, errText } from '../api';
 import { navigate, type Shared } from '../app';
-import { AutoTextarea, Btn, Empty, Icon, PrioBadge, StateBadge, Time, useToast } from '../ui';
+import { AutoTextarea, Btn, Empty, Icon, useToast } from '../ui';
 import { MessageRow, type DraftAction } from './Message';
+import { TaskTree } from './TaskTree';
 
 const EXAMPLES = ['帮我看下 CIR-123，出个方案', '/task new --source CIR-123 --path fix', '/runtime'];
 
@@ -15,18 +16,26 @@ export function ChannelView({ slug, shared }: { slug: string; shared: Shared }) 
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState('');
   const [showDone, setShowDone] = useState(false);
+  const [search, setSearch] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [pages, setPages] = useState(1);
+  const [totals, setTotals] = useState({ total: 0, activeTotal: 0, allTotal: 0 });
   const [asideOpen, setAsideOpen] = useState(false);
   const [notFound, setNotFound] = useState(false);
   const toast = useToast();
   const feedRef = useRef<HTMLDivElement>(null);
+  const loadVersion = useRef(0);
 
   const load = useCallback(async () => {
+    const version = ++loadVersion.current;
     try {
-      const [c, m, t] = await Promise.all([api(`/api/channels/${slug}`), api(`/api/channels/${slug}/messages?limit=200`), api(`/api/channels/${slug}/threads`)]);
-      setChannel(c); setMessages(m.items ?? []); setThreads(t.items ?? []); setErr(''); setNotFound(false);
-    } catch (e) { if (e instanceof ApiError && e.status === 404) setNotFound(true); else setErr(errText(e)); }
-  }, [slug]);
-  useEffect(() => { setChannel(null); setMessages([]); setThreads([]); }, [slug]);
+      const [c, m, result] = await Promise.all([api(`/api/channels/${slug}`), api(`/api/channels/${slug}/messages?limit=200`), api(`/api/channels/${slug}/threads?activeOnly=${!showDone}&throughPage=${pages}&search=${encodeURIComponent(searchQuery)}`)]);
+      if (version !== loadVersion.current) return;
+      setChannel(c); setMessages(m.items ?? []); setThreads(result.items ?? []); setTotals(result); setErr(''); setNotFound(false);
+    } catch (e) { if (version !== loadVersion.current) return; if (e instanceof ApiError && e.status === 404) setNotFound(true); else setErr(errText(e)); }
+  }, [slug, pages, showDone, searchQuery]);
+  useEffect(() => { setChannel(null); setMessages([]); setThreads([]); setPages(1); setSearch(''); setSearchQuery(''); }, [slug]);
+  useEffect(() => { const timer = setTimeout(() => { setPages(1); setSearchQuery(search); }, 250); return () => clearTimeout(timer); }, [search]);
   useEffect(() => { void load(); }, [shared.rev, load]);
   useEffect(() => { const el = feedRef.current; if (el) el.scrollTop = el.scrollHeight; }, [messages.length]);
 
@@ -53,8 +62,6 @@ export function ChannelView({ slug, shared }: { slug: string; shared: Shared }) 
 
   if (notFound) return <div className="content"><div className="pane"><Empty icon="hash" title={`没有 #${slug} 这个频道`}><div className="small">左栏「频道」旁的 + 可以新建</div></Empty></div></div>;
 
-  const active = threads.filter((t) => !['done', 'delivered'].includes(t.state));
-  const shown = showDone ? threads : active;
   const d = channel?.dispatcher;
   return (
     <div className="content">
@@ -96,23 +103,16 @@ export function ChannelView({ slug, shared }: { slug: string; shared: Shared }) 
       <aside className={`aside${asideOpen ? ' open' : ''}`} aria-label="线程">
         <div className="aside-sec">
           <div className="row between" style={{ marginBottom: 8 }}>
-            <h4 style={{ margin: 0 }}>线程 · 进行中 {active.length}</h4>
+            <h4 style={{ margin: 0 }}>任务树 · 进行中 {totals.activeTotal}</h4>
             <span className="row" style={{ gap: 4 }}>
-              {threads.length > active.length && <Btn className="ghost sm" onClick={() => setShowDone(!showDone)}>{showDone ? '只看进行中' : `含已交付 ${threads.length - active.length}`}</Btn>}
+              {(showDone || totals.allTotal > totals.activeTotal) && <Btn className="ghost sm" onClick={() => { setPages(1); setShowDone(!showDone); }}>{showDone ? '只看进行中' : `含已交付 ${totals.allTotal - totals.activeTotal}`}</Btn>}
               {asideOpen && <Btn className="ghost icon sm" icon="x" aria-label="收起" onClick={() => setAsideOpen(false)} />}
             </span>
           </div>
-          {shown.map((t) => (
-            <button key={t.key} className="thread-row" onClick={() => navigate(`/c/${slug}/t/${t.key}`)} title={t.title}>
-              <span className="k">{t.key}</span>
-              <span className="stack" style={{ gap: 2, minWidth: 0 }}>
-                <span className="ttl">{cleanTitle(t.title, t.source?.ref)}</span>
-                <span className="row small muted" style={{ gap: 6, flexWrap: 'nowrap' }}>{t.source?.ref && <span className="mono ellipsis">{t.source.ref}</span>}<PrioBadge priority={t.priority} /><Time iso={t.updatedAt} /></span>
-              </span>
-              <StateBadge state={t.state} />
-            </button>
-          ))}
-          {!shown.length && <div className="small muted">{threads.length ? '没有进行中的线程' : '还没有线程'}</div>}
+          <input className="tree-search" aria-label="搜索任务树" placeholder="搜索任务号、标题或来源单号" value={search} maxLength={200} onChange={(e) => setSearch(e.target.value)} />
+          <TaskTree key={slug} roots={threads} search={searchQuery} />
+          {threads.length < totals.total && pages < 100 && <Btn className="ghost sm" onClick={() => setPages((n) => n + 1)}>加载更多（{threads.length}/{totals.total}）</Btn>}
+          {!threads.length && <div className="small muted">{searchQuery ? '没有匹配的任务' : showDone ? '还没有任务' : '没有进行中的任务'}</div>}
         </div>
         <div className="aside-sec">
           <h4>频道概况</h4>

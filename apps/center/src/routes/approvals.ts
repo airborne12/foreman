@@ -25,7 +25,16 @@ export function approvalRoutes(app: AppContext) {
     const failures = await Promise.all(rows.rows.map((t) => app.tasks.serializeSummary(t, t.channel_slug)));
     const questions = await app.questions.listOpen();
     const candidates = await app.feishuIntake.listCandidates();
-    return c.json({ approvals, questions, failures, candidates, counts: { actionable: approvals.length + failures.length + questions.length, candidates: candidates.length } });
+    const keys = [...approvals.map((a) => a.taskKey), ...questions.map((q) => q.taskKey), ...failures.map((f) => f.key)].filter((key): key is string => !!key);
+    const roots = await app.tasks.trees.contexts([...new Set(keys)]);
+    const channels = keys.length ? await app.db.query<any>(`SELECT t.key,c.slug AS channel,cp.jira->>'priority' AS priority FROM tasks t JOIN channels c ON c.id=t.channel_id LEFT JOIN context_packs cp ON cp.task_id=t.id WHERE t.key=ANY($1::text[])`, [keys]) : { rows: [] };
+    const locations = new Map(channels.rows.map((t: any) => [t.key, t]));
+    const enrich = (item: any, key: string | null) => {
+      const root = key ? roots.get(key) : null;
+      const { id: _id, ...rootTask } = root ?? {};
+      return { ...item, channel: key ? locations.get(key)?.channel ?? item.channel : item.channel, priority: item.priority ?? (key ? locations.get(key)?.priority : null) ?? null, rootTask: root ? rootTask : null };
+    };
+    return c.json({ approvals: approvals.map((a) => enrich(a, a.taskKey)), questions: questions.map((q) => enrich(q, q.taskKey)), failures: failures.map((f) => enrich(f, f.key)), candidates, counts: { actionable: approvals.length + failures.length + questions.length, candidates: candidates.length } });
   });
 
   r.get('/api/approvals', async (c) => {

@@ -25,7 +25,7 @@ export async function seedTask(db: Db, t: { key: string; channel?: string; state
 export async function runtimeId(db: Db, name: string) {
   const r = await db.one<{ id: string }>('SELECT id FROM runtimes WHERE name=$1', [name]);
   if (r) return r.id;
-  return seedRuntime(db, { name, online: false, labels: ['agent:claude', 'agent:codex', 'build:doris'], lastSeenAt: null, agents: { claude: { bin: 'claude', maxConcurrent: 3 }, codex: { bin: 'codex', maxConcurrent: 3 } } });
+  return seedRuntime(db, { name, online: false, labels: ['agent:codex', 'build:doris'], lastSeenAt: null, agents: { codex: { bin: 'codex', maxConcurrent: 3 } } });
 }
 
 export async function seedSession(db: Db, s: { taskId?: string | null; channelId?: string | null; runtime: string; agent: string; kind?: string; state?: string; agentSessionId?: string | null; cwd?: string | null; startedAt?: Date | null; lastProgressAt?: Date | null }) {
@@ -50,6 +50,6 @@ export async function seedRuntime(db: Db, r: { name: string; online?: boolean; l
   const row = await db.one<{ id: string }>(
     `INSERT INTO runtimes (name, online, transport, labels, agents, last_seen_at, registered_at) VALUES ($1,$2,$3,$4,$5,$6,$6)
      ON CONFLICT (name) DO UPDATE SET online=EXCLUDED.online, labels=EXCLUDED.labels, agents=EXCLUDED.agents, last_seen_at=EXCLUDED.last_seen_at RETURNING id`,
-    [r.name, r.online ?? true, r.transport ?? 'direct', r.labels ?? [], JSON.stringify(r.agents ?? { claude: { bin: 'claude', maxConcurrent: 3 } }), r.lastSeenAt === undefined ? new Date() : r.lastSeenAt]);
+    [r.name, r.online ?? true, r.transport ?? 'direct', r.labels ?? [], JSON.stringify(r.agents ?? { codex: { bin: 'codex', maxConcurrent: 3 } }), r.lastSeenAt === undefined ? new Date() : r.lastSeenAt]);
   return row!.id;
 }

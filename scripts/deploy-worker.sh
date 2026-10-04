@@ -43,9 +43,8 @@ center:
   url: ws://127.0.0.1:7801      # 经中心机 ssh -R 反向隧道
   token: ${FOREMAN_TOKEN}
 transport: reverse-tunnel
-labels: [agent:claude, agent:codex, vpn:jira]
+labels: [agent:codex, vpn:jira]
 agents:
-  claude: { bin: claude, maxConcurrent: 3 }
   codex: { bin: codex, maxConcurrent: 3 }
 # 代码类任务需要在这里登记 Doris 克隆与 worktree 根目录，例如：
 # repos:

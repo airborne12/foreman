@@ -32,7 +32,7 @@ function version(bin: string): { ok: boolean; version: string | null; note?: str
 export function probe(opts: { repos?: Record<string, string>; env?: NodeJS.ProcessEnv; homeDir?: string }): ProbeResult {
   const env = opts.env ?? process.env;
   const out: ProbeResult = { agents: {}, tools: {}, repos: {}, labels: [], capabilities: [], warnings: [] };
-  for (const a of ['claude', 'codex', 'opencode']) {
+  for (const a of ['codex']) {
     const bin = which(a, env);
     if (!bin) { out.agents[a] = { bin: a, version: null, ok: false, note: '未找到' }; continue; }
     const v = version(bin);
@@ -63,6 +63,6 @@ export function formatProbe(p: ProbeResult): string {
   for (const [t, r] of Object.entries(p.tools)) lines.push(`  ${t.padEnd(9)}${r.ok ? '✓' : '✗'} ${r.bin ?? '未安装'}`);
   for (const [n, r] of Object.entries(p.repos)) lines.push(`  仓库     ✓ ${n} → ${r.main}${r.buildEnvOk ? '' : '（无 thirdparty/installed）'}`);
   lines.push(`  构建环境 ${p.labels.includes('build:doris') ? 'build:doris ✓' : 'build:doris ✗ 未发现 thirdparty/installed（不会打标签）'}`);
-  lines.push(`  标签     agent:claude ${p.labels.includes('agent:claude') ? '✓' : '✗'} · agent:codex ${p.labels.includes('agent:codex') ? '✓' : '✗'} · agent:opencode ${p.labels.includes('agent:opencode') ? '✓' : '✗'}`);
+  lines.push(`  标签     agent:codex ${p.labels.includes('agent:codex') ? '✓' : '✗'}`);
   return lines.join('\n');
 }

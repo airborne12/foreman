@@ -255,3 +255,11 @@ scripts/build.sh          先构建面板再打三个单文件 bundle
 | agent 自己轮询审批结果 | 审批 30 分钟超时后 agent 打算「每 15–20 分钟醒一次查审批」，白烧额度 | 告知其结束本轮进入空闲：批准后中心会通过续接把结果送回会话（EX-22.1 本就如此设计） |
 
 本地验证的现实约束：4.1 基线要 google-cloud-cpp 2.45（oauth2）与 thrift 0.24，机器上 8 套预编译 thirdparty 都没有，BE UT 跑不了（见部署报告第 7 条）。最终采用的口径是「改动 TU 的 `clang++ -fsyntax-only` + clang-format + `diff --check`」，并要求在 PR 描述里写明本地未跑 UT、需 CI 验证。
+
+## 2026-10-01：Codex 单执行器
+
+- 删除 Claude 适配器、后台会话轮询、信任文件操作及工作区 hooks；worker 只探测并注册 Codex。
+- 默认派发、代码定位、调度、候选扫描、review 与失败重试都使用 Codex；满额排队，review 用独立会话。
+- 新 HTTP／MCP／worker 输入仅接受 codex；旧配置过滤停用执行器。数据库历史记录保留，旧会话不传给 Codex 续接；旧频道调度员由新 Codex 会话承接。
+- 修复 Codex 快速退出时的会话初始化顺序、停止状态与 JSON 恢复判定；同步面板、发布模板和编排 fixture。
+- 增量覆盖 UT-S03-66～74、ST-S03-20～24；生产服务尚未发布此变更。

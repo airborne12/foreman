@@ -189,7 +189,7 @@ export class McpService {
         const a = z.object({
           channel: z.string(), source: z.string(), sourceTitle: z.string().optional(), repo: z.string().nullable().optional(),
           repoSource: z.enum(['mapping', 'llm', 'manual']).optional(), path: z.enum(TASK_PATHS),
-          pickTargets: z.array(z.string()).optional(), runtime: z.string().nullable().optional(), agent: z.enum(['claude', 'codex', 'opencode']).optional(), note: z.string().nullable().optional(),
+          pickTargets: z.array(z.string()).optional(), runtime: z.string().nullable().optional(), agent: z.enum(['codex']).optional(), note: z.string().nullable().optional(),
         }).parse(args);
         return this.channels.proposeTask(session, { ...a, repo: a.repo ?? null, agent: (a.agent as any) ?? null, runtime: a.runtime ?? null, note: a.note ?? null });
       }

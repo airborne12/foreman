@@ -1,5 +1,7 @@
 # S03: 拍板分流路径并一键启动 agent — 时序图
 
+> 2026-10-01 执行器变更：以 `logos/changes/codex-only/proposal.md` 为准，所有定位、实现、review、调度与扫描会话仅使用 Codex。review 使用独立会话；Codex 满额时排队，启动失败用 Codex 新会话重试，旧执行器会话只能查看历史或开新会话。本文原有多执行器轮换、跨执行器 review 与 Claude 专用步骤由此替代。
+
 > 来源：Phase 1 S03；Phase 2 `core-02-panel-design.md#S03`（S03.1 拍板、S03.2 启动与产物）、`core-03-runtime-cli-design.md#5.2`（worktree 生命周期）
 > 优先级：P0（M1）
 > 触发：收件箱里有一张分流卡等待确认
