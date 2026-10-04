@@ -24,8 +24,8 @@ export function channelRoutes(app: AppContext) {
     return c.json(await app.channels.update(c.req.param('slug'), b));
   });
   r.get('/api/channels/:slug/threads', async (c) => {
-    const q = parseQuery(c, z.object({ state: z.enum(TASK_STATES).optional(), page: z.coerce.number().int().min(1).optional(), perPage: z.coerce.number().int().min(1).max(100).optional() }));
-    return c.json(await app.channels.threads(c.req.param('slug'), q));
+    const q = parseQuery(c, z.object({ state: z.enum(TASK_STATES).optional(), search: z.string().max(200).optional(), activeOnly: z.enum(['true', 'false']).optional(), page: z.coerce.number().int().min(1).optional(), perPage: z.coerce.number().int().min(1).max(100).optional(), throughPage: z.coerce.number().int().min(1).max(100).optional() }));
+    return c.json(await app.channels.threads(c.req.param('slug'), { ...q, activeOnly: q.activeOnly === 'true' }));
   });
   r.get('/api/channels/:slug/messages', async (c) => {
     const q = parseQuery(c, z.object({ after: z.string().optional(), limit: z.coerce.number().int().min(1).max(200).optional() }));

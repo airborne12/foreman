@@ -3,6 +3,7 @@ import { api, errText, PATH_LABEL, EFFORT_LABEL, SESSION_KIND_LABEL, SESSION_STA
 import { navigate, type Shared } from '../app';
 import { AutoTextarea, Btn, Drawer, Empty, Icon, PrioBadge, SourceBadge, StateBadge, Time, useToast } from '../ui';
 import { MessageRow } from './Message';
+import { TaskTree, GroupBadge, taskTrail } from './TaskTree';
 
 /** 线程视图（S01/S03/S07）：任务消息流 + 右栏任务详情；日志在抽屉里看 */
 export function ThreadView({ channel, taskKey, shared }: { channel: string; taskKey: string; shared: Shared }) {
@@ -51,6 +52,7 @@ export function ThreadView({ channel, taskKey, shared }: { channel: string; task
   const hasDoc = task?.artifacts?.some((a: any) => a.kind === 'doc');
   const pendingKeys = task ? new Set<string>((task.pendingApprovals ?? []).map((a: any) => a.key)) : undefined;
   const reason: string | null = task?.queueReason ?? (task?.state === 'failed' ? task?.failureReason : null);
+  const trail = task?.taskTree ? taskTrail(task.taskTree, taskKey) : [];
   return (
     <div className="content">
       <div className="pane">
@@ -69,6 +71,8 @@ export function ThreadView({ channel, taskKey, shared }: { channel: string; task
         </div>
         <div className="pane-body" ref={feedRef} onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }}>
           <div className="feed">
+            {trail.length > 1 && <nav className="task-breadcrumb" aria-label="所属任务路径">{trail.map((node, i) => <span key={node.key}>{i > 0 && <Icon name="chevronRight" size="sm" />}<button onClick={() => navigate(`/c/${node.channel}/t/${node.key}`)} aria-current={node.key === taskKey ? 'page' : undefined}>{node.key}{i === 0 ? ' 原任务' : ''}</button></span>)}</nav>}
+            {task?.taskTree?.children?.length > 0 && <div className="task-group-summary"><span className="small muted">整体进展</span><GroupBadge node={task.taskTree} />{task.taskTree.attentionCount > 0 && <span className="small tree-attention">待处理 {task.taskTree.attentionCount}</span>}<span className="small muted">本任务</span><StateBadge state={task.state} /></div>}
             {reason && (
               <div className={`callout ${task?.state === 'failed' ? 'bad' : 'warn'}`} style={{ marginBottom: 12 }}>
                 <Icon name={task?.state === 'failed' ? 'alert' : 'clock'} />
@@ -113,6 +117,13 @@ export function ThreadView({ channel, taskKey, shared }: { channel: string; task
           </dl>
         </div>
 
+        {task?.taskTree && (
+          <div className="aside-sec">
+            <h4>所属任务树</h4>
+            <TaskTree key={task.taskTree.key} roots={[task.taskTree]} selected={taskKey} />
+          </div>
+        )}
+
         {task?.triageCard && (
           <div className="aside-sec">
             <h4><Icon name="sparkles" size="sm" />分流卡{task.triageCard.degraded && <span className="badge warn">不完整</span>}</h4>
@@ -148,17 +159,6 @@ export function ThreadView({ channel, taskKey, shared }: { channel: string; task
             </div>
           ))}
         </div>
-
-        {!!task?.children?.length && (
-          <div className="aside-sec">
-            <h4>子任务</h4>
-            {task.children.map((c: any) => (
-              <button key={c.key} className="thread-row" onClick={() => navigate(`/c/${c.channel}/t/${c.key}`)}>
-                <span className="k">{c.key}</span><span className="ttl">{c.kind === 'review' ? `review（${c.agent}）` : cleanTitle(c.title)}</span><StateBadge state={c.state} />
-              </button>
-            ))}
-          </div>
-        )}
 
         {!!task?.artifacts?.length && (
           <div className="aside-sec">

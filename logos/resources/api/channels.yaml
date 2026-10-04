@@ -105,11 +105,23 @@ paths:
       operationId: listChannelThreads
       tags: [channels]
       summary: "频道内线程（根任务）列表"
-      description: "来源：S02 Step 16、S04 Step 35。按最近活动倒序。"
+      description: "来源：S02 Step 16、S04 Step 35及task-tree变更。按整组最近活动倒序，分页仅截根任务，返回完整后代。state或search命中后代时保留祖先。"
       parameters:
         - $ref: 'tasks.yaml#/components/parameters/state'
         - $ref: 'tasks.yaml#/components/parameters/page'
         - $ref: 'tasks.yaml#/components/parameters/perPage'
+        - name: activeOnly
+          in: query
+          schema: { type: boolean, default: false }
+          description: "只返回仍有执行或待办的任务组，包括已交付父任务下的活动子任务"
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 200 }
+          description: "任务编号、标题或来源单号的大小写不敏感子串搜索"
+        - name: throughPage
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100 }
+          description: "加载前N页的累计根窗口，忽略page偏移；实时刷新用同一查询快照决定计数和根顺序"
       responses:
         '200':
           description: "线程列表"
@@ -121,8 +133,10 @@ paths:
                 properties:
                   items:
                     type: array
-                    items: { $ref: 'tasks.yaml#/components/schemas/TaskSummary' }
+                    items: { $ref: 'tasks.yaml#/components/schemas/TaskTreeNode' }
                   total: { type: integer }
+                  activeTotal: { type: integer, description: "符合state/search且仍进行中的根任务总数" }
+                  allTotal: { type: integer, description: "符合state/search的根任务总数，不受activeOnly限制" }
         '404': { $ref: 'tasks.yaml#/components/responses/NotFound' }
 
   /api/channels/{slug}/messages:

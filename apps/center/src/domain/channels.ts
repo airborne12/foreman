@@ -71,7 +71,7 @@ export class Channels {
     return this.serialize(r!);
   }
   async serialize(c: any) {
-    const active = Number((await this.db.one<{ n: string }>(`SELECT count(*) AS n FROM tasks WHERE channel_id=$1 AND state NOT IN ('done','paused')`, [c.id]))?.n ?? 0);
+    const active = await this.tasks.trees.activeCount(c.id);
     const pending = Number((await this.db.one<{ n: string }>(`SELECT count(*) AS n FROM approvals a JOIN tasks t ON t.id=a.task_id WHERE t.channel_id=$1 AND a.status='pending'`, [c.id]))?.n ?? 0);
     const d = await this.db.one<any>(`SELECT * FROM sessions WHERE channel_id=$1 AND kind='dispatcher' ORDER BY created_at DESC LIMIT 1`, [c.id]);
     return {
@@ -82,14 +82,9 @@ export class Channels {
     };
   }
 
-  async threads(slug: string, q: { state?: string; page?: number; perPage?: number }) {
+  async threads(slug: string, q: { state?: string; search?: string; activeOnly?: boolean; page?: number; perPage?: number; throughPage?: number }) {
     const c = await this.bySlug(slug);
-    const where: string[] = ['t.channel_id=$1', 't.parent_id IS NULL']; const params: unknown[] = [c.id];
-    if (q.state) { params.push(q.state); where.push(`t.state=$${params.length}`); }
-    const per = Math.min(Math.max(q.perPage ?? 20, 1), 100); const page = Math.max(q.page ?? 1, 1);
-    const total = await this.db.one<{ n: string }>(`SELECT count(*) AS n FROM tasks t WHERE ${where.join(' AND ')}`, params);
-    const rows = await this.db.query<any>(`SELECT t.* FROM tasks t WHERE ${where.join(' AND ')} ORDER BY t.last_activity_at DESC LIMIT ${per} OFFSET ${(page - 1) * per}`, params);
-    return { items: await Promise.all(rows.rows.map((t) => this.tasks.serializeSummary(t, c.slug))), total: Number(total?.n ?? 0) };
+    return this.tasks.trees.channel(c.id, q);
   }
 
   /** 频道级消息流（不含线程内消息） */

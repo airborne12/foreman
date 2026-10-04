@@ -7,8 +7,10 @@ import type { Clock } from '../clock.js';
 import type { EventBus } from '../events.js';
 import { ApiError, routeTask, routingCategory, type CenterConfig } from '@foreman/shared';
 import type { Runtimes } from './runtimes.js';
+import { TaskTrees } from './taskTree.js';
 
 export class Tasks {
+  get trees() { return new TaskTrees(this.db); }
   constructor(private db: Db, private clock: Clock, private events: EventBus, private cfg: CenterConfig, private runtimes: Runtimes) {}
 
   /** 来源默认频道：不存在则创建（Phase 2 假设） */
@@ -143,6 +145,7 @@ export class Tasks {
     const oq = await this.db.one<any>(`SELECT * FROM questions WHERE task_id=$1 AND status='open' ORDER BY asked_at DESC LIMIT 1`, [t.id]);
     return {
       ...base,
+      taskTree: await this.trees.forTask(key),
       contextPack: cp ? { summary: cp.summary, sourceText: cp.source_text, conversation: cp.conversation ?? [], jira: cp.jira ?? null, repo: base.repo, codeLocations: cp.code_locations ?? [], planDoc: cp.plan_doc ?? null, partial: cp.partial } : null,
       triageCard: card ? { tier: card.tier, effort: card.effort, repo: { name: card.repo_name, confidence: card.repo_confidence == null ? null : Number(card.repo_confidence), candidates: card.repo_candidates ?? [] }, suggestedPath: card.suggested_path, codeLocations: card.code_locations ?? [], defaultRuntime: card.default_runtime, defaultAgent: card.default_agent, degraded: card.degraded, degradedReason: card.degraded_reason, approvalKey: card.approval_key ?? null } : null,
       children: await Promise.all(children.rows.map((r) => this.serializeSummary(r, r.channel_slug))),
